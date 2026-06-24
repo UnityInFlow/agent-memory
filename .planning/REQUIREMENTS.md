@@ -74,32 +74,32 @@ Explicitly excluded. Anti-features from research recorded here to prevent scope 
 
 ## Traceability
 
-Populated during roadmap creation (gsd-roadmapper). Each requirement maps to exactly one phase.
+Each v1 requirement maps to exactly one phase.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STORE-01 | — | Pending |
-| STORE-02 | — | Pending |
-| STORE-03 | — | Pending |
-| STORE-04 | — | Pending |
-| MCP-01 | — | Pending |
-| MCP-02 | — | Pending |
-| MCP-03 | — | Pending |
-| MCP-04 | — | Pending |
-| MCP-05 | — | Pending |
-| SEARCH-01 | — | Pending |
-| SEARCH-02 | — | Pending |
-| SEARCH-03 | — | Pending |
-| API-01 | — | Pending |
-| INTEROP-01 | — | Pending |
-| DIST-01 | — | Pending |
-| DIST-02 | — | Pending |
+| STORE-01 | Phase 1 | Pending |
+| STORE-02 | Phase 1 | Pending |
+| STORE-03 | Phase 1 | Pending |
+| STORE-04 | Phase 1 | Pending |
+| MCP-01 | Phase 1 | Pending |
+| MCP-02 | Phase 1 | Pending |
+| MCP-03 | Phase 1 | Pending |
+| MCP-04 | Phase 1 | Pending |
+| MCP-05 | Phase 1 | Pending |
+| SEARCH-01 | Phase 1 | Pending |
+| SEARCH-02 | Phase 2 | Pending |
+| SEARCH-03 | Phase 2 | Pending |
+| API-01 | Phase 2 | Pending |
+| INTEROP-01 | Phase 2 | Pending |
+| DIST-01 | Phase 2 | Pending |
+| DIST-02 | Phase 2 | Pending |
 
 **Coverage:**
 - v1 requirements: 16 total
-- Mapped to phases: 0 (roadmapper to fill)
-- Unmapped: 16 ⚠️
+- Mapped to phases: 16 (Phase 1: 10, Phase 2: 6)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-06-24*
-*Last updated: 2026-06-24 after initial definition*
+*Last updated: 2026-06-24 after roadmap creation (traceability populated)*
