@@ -1,0 +1,105 @@
+# Requirements: agent-memory
+
+**Defined:** 2026-06-24
+**Core Value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
+
+## v1 Requirements
+
+Requirements for the v0.0.1 release. Each maps to a roadmap phase.
+
+### Storage (STORE)
+
+- [ ] **STORE-01**: Agent can store a memory with a type (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT), content, and metadata (tags, source, scope) in embedded SQLite
+- [ ] **STORE-02**: Stored memories survive process restarts — durable local SQLite, no cloud and no account required
+- [ ] **STORE-03**: Each memory carries a decay score that decreases over time based on recency/usage (exponential decay), and the score is surfaced in results
+- [ ] **STORE-04**: A memory can be given a TTL after which it expires and is removed; decay only down-ranks and never deletes (TTL and explicit forget are the only removal paths)
+
+### MCP Interface (MCP)
+
+- [ ] **MCP-01**: Agent can call `memory_store` to persist a typed memory and receive its id
+- [ ] **MCP-02**: Agent can call `memory_search` to retrieve relevant memories ranked by relevance/decay
+- [ ] **MCP-03**: Agent can call `memory_list` to enumerate memories with filters (type, tag, scope, limit)
+- [ ] **MCP-04**: Agent can call `memory_forget` to delete a memory by id
+- [ ] **MCP-05**: The MCP server runs over stdio without corrupting the protocol — all logging goes to stderr and every stdout line is valid JSON-RPC
+
+### Search (SEARCH)
+
+- [ ] **SEARCH-01**: Agent can find memories by keyword/full-text search (FTS5) with no embedding model required
+- [ ] **SEARCH-02**: Agent can find memories by semantic similarity using local Ollama embeddings (`nomic-embed-text`)
+- [ ] **SEARCH-03**: When Ollama is unavailable, search degrades gracefully to keyword search instead of failing or returning empty
+
+### REST API (API)
+
+- [ ] **API-01**: A REST API exposes store/search/list/forget for non-MCP integrations
+
+### Interop (INTEROP)
+
+- [ ] **INTEROP-01**: User can import memories from a GSD STATE.md file (`agent-memory import --from gsd-state .planning/STATE.md`)
+
+### Distribution (DIST)
+
+- [ ] **DIST-01**: Pre-built binaries are published for macOS (arm64/x86_64) and Linux (x86_64/aarch64)
+- [ ] **DIST-02**: A Homebrew formula installs the binary
+
+## v2 Requirements
+
+Acknowledged but deferred — not in the current roadmap.
+
+### Search
+
+- **SEARCH-04**: Hybrid search — reciprocal-rank fusion of keyword + semantic results
+
+### Interface
+
+- **MCP-06**: `memory_update` and relation/link tools
+
+### Distribution
+
+- **DIST-03**: Pre-built Windows binaries (deferred per the `mcp-hub` `cfg(unix)` cross-compile precedent — needs a CLI refactor)
+- **DIST-04**: Export memories to a portable file
+
+## Out of Scope
+
+Explicitly excluded. Anti-features from research recorded here to prevent scope creep.
+
+| Feature | Reason |
+|---------|--------|
+| Cloud/hosted backend or required account | Defeats the zero-dependency, local-first core value |
+| Remote embedding providers (OpenAI/Anthropic) | Ollama keeps it fully local; remote is at most a later opt-in |
+| Full knowledge-graph model (entities/relations) | The MCP reference server's graph shape confuses agents; flat typed records are the right call |
+| LLM-on-write fact extraction (Mem0 `add` pipeline) | Heavy, non-local, and slow on store; out of scope for a local daemon |
+| ANN vector index | Brute-force exact KNN is sufficient at local-memory scale |
+| JVM/Python runtime dependency | Rust chosen for a dependency-free, low-footprint daemon |
+| Web UI / RBAC | Backend + CLI + MCP first; no frontend until backend is tested |
+
+## Traceability
+
+Populated during roadmap creation (gsd-roadmapper). Each requirement maps to exactly one phase.
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| STORE-01 | — | Pending |
+| STORE-02 | — | Pending |
+| STORE-03 | — | Pending |
+| STORE-04 | — | Pending |
+| MCP-01 | — | Pending |
+| MCP-02 | — | Pending |
+| MCP-03 | — | Pending |
+| MCP-04 | — | Pending |
+| MCP-05 | — | Pending |
+| SEARCH-01 | — | Pending |
+| SEARCH-02 | — | Pending |
+| SEARCH-03 | — | Pending |
+| API-01 | — | Pending |
+| INTEROP-01 | — | Pending |
+| DIST-01 | — | Pending |
+| DIST-02 | — | Pending |
+
+**Coverage:**
+- v1 requirements: 16 total
+- Mapped to phases: 0 (roadmapper to fill)
+- Unmapped: 16 ⚠️
+
+---
+*Requirements defined: 2026-06-24*
+*Last updated: 2026-06-24 after initial definition*
