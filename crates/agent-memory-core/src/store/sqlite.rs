@@ -17,9 +17,13 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
 use rusqlite_migration::Migrations;
 
+use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
 use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
-use crate::service::ListArgs;
+use crate::service::{ListArgs, SearchArgs};
 use crate::store::{migrations::migrations, Store};
+
+/// Default cap on returned search rows when the caller omits `limit` (T-02-04).
+const DEFAULT_SEARCH_LIMIT: i64 = 50;
 
 /// Apply the per-connection PRAGMAs that every connection (writer + pool) needs.
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -31,13 +35,38 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Register an `exp(x)` scalar function on the connection.
+///
+/// The bundled SQLite is not guaranteed to be compiled with
+/// `SQLITE_ENABLE_MATH_FUNCTIONS`, so the decay blend in `search` (which needs
+/// `exp`) cannot rely on a built-in. We register a deterministic, side-effect-free
+/// `exp` so the recompute-on-read ranking math runs inside the `ORDER BY`.
+fn register_functions(conn: &Connection) -> Result<(), rusqlite::Error> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "exp",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let x: f64 = ctx.get(0)?;
+            Ok(x.exp())
+        },
+    )
+}
+
+/// Apply both the PRAGMAs and the registered scalar functions to a connection.
+fn prepare_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
+    apply_pragmas(conn)?;
+    register_functions(conn)
+}
+
 /// A pool customizer that runs [`apply_pragmas`] on each pooled read connection.
 #[derive(Debug)]
 struct PragmaCustomizer;
 
 impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
     fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
-        apply_pragmas(conn)
+        prepare_connection(conn)
     }
 }
 
@@ -52,7 +81,7 @@ impl SqliteStore {
     /// writer, and build the read pool. Confirms FTS5 is compiled in.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
         let mut writer = Connection::open(path)?;
-        apply_pragmas(&writer)?;
+        prepare_connection(&writer)?;
 
         let migrations: Migrations<'static> = migrations();
         migrations.to_latest(&mut writer)?;
@@ -154,5 +183,99 @@ impl Store for SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn search(
+        &self,
+        args: SearchArgs,
+        now: i64,
+        weights: RankWeights,
+        cfg: DecayConfig,
+    ) -> Result<Vec<MemoryView>, MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        let mem_type_filter: Option<String> = args.mem_type.map(|t| t.as_wire_str().to_string());
+        let limit = args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let pinned_hl = cfg.half_life_secs * PINNED_HALF_LIFE_MULTIPLIER;
+
+        // CRITICAL sign rule (RESEARCH Pattern 3): bm25() is SMALLER = better, so
+        // negate it before blending additively with the decay term (larger =
+        // better). The decay term is recomputed inline from last_accessed at `now`
+        // (recompute-on-read, Open Question 3) rather than the materialised column,
+        // so a recency bump immediately re-ranks. The CASE picks the longer
+        // half-life for pinned types (DECISION/ARCHITECTURE/CONSTRAINT, D-08).
+        // All params bound — the FTS5 MATCH string is never concatenated (T-02-01).
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
+                    m.base_weight, m.decay_score, m.access_count, m.created_at, \
+                    m.last_accessed, m.expires_at \
+             FROM memories_fts \
+             JOIN memories m ON m.id = memories_fts.rowid \
+             WHERE memories_fts MATCH ?1 \
+               AND (?2 IS NULL OR m.mem_type = ?2) \
+               AND (?3 IS NULL OR m.scope = ?3) \
+             ORDER BY ( (-bm25(memories_fts)) * ?4 \
+                        + exp( -0.6931471805599453 * MAX(?6 - m.last_accessed, 0) \
+                               / (CASE WHEN m.mem_type IN \
+                                    ('DECISION','ARCHITECTURE','CONSTRAINT') \
+                                  THEN ?8 ELSE ?7 END) ) * ?5 \
+                      ) DESC \
+             LIMIT ?9",
+        )?;
+
+        let rows = stmt.query_map(
+            params![
+                args.query,
+                mem_type_filter,
+                args.scope,
+                weights.relevance,
+                weights.decay,
+                now,
+                cfg.half_life_secs,
+                pinned_hl,
+                limit,
+            ],
+            row_to_view,
+        );
+
+        // A malformed FTS5 MATCH string surfaces here as a typed Sqlite error,
+        // which the service maps to a clean invalid-params error — no panic
+        // (T-02-02). A valid query that matches nothing yields an empty vec.
+        let rows = rows?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn forget(&self, id: i64) -> Result<bool, MemoryError> {
+        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        // Parameterized DELETE; the FTS5 delete trigger keeps the mirror in sync.
+        let changed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
+    fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        // Build a parameterized IN-list (?2, ?3, …); ?1 is `now`. The ids are
+        // bound, never string-formatted into the SQL (T-02-01).
+        let placeholders: String = (0..ids.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE memories SET last_accessed = ?1, access_count = access_count + 1 \
+             WHERE id IN ({placeholders})"
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
+        params.push(&now);
+        for id in ids {
+            params.push(id);
+        }
+        conn.execute(&sql, params.as_slice())?;
+        Ok(())
     }
 }

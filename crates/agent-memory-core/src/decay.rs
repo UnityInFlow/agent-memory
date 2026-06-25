@@ -4,8 +4,11 @@
 //! `memory_forget` exclusively, STORE-04). Pinned types (D-08) use a longer
 //! half-life so high-value memories fade much more slowly.
 //!
-//! Phase 1 lands only the pure scoring function and its config. The sweep engine
-//! that materialises `decay_score` and the search-time surfacing are Plans 02/03.
+//! Phase 1 lands the pure scoring function and its config (Plan 01), plus the
+//! on-read decay surfacing and ranking weights used by `memory_search` (Plan 02).
+//! The background sweep that materialises `decay_score` is Plan 03.
+
+use crate::domain::MemoryView;
 
 /// How long, in seconds, until a non-pinned memory's score halves (D-09).
 /// Default: 30 days.
@@ -44,6 +47,44 @@ pub fn decay_score(now: i64, last_accessed: i64, half_life_secs: f64, pinned: bo
     };
     // exp(-ln2 * elapsed / half_life): score halves every half_life.
     (-std::f64::consts::LN_2 * elapsed / half_life).exp()
+}
+
+/// Default weight given to FTS5/bm25 relevance when blending with decay (D-04).
+pub const DEFAULT_RELEVANCE_WEIGHT: f64 = 1.0;
+/// Default weight given to the decay score when blending with relevance (D-04).
+pub const DEFAULT_DECAY_WEIGHT: f64 = 1.0;
+
+/// Weights for the `memory_search` ranking blend (D-04).
+///
+/// The blended score is `(-bm25) * relevance + decay_score * decay` — bm25 is
+/// negated (smaller = better) so both terms grow with a *better* result. The
+/// defaults are good out of the box and overridable by configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RankWeights {
+    /// Weight applied to the (negated) bm25 relevance term.
+    pub relevance: f64,
+    /// Weight applied to the decay-score term.
+    pub decay: f64,
+}
+
+impl Default for RankWeights {
+    fn default() -> Self {
+        RankWeights {
+            relevance: DEFAULT_RELEVANCE_WEIGHT,
+            decay: DEFAULT_DECAY_WEIGHT,
+        }
+    }
+}
+
+/// Recompute a [`MemoryView`]'s `decay_score` on read, from its `last_accessed`
+/// timestamp and the configured half-life, honoring per-type pinning (D-08).
+///
+/// This overwrites whatever materialised value the row carried so search results
+/// always surface a correct, up-to-the-moment decay score (STORE-03) even between
+/// background sweeps.
+pub fn apply_decay(view: &mut MemoryView, now: i64, cfg: &DecayConfig) {
+    let pinned = view.mem_type.is_pinned();
+    view.decay_score = decay_score(now, view.last_accessed, cfg.half_life_secs, pinned);
 }
 
 #[cfg(test)]

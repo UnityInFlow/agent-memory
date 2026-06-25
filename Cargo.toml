@@ -16,7 +16,9 @@ rmcp = { version = "1.8", features = ["server", "transport-io", "macros"] }
 # Pinned to 0.39 (not the research-suggested 0.40) so it shares the same
 # `libsqlite3-sys` (0.37) as `r2d2_sqlite 0.34`, which depends on `rusqlite ^0.39`.
 # 0.40 pulls libsqlite3-sys 0.38, producing a `links = "sqlite3"` conflict.
-rusqlite = { version = "0.39", features = ["bundled"] }
+# `functions` enables create_scalar_function — the bundled SQLite is not built
+# with SQLITE_ENABLE_MATH_FUNCTIONS, so we register `exp` for the decay blend.
+rusqlite = { version = "0.39", features = ["bundled", "functions"] }
 # rusqlite_migration 2.5 tracks rusqlite ^0.39 (2.6 jumps to ^0.40); pinning 2.5
 # keeps the whole graph on one `libsqlite3-sys` (0.37) — see rusqlite note above.
 rusqlite_migration = "2.5"

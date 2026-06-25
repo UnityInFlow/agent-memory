@@ -5,12 +5,12 @@
 //! injected [`Clock`], and wraps every blocking store call in `spawn_blocking` so
 //! the async runtime is never blocked (RESEARCH Pitfall 2).
 //!
-//! `search`, `forget`, and the decay sweep are added in Plans 02/03.
+//! `search` and `forget` land in Plan 02; the decay sweep is Plan 03.
 
 use std::sync::Arc;
 
 use crate::clock::Clock;
-use crate::decay::DecayConfig;
+use crate::decay::{apply_decay, DecayConfig, RankWeights};
 use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
 use crate::store::Store;
 
@@ -24,13 +24,23 @@ pub struct ListArgs {
     pub limit: Option<i64>,
 }
 
+/// Arguments for [`MemoryService::search`]. `query` is the FTS5 MATCH string; the
+/// remaining fields are optional filters and a result cap.
+#[derive(Debug, Clone, Default)]
+pub struct SearchArgs {
+    pub query: String,
+    pub mem_type: Option<MemoryType>,
+    pub tag: Option<String>,
+    pub scope: Option<String>,
+    pub limit: Option<i64>,
+}
+
 /// The core memory service: validates input, stamps timestamps from the injected
 /// clock, and delegates persistence to the [`Store`].
 #[derive(Clone)]
 pub struct MemoryService {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
-    #[allow(dead_code)] // consumed by the decay sweep in Plan 03
     decay_cfg: DecayConfig,
 }
 
@@ -62,6 +72,53 @@ impl MemoryService {
         let store = self.store.clone();
         let now = self.clock.now();
         tokio::task::spawn_blocking(move || store.list(args, now))
+            .await
+            .map_err(MemoryError::Join)?
+    }
+
+    /// Keyword-search the corpus (MCP-02 / SEARCH-01 / D-04).
+    ///
+    /// Runs the blocking FTS5 + bm25×decay query on a `spawn_blocking` thread,
+    /// recomputes each result's `decay_score` on read from `last_accessed`
+    /// (STORE-03 surfaced), then fires a fire-and-forget recency bump on the
+    /// returned ids through the writer lane (Open Question 2). A query that
+    /// matches nothing returns `Ok(vec![])` — never an error. No network call is
+    /// made on this path (keyword-only; Ollama is Phase 2).
+    pub async fn search(&self, args: SearchArgs) -> Result<Vec<MemoryView>, MemoryError> {
+        let store = self.store.clone();
+        let now = self.clock.now();
+        let cfg = self.decay_cfg;
+        let weights = RankWeights::default();
+
+        let mut views = tokio::task::spawn_blocking(move || store.search(args, now, weights, cfg))
+            .await
+            .map_err(MemoryError::Join)??;
+
+        // Recompute decay on read so results carry an up-to-the-moment score even
+        // between background sweeps (STORE-03).
+        for view in &mut views {
+            apply_decay(view, now, &cfg);
+        }
+
+        // Fire-and-forget recency bump: retrieving a memory bumps its
+        // last_accessed/access_count so it surfaces higher next time. A failure
+        // here must not fail the search.
+        let ids: Vec<i64> = views.iter().map(|v| v.id).collect();
+        if !ids.is_empty() {
+            let store = self.store.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = store.bump_access(&ids, now);
+            });
+        }
+
+        Ok(views)
+    }
+
+    /// Delete a memory by id (MCP-04 / D-06). Returns `true` if a row was deleted,
+    /// `false` for an unknown id (clean not-found, never an error).
+    pub async fn forget(&self, id: i64) -> Result<bool, MemoryError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.forget(id))
             .await
             .map_err(MemoryError::Join)?
     }
