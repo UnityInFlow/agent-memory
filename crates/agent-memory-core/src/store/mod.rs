@@ -45,4 +45,17 @@ pub trait Store: Send + Sync {
     /// Bump the recency of the given ids: set `last_accessed = now` and increment
     /// `access_count`. Runs on the writer lane. A no-op for an empty id slice.
     fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError>;
+
+    /// Delete every TTL-expired row (`expires_at IS NOT NULL AND expires_at < now`)
+    /// on the writer lane, returning the number of rows removed. Rows with a NULL
+    /// `expires_at` are never touched. This is the ONLY delete the sweep performs —
+    /// decay materialization is structurally forbidden from deleting (STORE-04 /
+    /// Pitfall 7). The FTS5 delete trigger keeps `memories_fts` in sync.
+    fn sweep_expired(&self, now: i64) -> Result<usize, MemoryError>;
+
+    /// Recompute and persist each surviving row's `decay_score` column at `now`,
+    /// honoring the per-type pinned half-life (D-08), returning the number of rows
+    /// updated. This is an UPDATE-only operation — it never deletes — so ranking
+    /// stays cheap between reads while STORE-04 holds (decay never removes).
+    fn materialize_decay(&self, now: i64, cfg: &DecayConfig) -> Result<usize, MemoryError>;
 }

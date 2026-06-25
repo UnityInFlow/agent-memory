@@ -278,4 +278,35 @@ impl Store for SqliteStore {
         conn.execute(&sql, params.as_slice())?;
         Ok(())
     }
+
+    fn sweep_expired(&self, now: i64) -> Result<usize, MemoryError> {
+        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        // The ONLY delete the sweep performs (STORE-04). Bound predicate: NULL
+        // `expires_at` rows are never matched, so a no-TTL memory is never removed
+        // here. The FTS5 AFTER DELETE trigger keeps the mirror in sync.
+        let deleted = conn.execute(
+            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![now],
+        )?;
+        Ok(deleted)
+    }
+
+    fn materialize_decay(&self, now: i64, cfg: &DecayConfig) -> Result<usize, MemoryError> {
+        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let pinned_hl = cfg.half_life_secs * PINNED_HALF_LIFE_MULTIPLIER;
+        // UPDATE-only: recompute decay_score inline from last_accessed at `now`,
+        // using the SAME exp/half-life math as the on-read search blend so the
+        // materialized column matches the recompute-on-read value exactly
+        // (STORE-03). The CASE selects the longer pinned half-life (D-08). This
+        // statement physically cannot delete a row — decay never removes (STORE-04).
+        let updated = conn.execute(
+            "UPDATE memories SET decay_score = \
+               exp( -0.6931471805599453 * MAX(?1 - last_accessed, 0) \
+                    / (CASE WHEN mem_type IN \
+                         ('DECISION','ARCHITECTURE','CONSTRAINT') \
+                       THEN ?3 ELSE ?2 END) )",
+            params![now, cfg.half_life_secs, pinned_hl],
+        )?;
+        Ok(updated)
+    }
 }

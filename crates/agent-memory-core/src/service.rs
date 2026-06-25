@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::clock::Clock;
-use crate::decay::{apply_decay, DecayConfig, RankWeights};
+use crate::decay::{apply_decay, DecayConfig, DecayEngine, RankWeights, SweepReport};
 use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
 use crate::store::Store;
 
@@ -119,6 +119,21 @@ impl MemoryService {
     pub async fn forget(&self, id: i64) -> Result<bool, MemoryError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.forget(id))
+            .await
+            .map_err(MemoryError::Join)?
+    }
+
+    /// Run one lifecycle sweep at `now` (STORE-04): delete TTL-expired rows, then
+    /// materialize every survivor's `decay_score` so ranking stays cheap between
+    /// reads. Decay never deletes — only TTL expiry (here) and `forget` remove.
+    ///
+    /// Driven by the injected clock so it is deterministic under test; exposed for
+    /// both the background interval task and `tests/ttl.rs`. The blocking
+    /// `DecayEngine::sweep` runs on a `spawn_blocking` thread (Pitfall 2).
+    pub async fn sweep(&self, now: i64) -> Result<SweepReport, MemoryError> {
+        let store = self.store.clone();
+        let engine = DecayEngine::new(self.decay_cfg);
+        tokio::task::spawn_blocking(move || engine.sweep(store.as_ref(), now))
             .await
             .map_err(MemoryError::Join)?
     }

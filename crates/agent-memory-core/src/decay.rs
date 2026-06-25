@@ -8,7 +8,8 @@
 //! on-read decay surfacing and ranking weights used by `memory_search` (Plan 02).
 //! The background sweep that materialises `decay_score` is Plan 03.
 
-use crate::domain::MemoryView;
+use crate::domain::{MemoryError, MemoryView};
+use crate::store::Store;
 
 /// How long, in seconds, until a non-pinned memory's score halves (D-09).
 /// Default: 30 days.
@@ -85,6 +86,45 @@ impl Default for RankWeights {
 pub fn apply_decay(view: &mut MemoryView, now: i64, cfg: &DecayConfig) {
     let pinned = view.mem_type.is_pinned();
     view.decay_score = decay_score(now, view.last_accessed, cfg.half_life_secs, pinned);
+}
+
+/// Outcome of a single [`DecayEngine::sweep`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SweepReport {
+    /// Rows removed because their TTL had expired (`expires_at < now`).
+    pub expired: usize,
+    /// Surviving rows whose materialized `decay_score` column was re-computed.
+    pub rescored: usize,
+}
+
+/// The background lifecycle engine: TTL expiry followed by decay materialization.
+///
+/// `sweep` runs in a fixed, deliberate order — **TTL delete FIRST, then re-score
+/// the survivors**. The two phases are distinct [`Store`] calls: [`Store::sweep_expired`]
+/// is the only one that deletes, and [`Store::materialize_decay`] is UPDATE-only.
+/// This structure is what enforces the STORE-04 invariant (RESEARCH Pitfall 7):
+/// decay materialization physically cannot remove a row, so a near-zero-decay
+/// memory without a TTL is never deleted — only TTL and `memory_forget` remove.
+#[derive(Debug, Clone, Copy)]
+pub struct DecayEngine {
+    cfg: DecayConfig,
+}
+
+impl DecayEngine {
+    /// Construct an engine with the given decay configuration.
+    pub fn new(cfg: DecayConfig) -> Self {
+        DecayEngine { cfg }
+    }
+
+    /// Run one sweep against `store` at `now`: delete TTL-expired rows, then
+    /// materialize the decay score of every survivor. Returns counts for logging.
+    pub fn sweep(&self, store: &dyn Store, now: i64) -> Result<SweepReport, MemoryError> {
+        // TTL delete FIRST so we never waste work re-scoring rows about to vanish,
+        // and so the survivor set is final before materialization.
+        let expired = store.sweep_expired(now)?;
+        let rescored = store.materialize_decay(now, &self.cfg)?;
+        Ok(SweepReport { expired, rescored })
+    }
 }
 
 #[cfg(test)]
