@@ -11,20 +11,20 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 
 - [ ] **STORE-01**: Agent can store a memory with a type (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT), content, and metadata (tags, source, scope) in embedded SQLite
 - [ ] **STORE-02**: Stored memories survive process restarts — durable local SQLite, no cloud and no account required
-- [ ] **STORE-03**: Each memory carries a decay score that decreases over time based on recency/usage (exponential decay), and the score is surfaced in results
+- [x] **STORE-03**: Each memory carries a decay score that decreases over time based on recency/usage (exponential decay), and the score is surfaced in results
 - [ ] **STORE-04**: A memory can be given a TTL after which it expires and is removed; decay only down-ranks and never deletes (TTL and explicit forget are the only removal paths)
 
 ### MCP Interface (MCP)
 
 - [ ] **MCP-01**: Agent can call `memory_store` to persist a typed memory and receive its id
-- [ ] **MCP-02**: Agent can call `memory_search` to retrieve relevant memories ranked by relevance/decay
+- [x] **MCP-02**: Agent can call `memory_search` to retrieve relevant memories ranked by relevance/decay
 - [ ] **MCP-03**: Agent can call `memory_list` to enumerate memories with filters (type, tag, scope, limit)
-- [ ] **MCP-04**: Agent can call `memory_forget` to delete a memory by id
+- [x] **MCP-04**: Agent can call `memory_forget` to delete a memory by id
 - [ ] **MCP-05**: The MCP server runs over stdio without corrupting the protocol — all logging goes to stderr and every stdout line is valid JSON-RPC
 
 ### Search (SEARCH)
 
-- [ ] **SEARCH-01**: Agent can find memories by keyword/full-text search (FTS5) with no embedding model required
+- [x] **SEARCH-01**: Agent can find memories by keyword/full-text search (FTS5) with no embedding model required
 - [ ] **SEARCH-02**: Agent can find memories by semantic similarity using local Ollama embeddings (`nomic-embed-text`)
 - [ ] **SEARCH-03**: When Ollama is unavailable, search degrades gracefully to keyword search instead of failing or returning empty
 
@@ -80,14 +80,14 @@ Each v1 requirement maps to exactly one phase.
 |-------------|-------|--------|
 | STORE-01 | Phase 1 | Pending |
 | STORE-02 | Phase 1 | Pending |
-| STORE-03 | Phase 1 | Pending |
+| STORE-03 | Phase 1 | Complete |
 | STORE-04 | Phase 1 | Pending |
 | MCP-01 | Phase 1 | Pending |
-| MCP-02 | Phase 1 | Pending |
+| MCP-02 | Phase 1 | Complete |
 | MCP-03 | Phase 1 | Pending |
-| MCP-04 | Phase 1 | Pending |
+| MCP-04 | Phase 1 | Complete |
 | MCP-05 | Phase 1 | Pending |
-| SEARCH-01 | Phase 1 | Pending |
+| SEARCH-01 | Phase 1 | Complete |
 | SEARCH-02 | Phase 2 | Pending |
 | SEARCH-03 | Phase 2 | Pending |
 | API-01 | Phase 2 | Pending |
@@ -96,6 +96,7 @@ Each v1 requirement maps to exactly one phase.
 | DIST-02 | Phase 2 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 16 total
 - Mapped to phases: 16 (Phase 1: 10, Phase 2: 6)
 - Unmapped: 0 ✓

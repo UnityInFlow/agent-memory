@@ -35,7 +35,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — FTS5 keyword search (bm25×decay) + memory_forget + decay surfacing (MCP-02/04, SEARCH-01, STORE-03)
+- [x] 01-02-PLAN.md — FTS5 keyword search (bm25×decay) + memory_forget + decay surfacing (MCP-02/04, SEARCH-01, STORE-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -64,5 +64,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Memory Foundation | 1/3 | In progress | - |
+| 1. Core Memory Foundation | 2/3 | In Progress|  |
 | 2. Semantic Search, Interop & Release | 0/TBD | Not started | - |

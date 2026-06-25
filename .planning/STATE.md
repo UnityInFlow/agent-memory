@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-01-PLAN.md (walking skeleton)
-last_updated: "2026-06-25T19:52:00.000Z"
-last_activity: 2026-06-25 -- Plan 01-01 complete (workspace + SQLite store + rmcp stdio server)
+stopped_at: Completed 01-02-PLAN.md (search + forget + decay surfacing)
+last_updated: "2026-06-25T20:02:43.756Z"
+last_activity: 2026-06-25 -- Plan 01-02 complete (memory_search + memory_forget + on-read decay)
 progress:
   total_phases: 2
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
-  percent: 17
+  completed_plans: 2
+  percent: 67
 ---
 
 # Project State
@@ -26,25 +26,25 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 ## Current Position
 
 Phase: 1 (core-memory-foundation) — EXECUTING
-Plan: 2 of 3 (01-01 complete)
-Status: Executing Phase 1
-Last activity: 2026-06-25 -- Plan 01-01 complete (walking skeleton)
+Plan: 3 of 3 (01-01, 01-02 complete)
+Status: Ready to execute 01-03 (decay/TTL sweep)
+Last activity: 2026-06-25 -- Plan 01-02 complete (memory_search + memory_forget + on-read decay)
 
-Progress: [██░░░░░░░░] 17%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: — min
-- Total execution time: 0 hours
+- Total plans completed: 2
+- Average duration: ~33 min
+- Total execution time: ~1.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 1 | ~35 min | ~35 min |
+| 1 | 2 | ~65 min | ~33 min |
 
 **Recent Trend:**
 
@@ -66,6 +66,9 @@ Recent decisions affecting current work:
 - [01-01]: Pinned `rusqlite 0.39` + `rusqlite_migration 2.5` (not research-suggested 0.40/2.6) so the whole graph shares one `libsqlite3-sys` (0.37) with `r2d2_sqlite 0.34` — 0.40/2.6 cause a `links = "sqlite3"` resolver conflict. Same audited crates, compatible pins.
 - [01-01]: `test-clock` feature enabled for tests via a self dev-dependency so verify commands need no `--features`; production consumers never get the feature.
 - [01-01]: rmcp 1.8 specifics — `ServerInfo` is `#[non_exhaustive]` (build from `Default` + field set); use `#[tool_handler(router = self.tool_router)]` to avoid a dead-code warning under `clippy -D warnings`.
+- [01-02]: `memory_search` recomputes decay **inline** in the SQL `ORDER BY` from `last_accessed` (recompute-on-read, Open Question 3) instead of the materialised `decay_score` column — so a recency bump re-ranks immediately, independent of the Plan-03 sweep. The `Store::search` signature takes `DecayConfig`.
+- [01-02]: Registered a custom `exp()` SQLite scalar fn + enabled the rusqlite `functions` feature — the bundled SQLite lacks `SQLITE_ENABLE_MATH_FUNCTIONS` (inline decay blend failed with `no such function: exp`).
+- [01-02]: Recency bump is fire-and-forget on a detached `spawn_blocking` task (Open Question 2); `memory_forget` returns `Ok(false)` as a clean not-found tool result, never a JSON-RPC error.
 
 ### Pending Todos
 
@@ -98,6 +101,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-06-25T19:52:00.000Z
-Stopped at: Completed 01-01-PLAN.md (walking skeleton)
-Resume file: .planning/phases/01-core-memory-foundation/01-02-PLAN.md
+Last session: 2026-06-25T20:02:43.749Z
+Stopped at: Completed 01-02-PLAN.md (search + forget + decay surfacing)
+Resume file: .planning/phases/01-core-memory-foundation/01-03-PLAN.md
