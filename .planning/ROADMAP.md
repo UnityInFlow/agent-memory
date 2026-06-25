@@ -31,7 +31,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Walking skeleton: Cargo workspace + SQLite store (schema/WAL/FTS5 mirror) + rmcp stdio server with memory_store/memory_list; Wave-0 test harness (STORE-01/02, MCP-01/03/05)
+- [x] 01-01-PLAN.md — Walking skeleton: Cargo workspace + SQLite store (schema/WAL/FTS5 mirror) + rmcp stdio server with memory_store/memory_list; Wave-0 test harness (STORE-01/02, MCP-01/03/05) ✅ 2026-06-25
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -64,5 +64,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Memory Foundation | 0/3 | Planned | - |
+| 1. Core Memory Foundation | 1/3 | In progress | - |
 | 2. Semantic Search, Interop & Release | 0/TBD | Not started | - |
