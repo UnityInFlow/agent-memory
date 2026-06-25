@@ -521,22 +521,24 @@ pub fn decay_score(now: i64, last_accessed: i64, half_life_secs: f64, pinned: bo
 
 **These are LOW/MEDIUM risk; all align with Claude's-Discretion areas in CONTEXT.md.** The only one worth a planner glance is A4 (id type), because the chosen id is returned to agents over the tool boundary.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All three are LOW/MEDIUM-risk discretion items; each recommendation was adopted into the Phase-1 plans (id=INTEGER in 0001_init.sql/01-01; fire-and-forget recency bump in service.rs/01-02; materialize-on-sweep + recompute-on-read in 01-02/01-03). No unresolved design fork remains for the executor.
 
 1. **Memory id type: INTEGER rowid vs UUID string**
    - What we know: FTS5 external-content tables need an INTEGER `content_rowid`. INTEGER `id` lets `memories.id == memories_fts.rowid` with no extra column.
    - What's unclear: whether the product wants opaque/stable string ids in the tool contract (D-06 just says "id").
-   - Recommendation: use INTEGER `id`, return it as a string/number in tool results. Cheapest, FTS5-native. (A4)
+   - RESOLVED: use INTEGER `id`, return it as a number in tool results. Cheapest, FTS5-native. (A4) — adopted in 01-01 schema.
 
 2. **Recency-bump write amplification**
    - What we know: bumping `last_accessed`/`access_count` on every search hit adds writes through the single writer.
    - What's unclear: whether to bump synchronously or debounce.
-   - Recommendation: fire-and-forget through the writer lane in Phase 1; debounce only if a stress test shows contention. (Pitfall 11)
+   - RESOLVED: fire-and-forget through the writer lane in Phase 1; debounce only if a stress test shows contention. (Pitfall 11) — adopted in 01-02 service.rs.
 
 3. **Decay-score materialization vs pure on-read**
    - What we know: ARCHITECTURE research recommends hybrid (sweep materializes, read recomputes).
    - What's unclear: whether Phase 1 needs the materialized column at all for ranking, or can `ORDER BY` compute decay inline.
-   - Recommendation: keep the `decay_score` column (sweep materializes it for cheap `ORDER BY`), but the blend query recomputes-on-read for correctness between sweeps. Both honored in the schema below.
+   - RESOLVED: keep the `decay_score` column (sweep materializes it for cheap `ORDER BY`), but the blend query recomputes-on-read for correctness between sweeps. Both honored in the schema below; adopted in 01-02/01-03.
 
 ## Environment Availability
 

@@ -1,9 +1,9 @@
 ---
 phase: 1
 slug: core-memory-foundation
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: approved
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-06-25
 ---
 
@@ -80,11 +80,11 @@ created: 2026-06-25
 
 ## Validation Sign-Off
 
-- [ ] All tasks have automated verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter (set by planner once tasks carry automated verify)
+- [x] All tasks have automated verify or Wave 0 dependencies (01-01: 3/3, 01-02: 2/2, 01-03: 2/2)
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references (Plan 01-01 creates clock.rs/TestClock + store/stdio_purity/tools test files)
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-06-25 (plan-checker confirmed checks 8a–8e pass)
