@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["crates/agent-memory-core", "crates/agent-memory"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Jiří Hermann"]
+repository = "https://github.com/UnityInFlow/agent-memory"
+
+[workspace.dependencies]
+# MCP server SDK (binary)
+rmcp = { version = "1.8", features = ["server", "transport-io", "macros"] }
+
+# Embedded SQLite (FTS5 included in the bundled build).
+# Pinned to 0.39 (not the research-suggested 0.40) so it shares the same
+# `libsqlite3-sys` (0.37) as `r2d2_sqlite 0.34`, which depends on `rusqlite ^0.39`.
+# 0.40 pulls libsqlite3-sys 0.38, producing a `links = "sqlite3"` conflict.
+rusqlite = { version = "0.39", features = ["bundled"] }
+# rusqlite_migration 2.5 tracks rusqlite ^0.39 (2.6 jumps to ^0.40); pinning 2.5
+# keeps the whole graph on one `libsqlite3-sys` (0.37) — see rusqlite note above.
+rusqlite_migration = "2.5"
+r2d2 = "0.8"
+r2d2_sqlite = "0.34"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors: thiserror in the library, anyhow at the binary edges
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Time + paths
+chrono = "0.4"
+dirs = "6"
+
+# Logging (stderr only — stdout is the JSON-RPC channel)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Dev / test
+tempfile = "3"

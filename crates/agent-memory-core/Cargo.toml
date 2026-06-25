@@ -1,0 +1,28 @@
+[package]
+name = "agent-memory-core"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core domain, store, and decay logic for the agent-memory MCP server"
+
+[features]
+# Exposes TestClock to dependents (e.g. the binary crate's integration tests)
+# so they can drive deterministic decay/TTL behaviour.
+test-clock = []
+
+[dependencies]
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
