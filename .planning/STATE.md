@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: phase-1-complete
+status: planning
 stopped_at: Completed 01-03-PLAN.md (TTL sweep + decay materialization + CI/coverage gate + README) — Phase 1 complete (3/3)
-last_updated: "2026-06-25T20:13:05.827Z"
-last_activity: 2026-06-25 -- Plan 01-03 complete (TTL sweep + decay materialization + background task + self-hosted CI + >80% llvm-cov gate + README) — Phase 1 done
+last_updated: "2026-06-25T20:25:11.314Z"
+last_activity: 2026-06-25
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 3
   completed_plans: 3
-  percent: 100
+  percent: 50
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 
 ## Current Position
 
-Phase: 1 (core-memory-foundation) — COMPLETE (3/3 plans)
-Plan: 3 of 3 complete (01-01, 01-02, 01-03 all done)
+Phase: 2
+Plan: Not started
 Status: Phase 1 complete — ready for phase verification / Phase 2 planning (semantic search + interop + release)
-Last activity: 2026-06-25 -- Plan 01-03 complete (TTL sweep + decay materialization + background task + self-hosted CI + >80% llvm-cov gate + README)
+Last activity: 2026-06-25
 
 Progress: [██████████] 100% (Phase 1 plans)
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 6
 - Average duration: ~28 min
 - Total execution time: ~1.4 hours
 
@@ -44,7 +44,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 3 | ~83 min | ~28 min |
+| 1 | 3 | - | - |
 
 **Recent Trend:**
 

@@ -64,5 +64,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Memory Foundation | 3/3 | Complete   | 2026-06-25 |
+| 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | 0/TBD | Not started | - |

@@ -9,18 +9,18 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 
 ### Storage (STORE)
 
-- [ ] **STORE-01**: Agent can store a memory with a type (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT), content, and metadata (tags, source, scope) in embedded SQLite
-- [ ] **STORE-02**: Stored memories survive process restarts — durable local SQLite, no cloud and no account required
+- [x] **STORE-01**: Agent can store a memory with a type (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT), content, and metadata (tags, source, scope) in embedded SQLite
+- [x] **STORE-02**: Stored memories survive process restarts — durable local SQLite, no cloud and no account required
 - [x] **STORE-03**: Each memory carries a decay score that decreases over time based on recency/usage (exponential decay), and the score is surfaced in results
 - [x] **STORE-04**: A memory can be given a TTL after which it expires and is removed; decay only down-ranks and never deletes (TTL and explicit forget are the only removal paths)
 
 ### MCP Interface (MCP)
 
-- [ ] **MCP-01**: Agent can call `memory_store` to persist a typed memory and receive its id
+- [x] **MCP-01**: Agent can call `memory_store` to persist a typed memory and receive its id
 - [x] **MCP-02**: Agent can call `memory_search` to retrieve relevant memories ranked by relevance/decay
-- [ ] **MCP-03**: Agent can call `memory_list` to enumerate memories with filters (type, tag, scope, limit)
+- [x] **MCP-03**: Agent can call `memory_list` to enumerate memories with filters (type, tag, scope, limit)
 - [x] **MCP-04**: Agent can call `memory_forget` to delete a memory by id
-- [ ] **MCP-05**: The MCP server runs over stdio without corrupting the protocol — all logging goes to stderr and every stdout line is valid JSON-RPC
+- [x] **MCP-05**: The MCP server runs over stdio without corrupting the protocol — all logging goes to stderr and every stdout line is valid JSON-RPC
 
 ### Search (SEARCH)
 
@@ -78,15 +78,15 @@ Each v1 requirement maps to exactly one phase.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STORE-01 | Phase 1 | Pending |
-| STORE-02 | Phase 1 | Pending |
+| STORE-01 | Phase 1 | Complete |
+| STORE-02 | Phase 1 | Complete |
 | STORE-03 | Phase 1 | Complete |
 | STORE-04 | Phase 1 | Complete |
-| MCP-01 | Phase 1 | Pending |
+| MCP-01 | Phase 1 | Complete |
 | MCP-02 | Phase 1 | Complete |
-| MCP-03 | Phase 1 | Pending |
+| MCP-03 | Phase 1 | Complete |
 | MCP-04 | Phase 1 | Complete |
-| MCP-05 | Phase 1 | Pending |
+| MCP-05 | Phase 1 | Complete |
 | SEARCH-01 | Phase 1 | Complete |
 | SEARCH-02 | Phase 2 | Pending |
 | SEARCH-03 | Phase 2 | Pending |
