@@ -1,9 +1,9 @@
-//! MCP-01 / MCP-03: `memory_store` and `memory_list` over real stdio.
+//! MCP-01..04 / SEARCH-01: the four memory tools over real stdio.
 //!
 //! Drives the binary through the JSON-RPC handshake (`initialize` →
 //! `notifications/initialized`), calls the tools, and asserts on both the
-//! responses and the persisted SQLite row. Plan 02 extends this file for
-//! `memory_search` / `memory_forget`.
+//! responses and the persisted SQLite row. Plan 02 added the `memory_search` /
+//! `memory_forget` cases.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -79,6 +79,22 @@ impl Server {
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         }));
+    }
+
+    /// Call a tool by name and read its response, matching the given request id.
+    fn call_tool(
+        &mut self,
+        id: i64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        self.send(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }));
+        self.read_response(id)
     }
 
     fn shutdown(mut self) {
@@ -179,6 +195,136 @@ fn memory_store_rejects_invalid_type_cleanly() {
         is_jsonrpc_error || is_tool_error,
         "invalid type should yield a clean error, got: {resp}"
     );
+
+    server.shutdown();
+}
+
+/// Parse a `tools/call` text payload as a JSON array of memory views.
+fn tool_views(response: &serde_json::Value) -> Vec<serde_json::Value> {
+    let text = tool_text(response);
+    let value: serde_json::Value = serde_json::from_str(&text).expect("tool result text is JSON");
+    value
+        .as_array()
+        .expect("tool result is a JSON array")
+        .clone()
+}
+
+#[test]
+fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    // Store two memories that both contain "database".
+    server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({ "content": "use sqlite for the database", "type": "DECISION" }),
+    );
+    server.call_tool(
+        3,
+        "memory_store",
+        serde_json::json!({ "content": "the database connection pool config", "type": "PATTERN" }),
+    );
+
+    // Search "database" → both returned, each carries a decay_score.
+    let resp = server.call_tool(
+        4,
+        "memory_search",
+        serde_json::json!({ "query": "database" }),
+    );
+    let views = tool_views(&resp);
+    assert_eq!(views.len(), 2, "both 'database' memories should match");
+    for v in &views {
+        assert!(
+            v.get("decay_score").and_then(|d| d.as_f64()).is_some(),
+            "each result must surface a decay_score, got: {v}"
+        );
+        assert!(v.get("id").and_then(|i| i.as_i64()).is_some());
+    }
+
+    // A non-matching query → empty list, NOT an error (MCP-02 / SEARCH-01).
+    let resp = server.call_tool(
+        5,
+        "memory_search",
+        serde_json::json!({ "query": "nonexistentkeyword" }),
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "no-match search must not be a JSON-RPC error, got: {resp}"
+    );
+    let empty = tool_views(&resp);
+    assert!(
+        empty.is_empty(),
+        "no-match search must return an empty list"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    // Store a memory and capture its id.
+    let store_resp = server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({ "content": "ephemeral keyword zebra", "type": "TODO" }),
+    );
+    let id: i64 = tool_text(&store_resp)
+        .trim()
+        .parse()
+        .expect("memory_store returns a numeric id");
+
+    // It is findable before deletion.
+    let before =
+        tool_views(&server.call_tool(3, "memory_search", serde_json::json!({ "query": "zebra" })));
+    assert_eq!(
+        before.len(),
+        1,
+        "the memory should be searchable before forget"
+    );
+
+    // Forget the existing id → deleted.
+    let forget_resp = server.call_tool(4, "memory_forget", serde_json::json!({ "id": id }));
+    assert!(
+        forget_resp.get("error").is_none(),
+        "forget of an existing id must not error: {forget_resp}"
+    );
+    let forget_text = tool_text(&forget_resp);
+    let forget_json: serde_json::Value =
+        serde_json::from_str(&forget_text).expect("forget returns JSON");
+    assert_eq!(forget_json["deleted"], serde_json::json!(true));
+
+    // Subsequent search AND list omit it (FTS5 mirror stayed in sync via trigger).
+    let after_search =
+        tool_views(&server.call_tool(5, "memory_search", serde_json::json!({ "query": "zebra" })));
+    assert!(
+        after_search.is_empty(),
+        "deleted memory must not appear in search results"
+    );
+    let after_list = tool_views(&server.call_tool(6, "memory_list", serde_json::json!({})));
+    assert!(
+        after_list.is_empty(),
+        "deleted memory must not appear in list results"
+    );
+
+    // Forget an unknown id → clean not-found, NOT a protocol error (MCP-04).
+    let unknown_resp = server.call_tool(7, "memory_forget", serde_json::json!({ "id": 999_999 }));
+    assert!(
+        unknown_resp.get("error").is_none(),
+        "unknown-id forget must be a clean result, not a JSON-RPC error: {unknown_resp}"
+    );
+    let unknown_json: serde_json::Value =
+        serde_json::from_str(&tool_text(&unknown_resp)).expect("forget returns JSON");
+    assert_eq!(unknown_json["deleted"], serde_json::json!(false));
 
     server.shutdown();
 }

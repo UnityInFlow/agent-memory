@@ -13,7 +13,9 @@ use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, S
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
 use agent_memory_core::domain::{MemoryType, NewMemory};
-use agent_memory_core::service::{ListArgs as ServiceListArgs, MemoryService};
+use agent_memory_core::service::{
+    ListArgs as ServiceListArgs, MemoryService, SearchArgs as ServiceSearchArgs,
+};
 
 /// Shared application state handed to every tool invocation.
 pub struct AppState {
@@ -57,6 +59,33 @@ pub struct ListArgs {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+/// Arguments for `memory_search` (D-04/D-06). `query` is the FTS5 keyword string;
+/// the remaining fields are optional filters and a result cap.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchArgs {
+    /// The keyword query (FTS5 MATCH syntax).
+    pub query: String,
+    /// Filter by memory type (UPPERCASE). Omit for all types.
+    #[serde(default)]
+    pub r#type: Option<String>,
+    /// Filter by a tag substring. Omit for all.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Filter by logical scope. Omit for all scopes.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Cap the number of returned rows.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Arguments for `memory_forget` (D-06).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetArgs {
+    /// The numeric id of the memory to delete.
+    pub id: i64,
 }
 
 /// The MCP server. Holds shared state and the generated tool router.
@@ -137,6 +166,65 @@ impl MemoryMcp {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Keyword-search stored memories (FTS5), ranked by relevance blended with decay score. Returns matches with their decay scores; an empty list when nothing matches."
+    )]
+    async fn memory_search(
+        &self,
+        Parameters(args): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mem_type = match args.r#type {
+            Some(ref t) => Some(
+                MemoryType::try_from(t.as_str())
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+            ),
+            None => None,
+        };
+
+        let views = self
+            .state
+            .service
+            .search(ServiceSearchArgs {
+                query: args.query,
+                mem_type,
+                tag: args.tag,
+                scope: args.scope,
+                limit: args.limit,
+            })
+            .await
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let json = serde_json::to_string(&views)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Delete a memory by its numeric id. Returns a deleted result, or a clean not-found result if no such id exists."
+    )]
+    async fn memory_forget(
+        &self,
+        Parameters(args): Parameters<ForgetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let deleted = self
+            .state
+            .service
+            .forget(args.id)
+            .await
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        // Ok(false) is a clean not-found, NOT an error (MCP-04). Both branches are
+        // a successful tool call returning a small JSON status object.
+        let status = if deleted {
+            serde_json::json!({ "id": args.id, "deleted": true })
+        } else {
+            serde_json::json!({ "id": args.id, "deleted": false, "reason": "not_found" })
+        };
+        let json = serde_json::to_string(&status)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -147,8 +235,10 @@ impl ServerHandler for MemoryMcp {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
-        info.instructions =
-            Some("Persistent typed agent memory: store and list typed memories.".to_string());
+        info.instructions = Some(
+            "Persistent typed agent memory: store, list, search, and forget typed memories."
+                .to_string(),
+        );
         info
     }
 }
