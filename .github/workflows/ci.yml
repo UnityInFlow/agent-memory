@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# UnityInFlow org self-hosted runners ONLY — never ubuntu-latest (CLAUDE.md).
+# The Hetzner X64 fleet (arc-runner-unityinflow) is the default; the orangepi
+# (ARM64) leg is the documented fallback for when the X64 fleet is offline.
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [arc-runner-unityinflow, orangepi]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test (incl. stdout-purity + tools + ttl/decay/store)
+        run: cargo test --workspace
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Coverage gate (>80% lines)
+        run: cargo llvm-cov --workspace --fail-under-lines 80

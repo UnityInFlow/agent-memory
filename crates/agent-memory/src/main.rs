@@ -9,6 +9,7 @@ mod mcp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -16,10 +17,16 @@ use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
-use agent_memory_core::clock::SystemClock;
+use agent_memory_core::clock::{Clock, SystemClock};
 use agent_memory_core::decay::DecayConfig;
 use agent_memory_core::service::MemoryService;
 use agent_memory_core::store::sqlite::SqliteStore;
+
+/// How often the background lifecycle sweep runs (TTL expiry + decay
+/// materialization). Hourly is a sane default — TTL is coarse-grained and decay
+/// materialization only keeps ranking cheap between reads (search recomputes decay
+/// on read regardless), so a tight interval buys nothing.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
 use crate::config::resolve_db_path;
 use crate::mcp::{AppState, MemoryMcp};
@@ -78,6 +85,13 @@ async fn serve(db_flag: Option<PathBuf>) -> anyhow::Result<()> {
     );
     let state = Arc::new(AppState { service });
 
+    // Spawn the background lifecycle sweep BEFORE serving: on each tick it deletes
+    // TTL-expired rows and materializes decay scores, logging the SweepReport to
+    // STDERR only (NEVER stdout — MCP-05 must hold even with the sweep running).
+    // The task holds a clone of the service + a real clock; it lives for the
+    // process lifetime and is dropped when the runtime shuts down.
+    spawn_sweep_task(state.service.clone(), Arc::new(SystemClock));
+
     let running = MemoryMcp::new(state)
         .serve(stdio())
         .await
@@ -86,4 +100,28 @@ async fn serve(db_flag: Option<PathBuf>) -> anyhow::Result<()> {
 
     running.waiting().await.context("server run loop")?;
     Ok(())
+}
+
+/// Spawn the detached background sweep loop on a `tokio::time::interval`.
+///
+/// Each tick runs `service.sweep(clock.now())` (TTL delete + decay
+/// materialization) and logs the resulting `SweepReport` to stderr via `tracing`.
+/// A sweep failure is logged and the loop continues — a transient DB hiccup must
+/// not kill the lifecycle task. The first tick fires immediately; subsequent ticks
+/// honor [`SWEEP_INTERVAL`]. Nothing here ever writes to stdout (MCP-05).
+fn spawn_sweep_task(service: MemoryService, clock: Arc<dyn Clock>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        loop {
+            ticker.tick().await;
+            match service.sweep(clock.now()).await {
+                Ok(report) => tracing::info!(
+                    expired = report.expired,
+                    rescored = report.rescored,
+                    "lifecycle sweep complete"
+                ),
+                Err(e) => tracing::warn!("lifecycle sweep failed: {e}"),
+            }
+        }
+    });
 }
