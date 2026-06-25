@@ -26,3 +26,7 @@ tokio.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+# Self dev-dependency enabling `test-clock` so integration tests in `tests/` can
+# use `TestClock` without callers passing `--features`. This only affects test/
+# example/bench builds — production consumers do not get the feature.
+agent-memory-core = { path = ".", features = ["test-clock"] }

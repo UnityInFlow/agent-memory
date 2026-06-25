@@ -7,4 +7,5 @@
 pub mod clock;
 pub mod decay;
 pub mod domain;
-// `service` and `store` are added in Task 2 (SQLite store + MemoryService).
+pub mod service;
+pub mod store;
