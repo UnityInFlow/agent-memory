@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 01-02-PLAN.md (search + forget + decay surfacing)
-last_updated: "2026-06-25T20:02:43.756Z"
-last_activity: 2026-06-25 -- Plan 01-02 complete (memory_search + memory_forget + on-read decay)
+status: phase-1-complete
+stopped_at: Completed 01-03-PLAN.md (TTL sweep + decay materialization + CI/coverage gate + README) — Phase 1 complete (3/3)
+last_updated: "2026-06-25T20:13:05.827Z"
+last_activity: 2026-06-25 -- Plan 01-03 complete (TTL sweep + decay materialization + background task + self-hosted CI + >80% llvm-cov gate + README) — Phase 1 done
 progress:
   total_phases: 2
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -25,26 +25,26 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 
 ## Current Position
 
-Phase: 1 (core-memory-foundation) — EXECUTING
-Plan: 3 of 3 (01-01, 01-02 complete)
-Status: Ready to execute 01-03 (decay/TTL sweep)
-Last activity: 2026-06-25 -- Plan 01-02 complete (memory_search + memory_forget + on-read decay)
+Phase: 1 (core-memory-foundation) — COMPLETE (3/3 plans)
+Plan: 3 of 3 complete (01-01, 01-02, 01-03 all done)
+Status: Phase 1 complete — ready for phase verification / Phase 2 planning (semantic search + interop + release)
+Last activity: 2026-06-25 -- Plan 01-03 complete (TTL sweep + decay materialization + background task + self-hosted CI + >80% llvm-cov gate + README)
 
-Progress: [███████░░░] 67%
+Progress: [██████████] 100% (Phase 1 plans)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 2
-- Average duration: ~33 min
-- Total execution time: ~1.1 hours
+- Total plans completed: 3
+- Average duration: ~28 min
+- Total execution time: ~1.4 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 2 | ~65 min | ~33 min |
+| 1 | 3 | ~83 min | ~28 min |
 
 **Recent Trend:**
 
@@ -69,6 +69,8 @@ Recent decisions affecting current work:
 - [01-02]: `memory_search` recomputes decay **inline** in the SQL `ORDER BY` from `last_accessed` (recompute-on-read, Open Question 3) instead of the materialised `decay_score` column — so a recency bump re-ranks immediately, independent of the Plan-03 sweep. The `Store::search` signature takes `DecayConfig`.
 - [01-02]: Registered a custom `exp()` SQLite scalar fn + enabled the rusqlite `functions` feature — the bundled SQLite lacks `SQLITE_ENABLE_MATH_FUNCTIONS` (inline decay blend failed with `no such function: exp`).
 - [01-02]: Recency bump is fire-and-forget on a detached `spawn_blocking` task (Open Question 2); `memory_forget` returns `Ok(false)` as a clean not-found tool result, never a JSON-RPC error.
+- [01-03]: TTL `sweep_expired` is the ONLY delete; `materialize_decay` is UPDATE-only — `DecayEngine` runs delete-then-rescore so decay can never remove a row (STORE-04). Materialized `decay_score` uses the same `exp`/half-life/`CASE` math as on-read search, so the two agree (STORE-03).
+- [01-03]: Background sweep is a detached hourly `tokio::time::interval` task spawned before `serve(stdio())`, logging `SweepReport` to stderr only (MCP-05 holds). `cargo-llvm-cov` absent locally → the `>80%` coverage gate is CI-enforced in `ci.yml` (self-hosted `[arc-runner-unityinflow, orangepi]`, never `ubuntu-latest`), not run locally.
 
 ### Pending Todos
 
@@ -101,6 +103,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-06-25T20:02:43.749Z
-Stopped at: Completed 01-02-PLAN.md (search + forget + decay surfacing)
-Resume file: .planning/phases/01-core-memory-foundation/01-03-PLAN.md
+Last session: 2026-06-25T20:13:05.815Z
+Stopped at: Completed 01-03-PLAN.md (TTL sweep + decay materialization + CI/coverage gate + README) — Phase 1 complete (3/3)
+Resume file: None — Phase 1 done; next is phase verification / Phase 2 planning (semantic search + interop + release)

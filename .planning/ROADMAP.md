@@ -11,7 +11,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 - Integer phases (1, 2): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked INSERTED)
 
-- [ ] **Phase 1: Core Memory Foundation** - Local SQLite-backed typed memory with decay/TTL, keyword search, and an MCP stdio server — works with zero cloud and zero Ollama
+- [x] **Phase 1: Core Memory Foundation** - Local SQLite-backed typed memory with decay/TTL, keyword search, and an MCP stdio server — works with zero cloud and zero Ollama (completed 2026-06-25)
 - [ ] **Phase 2: Semantic Search, Interop & Release** - Local Ollama semantic search (graceful keyword fallback), REST API, GSD STATE.md import, and cross-platform binaries + Homebrew
 
 ## Phase Details
@@ -39,7 +39,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-03-PLAN.md — TTL sweep + decay materialization engine + background task + CI/coverage gate + README (STORE-04, STORE-03)
+- [x] 01-03-PLAN.md — TTL sweep + decay materialization engine + background task + CI/coverage gate + README (STORE-04, STORE-03)
 
 ### Phase 2: Semantic Search, Interop & Release
 
@@ -64,5 +64,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Memory Foundation | 2/3 | In Progress|  |
+| 1. Core Memory Foundation | 3/3 | Complete   | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | 0/TBD | Not started | - |

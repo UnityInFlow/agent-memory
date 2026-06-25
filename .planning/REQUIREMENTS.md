@@ -12,7 +12,7 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 - [ ] **STORE-01**: Agent can store a memory with a type (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT), content, and metadata (tags, source, scope) in embedded SQLite
 - [ ] **STORE-02**: Stored memories survive process restarts — durable local SQLite, no cloud and no account required
 - [x] **STORE-03**: Each memory carries a decay score that decreases over time based on recency/usage (exponential decay), and the score is surfaced in results
-- [ ] **STORE-04**: A memory can be given a TTL after which it expires and is removed; decay only down-ranks and never deletes (TTL and explicit forget are the only removal paths)
+- [x] **STORE-04**: A memory can be given a TTL after which it expires and is removed; decay only down-ranks and never deletes (TTL and explicit forget are the only removal paths)
 
 ### MCP Interface (MCP)
 
@@ -81,7 +81,7 @@ Each v1 requirement maps to exactly one phase.
 | STORE-01 | Phase 1 | Pending |
 | STORE-02 | Phase 1 | Pending |
 | STORE-03 | Phase 1 | Complete |
-| STORE-04 | Phase 1 | Pending |
+| STORE-04 | Phase 1 | Complete |
 | MCP-01 | Phase 1 | Pending |
 | MCP-02 | Phase 1 | Complete |
 | MCP-03 | Phase 1 | Pending |
