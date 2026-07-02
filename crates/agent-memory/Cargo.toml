@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 agent-memory-core = { path = "../agent-memory-core" }
+axum.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -27,3 +28,6 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+# Test HTTP client for tests/rest.rs — the workspace pin is TLS-free
+# (default-features = false, json only), which is all a loopback test needs.
+reqwest.workspace = true

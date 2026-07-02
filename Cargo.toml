@@ -56,6 +56,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # our code, and avoids the zerocopy 0.7→0.8 AsBytes/IntoBytes rename trap.
 bytemuck = "1"
 
+# REST mirror for non-MCP clients (API-01). Ecosystem pin — mcp-hub uses axum
+# 0.8; note 0.8 switched path parameters to the `{id}` syntax (the 0.7 colon
+# form no longer matches).
+axum = "0.8"
+
 # Logging (stderr only — stdout is the JSON-RPC channel)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
