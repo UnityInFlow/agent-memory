@@ -55,7 +55,23 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
   4. Running `agent-memory import --from gsd-state .planning/STATE.md` loads memories from a GSD STATE.md file and they become searchable; re-running it does not duplicate them.
   5. A user installs the tool from a pre-built binary (macOS arm64/x86_64, Linux x86_64/aarch64) or via `brew install` and the MCP server launches successfully.
 
-**Plans**: TBD
+**Plans**: 4 plans (coarse, vertical MVP slices — serial waves: every slice shares `main.rs`/`service.rs`/`Cargo.toml` ownership)
+
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Semantic search via sqlite-vec + Ollama embeddings with graceful keyword fallback, search_mode envelope, sweep backfill, spike workflow file (SEARCH-02, SEARCH-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — REST mirror: `serve-rest` axum adapter over the same store, loopback-guarded, shared SearchOutcome envelope (API-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 02-03-PLAN.md — Idempotent GSD STATE.md import: tolerant parser + `import --from gsd-state` subcommand + batch embed (INTEROP-01)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 02-04-PLAN.md — Cross-platform release: publish repo, darwin cross-compile spike gate, zigbuild release workflow, v0.0.1 + Homebrew tap (DIST-01, DIST-02)
 
 ## Progress
 
@@ -65,4 +81,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
-| 2. Semantic Search, Interop & Release | 0/TBD | Not started | - |
+| 2. Semantic Search, Interop & Release | 0/4 | Planned | - |
