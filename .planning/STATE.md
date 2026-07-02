@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-07-02T16:17:24.862Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-07-02T16:29:43.163Z"
 last_activity: 2026-07-02 -- Phase 02 execution started
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 7
-  completed_plans: 4
+  completed_plans: 5
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 ## Current Position
 
 Phase: 02 (semantic-search-interop-release) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-07-02 -- Phase 02 execution started
 
@@ -53,6 +53,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 
 *Updated after each plan completion*
 | Phase 02 P01 | 26 min | 3 tasks | 20 files |
+| Phase 02 P02 | 10 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting current work:
 - [Phase 02-01]: insert_embedding uses DELETE+INSERT in one writer TX (not INSERT OR REPLACE) — conflict-resolution clauses are not reliably supported on SQLite virtual tables; identical semantics, strictly safer
 - [Phase 02-01]: SearchOutcome {search_mode, results} is the shared search envelope for MCP and the 02-02 REST API — one serde struct keeps the wire shape stable across transports (RESEARCH Open Question 3)
 - [Phase 02-01]: Local darwin zigbuild canary PASSED (aarch64-apple-darwin builds+runs incl. sqlite-vec bundled C) — non-authoritative (darwin host, zig 0.16.0 vs pinned 0.14.1) but a strong positive prior for the 02-04 orangepi spike gate
+- [Phase 02-02]: AppState carries Arc<dyn Embedder> and spawn_health_probe takes the trait object — one wiring shape for serve and serve-rest; REST /health reads embedder status without reaching into service internals
+- [Phase 02-02]: REST forget 404 body reuses the exact mcp.rs not-found JSON ({id, deleted:false, reason:not_found}) instead of the generic ApiError shape — cross-transport body consistency
 
 ### Pending Todos
 
@@ -107,6 +110,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-02T16:17:24.858Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-07-02T16:29:43.159Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

@@ -30,7 +30,7 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 
 ### REST API (API)
 
-- [ ] **API-01**: A REST API exposes store/search/list/forget for non-MCP integrations
+- [x] **API-01**: A REST API exposes store/search/list/forget for non-MCP integrations
 
 ### Interop (INTEROP)
 
@@ -90,7 +90,7 @@ Each v1 requirement maps to exactly one phase.
 | SEARCH-01 | Phase 1 | Complete |
 | SEARCH-02 | Phase 2 | Complete |
 | SEARCH-03 | Phase 2 | Complete |
-| API-01 | Phase 2 | Pending |
+| API-01 | Phase 2 | Complete |
 | INTEROP-01 | Phase 2 | Pending |
 | DIST-01 | Phase 2 | Pending |
 | DIST-02 | Phase 2 | Pending |
