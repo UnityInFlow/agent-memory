@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-03-PLAN.md (TTL sweep + decay materialization + CI/coverage gate + README) — Phase 1 complete (3/3)
-last_updated: "2026-07-02T15:42:14.235Z"
-last_activity: 2026-07-02 -- Phase 2 planning complete
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-07-02T16:17:24.862Z"
+last_activity: 2026-07-02 -- Phase 02 execution started
 progress:
   total_phases: 2
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 7
+  completed_plans: 4
   percent: 50
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-24)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 1 — core-memory-foundation
+**Current focus:** Phase 02 — semantic-search-interop-release
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
+Phase: 02 (semantic-search-interop-release) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-07-02 -- Phase 2 planning complete
+Last activity: 2026-07-02 -- Phase 02 execution started
 
 Progress: [██████████] 100% (Phase 1 plans)
 
@@ -52,6 +52,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 - Trend: —
 
 *Updated after each plan completion*
+| Phase 02 P01 | 26 min | 3 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,9 @@ Recent decisions affecting current work:
 - [01-02]: Recency bump is fire-and-forget on a detached `spawn_blocking` task (Open Question 2); `memory_forget` returns `Ok(false)` as a clean not-found tool result, never a JSON-RPC error.
 - [01-03]: TTL `sweep_expired` is the ONLY delete; `materialize_decay` is UPDATE-only — `DecayEngine` runs delete-then-rescore so decay can never remove a row (STORE-04). Materialized `decay_score` uses the same `exp`/half-life/`CASE` math as on-read search, so the two agree (STORE-03).
 - [01-03]: Background sweep is a detached hourly `tokio::time::interval` task spawned before `serve(stdio())`, logging `SweepReport` to stderr only (MCP-05 holds). `cargo-llvm-cov` absent locally → the `>80%` coverage gate is CI-enforced in `ci.yml` (self-hosted `[arc-runner-unityinflow, orangepi]`, never `ubuntu-latest`), not run locally.
+- [Phase 02-01]: insert_embedding uses DELETE+INSERT in one writer TX (not INSERT OR REPLACE) — conflict-resolution clauses are not reliably supported on SQLite virtual tables; identical semantics, strictly safer
+- [Phase 02-01]: SearchOutcome {search_mode, results} is the shared search envelope for MCP and the 02-02 REST API — one serde struct keeps the wire shape stable across transports (RESEARCH Open Question 3)
+- [Phase 02-01]: Local darwin zigbuild canary PASSED (aarch64-apple-darwin builds+runs incl. sqlite-vec bundled C) — non-authoritative (darwin host, zig 0.16.0 vs pinned 0.14.1) but a strong positive prior for the 02-04 orangepi spike gate
 
 ### Pending Todos
 
@@ -103,6 +107,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-06-25T20:13:05.815Z
-Stopped at: Completed 01-03-PLAN.md (TTL sweep + decay materialization + CI/coverage gate + README) — Phase 1 complete (3/3)
-Resume file: None — Phase 1 done; next is phase verification / Phase 2 planning (semantic search + interop + release)
+Last session: 2026-07-02T16:17:24.858Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

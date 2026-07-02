@@ -59,7 +59,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Semantic search via sqlite-vec + Ollama embeddings with graceful keyword fallback, search_mode envelope, sweep backfill, spike workflow file (SEARCH-02, SEARCH-03)
+- [x] 02-01-PLAN.md — Semantic search via sqlite-vec + Ollama embeddings with graceful keyword fallback, search_mode envelope, sweep backfill, spike workflow file (SEARCH-02, SEARCH-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -81,4 +81,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
-| 2. Semantic Search, Interop & Release | 0/4 | Planned | - |
+| 2. Semantic Search, Interop & Release | 1/4 | In Progress|  |

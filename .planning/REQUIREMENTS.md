@@ -25,8 +25,8 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 ### Search (SEARCH)
 
 - [x] **SEARCH-01**: Agent can find memories by keyword/full-text search (FTS5) with no embedding model required
-- [ ] **SEARCH-02**: Agent can find memories by semantic similarity using local Ollama embeddings (`nomic-embed-text`)
-- [ ] **SEARCH-03**: When Ollama is unavailable, search degrades gracefully to keyword search instead of failing or returning empty
+- [x] **SEARCH-02**: Agent can find memories by semantic similarity using local Ollama embeddings (`nomic-embed-text`)
+- [x] **SEARCH-03**: When Ollama is unavailable, search degrades gracefully to keyword search instead of failing or returning empty
 
 ### REST API (API)
 
@@ -88,8 +88,8 @@ Each v1 requirement maps to exactly one phase.
 | MCP-04 | Phase 1 | Complete |
 | MCP-05 | Phase 1 | Complete |
 | SEARCH-01 | Phase 1 | Complete |
-| SEARCH-02 | Phase 2 | Pending |
-| SEARCH-03 | Phase 2 | Pending |
+| SEARCH-02 | Phase 2 | Complete |
+| SEARCH-03 | Phase 2 | Complete |
 | API-01 | Phase 2 | Pending |
 | INTEROP-01 | Phase 2 | Pending |
 | DIST-01 | Phase 2 | Pending |
