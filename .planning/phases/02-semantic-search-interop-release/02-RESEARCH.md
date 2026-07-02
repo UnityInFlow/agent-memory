@@ -502,21 +502,25 @@ end
 | A5 | REST default port 7437 is free/uncontested (arbitrary choice, flag-overridable) | Pattern 4 | Trivial — `--addr` flag exists |
 | A6 | `k = limit*4 (cap 200)` oversample before decay re-rank is a sensible default | Pattern 3 | Low — tunable constant; golden-set test will surface a bad choice |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should the hourly sweep also backfill pending embeddings (`embedding_status = 0`)?**
    - What we know: the sweep task exists (Phase 1) and 01-03-SUMMARY explicitly flagged it as "a place to also refresh embeddings"; `/api/embed` batches, so a backfill is one call per tick.
    - What's unclear: whether it's in-scope for MVP (no requirement demands it; SEARCH-02/03 criteria pass without it).
    - Recommendation: include it — it is small (~30 lines), and it completes the "install Ollama later and old memories become semantically searchable" story. Planner's call to cut if the plan runs hot.
+   - **RESOLVED:** recommendation adopted — sweep backfill of pending embeddings is included in plan 02-01 Task 3.
 2. **musl targets in DIST-01?**
    - What we know: DIST-01 names "Linux (x86_64/aarch64)" without libc flavor; injection-scanner/mcp-hub shipped gnu+musl pairs; the spec-ci-plugin consumer path cared about musl.
    - Recommendation: build all 6 triples (darwin×2, gnu×2, musl×2) — zigbuild makes musl nearly free and bundled SQLite statically links cleanly under musl. If a musl leg fails, ship gnu-only for Linux (requirement still satisfied).
+   - **RESOLVED:** recommendation adopted — plan 02-04 builds all 6 triples with the 4 gnu/darwin legs required and musl legs best-effort (`continue-on-error`).
 3. **Where does the search-mode indicator surface in the MCP tool result?**
    - What we know: result payloads are JSON built in mcp.rs; adding a top-level `search_mode` field is non-breaking for agents.
    - Recommendation: top-level field on the search tool result + same field in the REST response; one shared serde struct (FEATURES.md "stable JSON record shape").
+   - **RESOLVED:** recommendation adopted — shared `SearchOutcome {search_mode, results}` envelope defined in plan 02-01 and reused by the REST response in plan 02-02.
 4. **Live-Ollama integration test policy.**
    - What we know: dev machine has Ollama 0.31.1 + nomic-embed-text running; CI runners' Ollama status unknown.
    - Recommendation: deterministic `FakeEmbedder` tests are the CI gate; one `#[ignore]`d live test (`cargo test -- --ignored`) for local/manual verification against real Ollama.
+   - **RESOLVED:** recommendation adopted — plan 02-01 makes `FakeEmbedder` tests the CI gate and adds one `#[ignore]`d live-Ollama test.
 
 ## Environment Availability
 
