@@ -21,6 +21,10 @@ fn stdout_is_pure_jsonrpc_and_logs_go_to_stderr() {
     let mut child = Command::new(binary_path())
         .args(["serve", "--db"])
         .arg(&db_path)
+        // Dead Ollama URL (discard port → connection refused): the embedder is
+        // ACTIVE and its degrade warning path fires during the purity check, so
+        // this proves MCP-05 holds with Phase-2 code live (RESEARCH Pitfall 4).
+        .env("AGENT_MEMORY_OLLAMA_URL", "http://127.0.0.1:9")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

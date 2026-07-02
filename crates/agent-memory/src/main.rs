@@ -20,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 use agent_memory_core::clock::{Clock, SystemClock};
 use agent_memory_core::decay::DecayConfig;
 use agent_memory_core::embed::ollama::OllamaClient;
+use agent_memory_core::embed::{Embedder, EmbedderHealth};
 use agent_memory_core::service::MemoryService;
 use agent_memory_core::store::sqlite::SqliteStore;
 
@@ -90,7 +91,13 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
-    let embedder = Arc::new(OllamaClient::new(ollama_url));
+    let embedder = Arc::new(OllamaClient::new(ollama_url.clone()));
+
+    // Startup visibility (RESEARCH Pattern 2 rule 3): probe the embedder ONCE
+    // on a detached task and log exactly one stderr line about semantic
+    // availability. Serving NEVER blocks or exits on this probe.
+    spawn_health_probe(embedder.clone(), ollama_url);
+
     let service = MemoryService::new(
         Arc::new(store),
         Arc::new(SystemClock),
@@ -114,6 +121,35 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
 
     running.waiting().await.context("server run loop")?;
     Ok(())
+}
+
+/// Spawn the detached one-shot embedder health probe.
+///
+/// Logs EXACTLY one stderr line via `tracing` (MCP-05 holds — nothing here
+/// touches stdout): `Ready` → info; `ModelMissing` → warn with the actionable
+/// `ollama pull` hint; `Unreachable` → warn naming the URL. The probe is fire-
+/// and-forget: startup never blocks or exits on it (SEARCH-03 — the server is
+/// fully usable in keyword mode without Ollama).
+fn spawn_health_probe(embedder: Arc<OllamaClient>, ollama_url: String) {
+    tokio::spawn(async move {
+        match embedder.health().await {
+            Ok(EmbedderHealth::Ready) => {
+                tracing::info!("semantic search ready (nomic-embed-text)");
+            }
+            Ok(EmbedderHealth::ModelMissing) => {
+                tracing::warn!(
+                    "Ollama is running but the embedding model is missing — \
+                     run: ollama pull nomic-embed-text (search falls back to keyword until then)"
+                );
+            }
+            Ok(EmbedderHealth::Unreachable(_)) => {
+                tracing::warn!("Ollama unreachable at {ollama_url} — search falls back to keyword");
+            }
+            Err(e) => {
+                tracing::warn!("Ollama health probe failed ({e}) — search falls back to keyword");
+            }
+        }
+    });
 }
 
 /// Spawn the detached background sweep loop on a `tokio::time::interval`.

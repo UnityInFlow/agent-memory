@@ -256,14 +256,63 @@ impl MemoryService {
     /// materialize every survivor's `decay_score` so ranking stays cheap between
     /// reads. Decay never deletes — only TTL expiry (here) and `forget` remove.
     ///
+    /// After the decay pass, pending embeddings (`embedding_status = 0`) are
+    /// backfilled best-effort in ONE batch embed call (RESEARCH Open Question 1)
+    /// — this completes the "install Ollama later and old memories become
+    /// semantically searchable" story. Backfill counts are tracing-only:
+    /// [`SweepReport`]'s shape is unchanged, so the TTL contract stays intact.
+    ///
     /// Driven by the injected clock so it is deterministic under test; exposed for
     /// both the background interval task and `tests/ttl.rs`. The blocking
-    /// `DecayEngine::sweep` runs on a `spawn_blocking` thread (Pitfall 2).
+    /// `DecayEngine::sweep` runs on a `spawn_blocking` thread (Pitfall 2); the
+    /// embed call is async, OUTSIDE `spawn_blocking` (Pitfall 5).
     pub async fn sweep(&self, now: i64) -> Result<SweepReport, MemoryError> {
         let store = self.store.clone();
         let engine = DecayEngine::new(self.decay_cfg);
-        tokio::task::spawn_blocking(move || engine.sweep(store.as_ref(), now))
+        let report = tokio::task::spawn_blocking(move || engine.sweep(store.as_ref(), now))
             .await
-            .map_err(MemoryError::Join)?
+            .map_err(MemoryError::Join)??;
+
+        // Embedding backfill: fetch a bounded batch of pending rows, embed them
+        // in one call, and write the vectors back. An embed failure logs one
+        // warning and skips — the next tick retries (SEARCH-03: never fatal).
+        let store = self.store.clone();
+        let pending = tokio::task::spawn_blocking(move || store.pending_embeddings(BACKFILL_BATCH))
+            .await
+            .map_err(MemoryError::Join)??;
+        if !pending.is_empty() {
+            let contents: Vec<String> =
+                pending.iter().map(|(_, content)| content.clone()).collect();
+            match self.embedder.embed(&contents).await {
+                Ok(vectors) if vectors.len() == pending.len() => {
+                    let ids: Vec<i64> = pending.iter().map(|(id, _)| *id).collect();
+                    let store = self.store.clone();
+                    let written =
+                        tokio::task::spawn_blocking(move || -> Result<usize, MemoryError> {
+                            let mut written = 0usize;
+                            for (id, vector) in ids.into_iter().zip(vectors) {
+                                store.insert_embedding(id, vector)?;
+                                written += 1;
+                            }
+                            Ok(written)
+                        })
+                        .await
+                        .map_err(MemoryError::Join)??;
+                    tracing::info!(backfilled = written, "embedded pending memories on sweep");
+                }
+                Ok(_) => tracing::warn!(
+                    "embedding backfill skipped (batch size mismatch); retrying next sweep"
+                ),
+                Err(e) => {
+                    tracing::warn!("embedding backfill skipped ({e}); retrying next sweep");
+                }
+            }
+        }
+
+        Ok(report)
     }
 }
+
+/// How many pending rows one sweep tick backfills (bounded so a huge corpus
+/// embeds incrementally instead of one giant request — T-02-03).
+const BACKFILL_BATCH: usize = 128;
