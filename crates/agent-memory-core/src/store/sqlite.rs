@@ -10,7 +10,7 @@
 //! (threat T-01-01).
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -24,6 +24,42 @@ use crate::store::{migrations::migrations, Store};
 
 /// Default cap on returned search rows when the caller omits `limit` (T-02-04).
 const DEFAULT_SEARCH_LIMIT: i64 = 50;
+
+/// Register the sqlite-vec `vec0` extension process-globally. Idempotent: a
+/// `OnceLock` captures the FIRST result (success or error) so repeated calls
+/// are cheap and the original error stays visible.
+///
+/// MUST run BEFORE any `Connection::open` — auto-extensions apply only to
+/// connections opened after registration. Calling it at the top of
+/// [`SqliteStore::open`] therefore covers the writer, the migration run, and
+/// every r2d2 pool connection (the pool opens lazily, after registration).
+pub fn register_vec_extension() -> Result<(), rusqlite::Error> {
+    static VEC_REGISTRATION: OnceLock<Result<(), String>> = OnceLock::new();
+    let result = VEC_REGISTRATION.get_or_init(|| {
+        // SAFETY: sqlite3_vec_init is a valid SQLite extension entry point
+        // compiled in via the sqlite-vec crate's cc build; the transmute adapts
+        // its C signature to rusqlite's RawAutoExtension type. This is the
+        // documented rusqlite-0.34+ pattern (sqlite-vec issue #206) — do NOT
+        // copy the stale pre-0.34 snippet from the sqlite-vec docs site.
+        unsafe {
+            let raw: unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> std::os::raw::c_int =
+                std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+            rusqlite::auto_extension::register_auto_extension(raw).map_err(|e| e.to_string())
+        }
+    });
+    result.clone().map_err(|msg| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "sqlite-vec auto-extension registration failed: {msg}"
+            )),
+        )
+    })
+}
 
 /// Apply the per-connection PRAGMAs that every connection (writer + pool) needs.
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -80,6 +116,11 @@ impl SqliteStore {
     /// Open (creating if absent) the database at `path`, run migrations on the
     /// writer, and build the read pool. Confirms FTS5 is compiled in.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
+        // vec0 registration MUST precede Connection::open: auto-extensions only
+        // apply to connections opened after registration (this also covers every
+        // r2d2 pool connection created below).
+        register_vec_extension()?;
+
         let mut writer = Connection::open(path)?;
         prepare_connection(&writer)?;
 
@@ -88,6 +129,12 @@ impl SqliteStore {
 
         // Smoke-check that FTS5 is available (bundled SQLite compiles it in).
         writer.query_row("SELECT count(*) FROM memories_fts", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+
+        // Mirror smoke-check for vec0: fail fast at open if the sqlite-vec
+        // extension is missing rather than erroring on the first KNN query.
+        writer.query_row("SELECT count(*) FROM vec_memories", [], |row| {
             row.get::<_, i64>(0)
         })?;
 

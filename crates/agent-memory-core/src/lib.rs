@@ -7,5 +7,6 @@
 pub mod clock;
 pub mod decay;
 pub mod domain;
+pub mod embed;
 pub mod service;
 pub mod store;

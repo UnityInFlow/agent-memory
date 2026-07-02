@@ -22,6 +22,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 tokio.workspace = true
+sqlite-vec.workspace = true
+reqwest.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

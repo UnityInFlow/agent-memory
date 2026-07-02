@@ -7,7 +7,10 @@ use rusqlite_migration::{Migrations, M};
 
 /// The ordered set of forward migrations. Run on the writer connection at open.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../../sql/0001_init.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../../sql/0001_init.sql")),
+        M::up(include_str!("../../sql/0002_embeddings.sql")),
+    ])
 }
 
 #[cfg(test)]
@@ -16,6 +19,11 @@ mod tests {
 
     #[test]
     fn migrations_validate() {
+        // `Migrations::validate` opens its own in-memory connection, so the vec0
+        // module must be registered process-globally first or migration 0002
+        // (CREATE VIRTUAL TABLE ... USING vec0) cannot validate.
+        crate::store::sqlite::register_vec_extension()
+            .expect("sqlite-vec extension should register");
         // rusqlite_migration can self-check that the migration set is well-formed.
         migrations()
             .validate()

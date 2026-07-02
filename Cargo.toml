@@ -43,6 +43,19 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 dirs = "6"
 
+# sqlite-vec 0.1.9: vec0 virtual table for KNN semantic search (SEARCH-02). Its
+# only build-dep is `cc` (rusqlite appears only as a dev-dep upstream), so it
+# cannot conflict with the rusqlite 0.39 / libsqlite3-sys 0.37 pin above.
+# 0.1.10 is alpha-only.
+sqlite-vec = "0.1.9"
+# Ollama embedding client. Localhost-only HTTP → default-features = false means
+# NO TLS backend at all (no rustls/ring/openssl C code), which directly reduces
+# the darwin cross-compile surface (RESEARCH Pitfall 1).
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Safe zero-copy Vec<f32> → &[u8] cast for vec0 embedding blobs: zero unsafe in
+# our code, and avoids the zerocopy 0.7→0.8 AsBytes/IntoBytes rename trap.
+bytemuck = "1"
+
 # Logging (stderr only — stdout is the JSON-RPC channel)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
