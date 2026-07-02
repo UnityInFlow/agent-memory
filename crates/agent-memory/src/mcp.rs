@@ -13,13 +13,18 @@ use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, S
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
 use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::embed::Embedder;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, MemoryService, SearchArgs as ServiceSearchArgs,
 };
 
-/// Shared application state handed to every tool invocation.
+/// Shared application state handed to every tool invocation (and to the REST
+/// handlers — both transports adapt the same state, same service).
 pub struct AppState {
     pub service: MemoryService,
+    /// The embedder handle, exposed so the REST `/health` endpoint can report
+    /// semantic availability without reaching into the service internals.
+    pub embedder: Arc<dyn Embedder>,
 }
 
 /// Arguments for `memory_store` (D-05). Only `content` and `type` are required;

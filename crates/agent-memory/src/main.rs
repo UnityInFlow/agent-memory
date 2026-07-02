@@ -6,7 +6,9 @@
 
 mod config;
 mod mcp;
+mod rest;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +62,20 @@ struct Cli {
 enum Command {
     /// Run the MCP stdio server.
     Serve,
+    /// Run the HTTP REST mirror for non-MCP clients (same store, same logic).
+    ServeRest {
+        /// Address to bind. Loopback by default; a non-loopback address is
+        /// refused unless --allow-remote is also passed (the API carries no
+        /// auth — see the security note in the README).
+        #[arg(long, default_value = "127.0.0.1:7437")]
+        addr: String,
+
+        /// Permit binding a non-loopback address. The REST API is
+        /// unauthenticated: anyone who can reach it can read and write
+        /// memories. A warning is logged when this is used.
+        #[arg(long)]
+        allow_remote: bool,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +98,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve => serve(cli.db, cli.ollama_url).await,
+        Command::ServeRest { addr, allow_remote } => {
+            serve_rest(cli.db, cli.ollama_url, addr, allow_remote).await
+        }
     }
 }
 
@@ -91,7 +110,7 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
-    let embedder = Arc::new(OllamaClient::new(ollama_url.clone()));
+    let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url.clone()));
 
     // Startup visibility (RESEARCH Pattern 2 rule 3): probe the embedder ONCE
     // on a detached task and log exactly one stderr line about semantic
@@ -101,10 +120,10 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
     let service = MemoryService::new(
         Arc::new(store),
         Arc::new(SystemClock),
-        embedder,
+        embedder.clone(),
         DecayConfig::default(),
     );
-    let state = Arc::new(AppState { service });
+    let state = Arc::new(AppState { service, embedder });
 
     // Spawn the background lifecycle sweep BEFORE serving: on each tick it deletes
     // TTL-expired rows and materializes decay scores, logging the SweepReport to
@@ -123,6 +142,60 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
     Ok(())
 }
 
+/// Resolve the DB path, open the store, and serve the axum REST mirror.
+///
+/// Same wiring as [`serve`] over the SAME SQLite file — WAL + busy_timeout
+/// (Phase 1) make cross-process access safe, so editor-spawned MCP stdio
+/// processes and this daemon coexist on one store (API-01, RESEARCH Pattern
+/// 4). The lifecycle sweep runs here too: the REST daemon is long-running and
+/// must expire TTLs and backfill embeddings like the stdio server does.
+async fn serve_rest(
+    db_flag: Option<PathBuf>,
+    ollama_url: String,
+    addr: String,
+    allow_remote: bool,
+) -> anyhow::Result<()> {
+    let db_path = resolve_db_path(db_flag).context("resolving database path")?;
+    let store = SqliteStore::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+
+    let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url.clone()));
+    spawn_health_probe(embedder.clone(), ollama_url);
+
+    let service = MemoryService::new(
+        Arc::new(store),
+        Arc::new(SystemClock),
+        embedder.clone(),
+        DecayConfig::default(),
+    );
+    let state = Arc::new(AppState { service, embedder });
+
+    spawn_sweep_task(state.service.clone(), Arc::new(SystemClock));
+
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("parsing --addr {addr:?} as a socket address"))?;
+    rest::ensure_bind_allowed(&socket_addr, allow_remote)?;
+    if allow_remote && !socket_addr.ip().is_loopback() {
+        tracing::warn!(
+            "binding non-loopback address {socket_addr} — the REST API is \
+             unauthenticated; anyone who can reach it can read and write memories"
+        );
+    }
+
+    let listener = tokio::net::TcpListener::bind(socket_addr)
+        .await
+        .with_context(|| format!("binding {socket_addr}"))?;
+    // The bound address is logged AFTER binding so `--addr 127.0.0.1:0`
+    // resolves to the real ephemeral port — tests parse it from this line.
+    tracing::info!("REST listening on {}", listener.local_addr()?);
+
+    axum::serve(listener, rest::build_router(state))
+        .await
+        .context("serving REST")?;
+    Ok(())
+}
+
 /// Spawn the detached one-shot embedder health probe.
 ///
 /// Logs EXACTLY one stderr line via `tracing` (MCP-05 holds — nothing here
@@ -130,7 +203,7 @@ async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<(
 /// `ollama pull` hint; `Unreachable` → warn naming the URL. The probe is fire-
 /// and-forget: startup never blocks or exits on it (SEARCH-03 — the server is
 /// fully usable in keyword mode without Ollama).
-fn spawn_health_probe(embedder: Arc<OllamaClient>, ollama_url: String) {
+fn spawn_health_probe(embedder: Arc<dyn Embedder>, ollama_url: String) {
     tokio::spawn(async move {
         match embedder.health().await {
             Ok(EmbedderHealth::Ready) => {
