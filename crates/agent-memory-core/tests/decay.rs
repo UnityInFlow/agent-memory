@@ -9,14 +9,19 @@ use std::sync::Arc;
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::{decay_score, DecayConfig, DEFAULT_HALF_LIFE_SECS};
 use agent_memory_core::domain::{MemoryType, NewMemory};
-use agent_memory_core::service::{MemoryService, SearchArgs};
+use agent_memory_core::embed::FakeEmbedder;
+use agent_memory_core::service::{MemoryService, SearchArgs, SearchMode};
 use agent_memory_core::store::sqlite::SqliteStore;
 
 fn service_on_temp_db(clock: Arc<dyn Clock>) -> (MemoryService, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
     let store = SqliteStore::open(&db_path).expect("open store");
-    let service = MemoryService::new(Arc::new(store), clock, DecayConfig::default());
+    // FAILING FakeEmbedder on purpose: this suite verifies the FTS5 keyword
+    // bm25×decay ranking (SEARCH-01), and a dead embedder deterministically
+    // routes search to that path (SEARCH-03) — store still succeeds.
+    let embedder = Arc::new(FakeEmbedder::failing());
+    let service = MemoryService::new(Arc::new(store), clock, embedder, DecayConfig::default());
     (service, dir)
 }
 
@@ -90,8 +95,13 @@ async fn just_accessed_ranks_above_un_accessed_with_surfaced_decay() {
         })
         .await
         .expect("bump search");
-    assert_eq!(bump.len(), 1, "only the 'two' memory matches");
-    assert_eq!(bump[0].id, id_new);
+    assert_eq!(
+        bump.search_mode,
+        SearchMode::Keyword,
+        "the failing embedder must route this suite to the keyword path"
+    );
+    assert_eq!(bump.results.len(), 1, "only the 'two' memory matches");
+    assert_eq!(bump.results[0].id, id_new);
 
     // The recency bump is fire-and-forget on a blocking thread; give it a moment.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -104,7 +114,8 @@ async fn just_accessed_ranks_above_un_accessed_with_surfaced_decay() {
             ..Default::default()
         })
         .await
-        .expect("ranked search");
+        .expect("ranked search")
+        .results;
     assert_eq!(results.len(), 2, "both memories match 'alpha'");
     assert_eq!(
         results[0].id, id_new,
@@ -135,12 +146,15 @@ async fn no_match_returns_empty_not_error() {
         .await
         .expect("store");
 
-    let results = service
+    let outcome = service
         .search(SearchArgs {
             query: "nonexistentkeyword".to_string(),
             ..Default::default()
         })
         .await
         .expect("no-match search must be Ok, not Err");
-    assert!(results.is_empty(), "no match must return an empty list");
+    assert!(
+        outcome.results.is_empty(),
+        "no match must return an empty list"
+    );
 }

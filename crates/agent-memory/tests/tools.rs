@@ -25,6 +25,10 @@ impl Server {
         let mut child = Command::new(binary_path())
             .args(["serve", "--db"])
             .arg(db_path)
+            // Deterministically dead Ollama URL: the binary is in keyword mode
+            // on EVERY machine regardless of a locally running daemon
+            // (SEARCH-03 — port 9 is the discard port, connection refused).
+            .env("AGENT_MEMORY_OLLAMA_URL", "http://127.0.0.1:9")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -199,7 +203,8 @@ fn memory_store_rejects_invalid_type_cleanly() {
     server.shutdown();
 }
 
-/// Parse a `tools/call` text payload as a JSON array of memory views.
+/// Parse a `tools/call` text payload as a JSON array of memory views
+/// (memory_list only — memory_search returns the envelope below).
 fn tool_views(response: &serde_json::Value) -> Vec<serde_json::Value> {
     let text = tool_text(response);
     let value: serde_json::Value = serde_json::from_str(&text).expect("tool result text is JSON");
@@ -207,6 +212,24 @@ fn tool_views(response: &serde_json::Value) -> Vec<serde_json::Value> {
         .as_array()
         .expect("tool result is a JSON array")
         .clone()
+}
+
+/// Parse a `memory_search` payload as the shared `{search_mode, results}`
+/// envelope, returning the mode string and the results array.
+fn search_outcome(response: &serde_json::Value) -> (String, Vec<serde_json::Value>) {
+    let text = tool_text(response);
+    let value: serde_json::Value = serde_json::from_str(&text).expect("tool result text is JSON");
+    let mode = value
+        .get("search_mode")
+        .and_then(|m| m.as_str())
+        .unwrap_or_else(|| panic!("memory_search must carry a top-level search_mode: {value}"))
+        .to_string();
+    let results = value
+        .get("results")
+        .and_then(|r| r.as_array())
+        .unwrap_or_else(|| panic!("memory_search must carry a results array: {value}"))
+        .clone();
+    (mode, results)
 }
 
 #[test]
@@ -229,13 +252,18 @@ fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
         serde_json::json!({ "content": "the database connection pool config", "type": "PATTERN" }),
     );
 
-    // Search "database" → both returned, each carries a decay_score.
+    // Search "database" → both returned inside the {search_mode, results}
+    // envelope; the dead Ollama URL forces search_mode "keyword" (SEARCH-03).
     let resp = server.call_tool(
         4,
         "memory_search",
         serde_json::json!({ "query": "database" }),
     );
-    let views = tool_views(&resp);
+    let (mode, views) = search_outcome(&resp);
+    assert_eq!(
+        mode, "keyword",
+        "dead Ollama URL must surface search_mode 'keyword'"
+    );
     assert_eq!(views.len(), 2, "both 'database' memories should match");
     for v in &views {
         assert!(
@@ -245,7 +273,7 @@ fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
         assert!(v.get("id").and_then(|i| i.as_i64()).is_some());
     }
 
-    // A non-matching query → empty list, NOT an error (MCP-02 / SEARCH-01).
+    // A non-matching query → empty results, NOT an error (MCP-02 / SEARCH-01).
     let resp = server.call_tool(
         5,
         "memory_search",
@@ -255,10 +283,11 @@ fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
         resp.get("error").is_none(),
         "no-match search must not be a JSON-RPC error, got: {resp}"
     );
-    let empty = tool_views(&resp);
+    let (mode, empty) = search_outcome(&resp);
+    assert_eq!(mode, "keyword");
     assert!(
         empty.is_empty(),
-        "no-match search must return an empty list"
+        "no-match search must return an empty results array"
     );
 
     server.shutdown();
@@ -284,8 +313,11 @@ fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_fo
         .expect("memory_store returns a numeric id");
 
     // It is findable before deletion.
-    let before =
-        tool_views(&server.call_tool(3, "memory_search", serde_json::json!({ "query": "zebra" })));
+    let (_, before) = search_outcome(&server.call_tool(
+        3,
+        "memory_search",
+        serde_json::json!({ "query": "zebra" }),
+    ));
     assert_eq!(
         before.len(),
         1,
@@ -304,8 +336,11 @@ fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_fo
     assert_eq!(forget_json["deleted"], serde_json::json!(true));
 
     // Subsequent search AND list omit it (FTS5 mirror stayed in sync via trigger).
-    let after_search =
-        tool_views(&server.call_tool(5, "memory_search", serde_json::json!({ "query": "zebra" })));
+    let (_, after_search) = search_outcome(&server.call_tool(
+        5,
+        "memory_search",
+        serde_json::json!({ "query": "zebra" }),
+    ));
     assert!(
         after_search.is_empty(),
         "deleted memory must not appear in search results"

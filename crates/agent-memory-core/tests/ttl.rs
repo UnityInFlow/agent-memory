@@ -12,6 +12,7 @@ use std::sync::Arc;
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::{decay_score, DecayConfig, DEFAULT_HALF_LIFE_SECS};
 use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::embed::FakeEmbedder;
 use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs};
 use agent_memory_core::store::sqlite::SqliteStore;
 
@@ -19,7 +20,10 @@ fn service_on_temp_db(clock: Arc<dyn Clock>) -> (MemoryService, tempfile::TempDi
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
     let store = SqliteStore::open(&db_path).expect("open store");
-    let service = MemoryService::new(Arc::new(store), clock, DecayConfig::default());
+    // Succeeding hash-vector FakeEmbedder: searches here run the SEMANTIC path,
+    // which also exercises the vec_memories sync on sweep/forget (Pitfall 3).
+    let embedder = Arc::new(FakeEmbedder::with_vectors(std::collections::HashMap::new()));
+    let service = MemoryService::new(Arc::new(store), clock, embedder, DecayConfig::default());
     (service, dir)
 }
 
@@ -76,10 +80,10 @@ async fn sweep_removes_expired_rows_from_list_and_search() {
         })
         .await
         .expect("search");
-    let found_ids: Vec<i64> = found.iter().map(|v| v.id).collect();
+    let found_ids: Vec<i64> = found.results.iter().map(|v| v.id).collect();
     assert!(
         !found_ids.contains(&expiring),
-        "FTS5 mirror must drop the expired row (delete trigger synced)"
+        "expired row must be gone from search (FTS trigger + explicit vec delete synced)"
     );
     assert!(
         found_ids.contains(&durable),
@@ -125,7 +129,7 @@ async fn decay_never_deletes_low_score_no_ttl_memory_stays_retrievable() {
         .await
         .expect("search");
     assert!(
-        found.iter().any(|v| v.id == id),
+        found.results.iter().any(|v| v.id == id),
         "near-zero-decay no-TTL memory must STILL be searchable (decay != delete)"
     );
 }

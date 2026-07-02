@@ -23,7 +23,13 @@ use crate::service::{ListArgs, SearchArgs};
 use crate::store::{migrations::migrations, Store};
 
 /// Default cap on returned search rows when the caller omits `limit` (T-02-04).
-const DEFAULT_SEARCH_LIMIT: i64 = 50;
+/// `pub(crate)` so the service shares the same cap when truncating the
+/// semantic candidate set.
+pub(crate) const DEFAULT_SEARCH_LIMIT: i64 = 50;
+
+/// Hard cap on the KNN oversample size `k` (T-02-03: a huge `limit` must not
+/// turn into an unbounded vector scan).
+const MAX_KNN_K: i64 = 200;
 
 /// Register the sqlite-vec `vec0` extension process-globally. Idempotent: a
 /// `OnceLock` captures the FIRST result (success or error) so repeated calls
@@ -179,17 +185,27 @@ fn row_to_view(row: &rusqlite::Row<'_>) -> Result<MemoryView, rusqlite::Error> {
 }
 
 impl Store for SqliteStore {
-    fn insert(&self, new: NewMemory, now: i64) -> Result<i64, MemoryError> {
+    fn insert(
+        &self,
+        new: NewMemory,
+        embedding: Option<Vec<f32>>,
+        now: i64,
+    ) -> Result<i64, MemoryError> {
         let tags_json = serde_json::to_string(&new.tags).unwrap_or_else(|_| "[]".to_string());
         let base_weight = if new.mem_type.is_pinned() { 2.0 } else { 1.0 };
         let expires_at = new.ttl_secs.map(|ttl| now + ttl);
+        let embedding_status: i64 = i64::from(embedding.is_some());
 
-        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
-        conn.execute(
+        // ONE writer transaction covers the memories row, the vector row, and
+        // the status flag, so `vec_memories` can never hold a vector for a row
+        // that failed to insert (T-02-05).
+        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO memories \
              (mem_type, content, tags, source, scope, base_weight, decay_score, \
-              access_count, created_at, last_accessed, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, 0, ?7, ?7, ?8)",
+              access_count, created_at, last_accessed, expires_at, embedding_status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, 0, ?7, ?7, ?8, ?9)",
             params![
                 new.mem_type.as_wire_str(),
                 new.content,
@@ -199,9 +215,103 @@ impl Store for SqliteStore {
                 base_weight,
                 now,
                 expires_at,
+                embedding_status,
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        if let Some(vector) = embedding {
+            // Vector blob bound via bytemuck (safe zero-copy f32→u8 cast),
+            // never formatted into the SQL (T-02-01).
+            let blob: &[u8] = bytemuck::cast_slice(&vector);
+            tx.execute(
+                "INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)",
+                params![id, blob],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn knn_search(
+        &self,
+        query: Vec<f32>,
+        args: SearchArgs,
+    ) -> Result<Vec<(MemoryView, f64)>, MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        let mem_type_filter: Option<String> = args.mem_type.map(|t| t.as_wire_str().to_string());
+        // Oversample beyond the final limit (RESEARCH A6): the service re-ranks
+        // candidates by the similarity×decay blend, so fetch limit*4, capped.
+        let k = (args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1) * 4).min(MAX_KNN_K);
+        // The query vector binds as a BLOB via bytemuck — never string-formatted
+        // into the SQL (T-02-01). `k` and every filter are bound too.
+        let query_blob: &[u8] = bytemuck::cast_slice(&query);
+
+        let mut stmt = conn.prepare(
+            "WITH knn AS (SELECT memory_id, distance FROM vec_memories \
+                          WHERE embedding MATCH ?1 AND k = ?2) \
+             SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
+                    m.base_weight, m.decay_score, m.access_count, m.created_at, \
+                    m.last_accessed, m.expires_at, knn.distance \
+             FROM knn JOIN memories m ON m.id = knn.memory_id \
+             WHERE (?3 IS NULL OR m.mem_type = ?3) \
+               AND (?4 IS NULL OR m.scope = ?4) \
+               AND (?5 IS NULL OR m.tags LIKE '%' || ?5 || '%') \
+             ORDER BY knn.distance ASC",
+        )?;
+
+        let rows = stmt.query_map(
+            params![query_blob, k, mem_type_filter, args.scope, args.tag],
+            |row| {
+                let view = row_to_view(row)?;
+                let distance: f64 = row.get("distance")?;
+                Ok((view, distance))
+            },
+        )?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn insert_embedding(&self, memory_id: i64, embedding: Vec<f32>) -> Result<(), MemoryError> {
+        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let tx = conn.transaction()?;
+        let blob: &[u8] = bytemuck::cast_slice(&embedding);
+        // DELETE + INSERT instead of INSERT OR REPLACE: conflict-resolution
+        // clauses are not reliably supported on virtual tables, and the two
+        // statements share one writer transaction anyway.
+        tx.execute(
+            "DELETE FROM vec_memories WHERE memory_id = ?1",
+            params![memory_id],
+        )?;
+        tx.execute(
+            "INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)",
+            params![memory_id, blob],
+        )?;
+        tx.execute(
+            "UPDATE memories SET embedding_status = 1 WHERE id = ?1",
+            params![memory_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, content FROM memories \
+             WHERE embedding_status = 0 ORDER BY id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     fn list(&self, args: ListArgs, _now: i64) -> Result<Vec<MemoryView>, MemoryError> {
@@ -296,9 +406,15 @@ impl Store for SqliteStore {
     }
 
     fn forget(&self, id: i64) -> Result<bool, MemoryError> {
-        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
-        // Parameterized DELETE; the FTS5 delete trigger keeps the mirror in sync.
-        let changed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let tx = conn.transaction()?;
+        // Parameterized DELETEs. The FTS5 delete trigger syncs memories_fts,
+        // but that is true for FTS ONLY — vec0 virtual tables ignore triggers,
+        // so the vector row must be deleted explicitly here (RESEARCH Pitfall 3
+        // / T-02-05: a forgotten memory must never resurface semantically).
+        tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])?;
+        let changed = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(changed > 0)
     }
 
@@ -327,14 +443,23 @@ impl Store for SqliteStore {
     }
 
     fn sweep_expired(&self, now: i64) -> Result<usize, MemoryError> {
-        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
-        // The ONLY delete the sweep performs (STORE-04). Bound predicate: NULL
-        // `expires_at` rows are never matched, so a no-TTL memory is never removed
-        // here. The FTS5 AFTER DELETE trigger keeps the mirror in sync.
-        let deleted = conn.execute(
+        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let tx = conn.transaction()?;
+        // The ONLY memories delete the sweep performs (STORE-04). Bound
+        // predicate: NULL `expires_at` rows are never matched, so a no-TTL
+        // memory is never removed here. The FTS5 AFTER DELETE trigger keeps
+        // memories_fts in sync — but vec0 ignores triggers (Pitfall 3), so
+        // vectors orphaned by the TTL delete are cleared explicitly in the
+        // SAME transaction (T-02-05: vec_memories never drifts from memories).
+        let deleted = tx.execute(
             "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?1",
             params![now],
         )?;
+        tx.execute(
+            "DELETE FROM vec_memories WHERE memory_id NOT IN (SELECT id FROM memories)",
+            [],
+        )?;
+        tx.commit()?;
         Ok(deleted)
     }
 

@@ -25,6 +25,8 @@ tokio.workspace = true
 sqlite-vec.workspace = true
 reqwest.workspace = true
 bytemuck.workspace = true
+# Degrade-path warnings (embed outage) — stderr only via the binary's subscriber.
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

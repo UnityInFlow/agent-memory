@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 use agent_memory_core::clock::{Clock, SystemClock};
 use agent_memory_core::decay::DecayConfig;
+use agent_memory_core::embed::ollama::OllamaClient;
 use agent_memory_core::service::MemoryService;
 use agent_memory_core::store::sqlite::SqliteStore;
 
@@ -38,6 +39,17 @@ struct Cli {
     /// Path to the SQLite database. Overrides `AGENT_MEMORY_DB` and the default.
     #[arg(long, global = true, env = "AGENT_MEMORY_DB")]
     db: Option<PathBuf>,
+
+    /// Ollama base URL for semantic embeddings. The URL comes ONLY from this
+    /// flag/env, never from request payloads (T-02-02). When unreachable,
+    /// search degrades to keyword mode and stores stay pending (SEARCH-03).
+    #[arg(
+        long,
+        global = true,
+        env = "AGENT_MEMORY_OLLAMA_URL",
+        default_value = "http://localhost:11434"
+    )]
+    ollama_url: String,
 
     #[command(subcommand)]
     command: Command,
@@ -68,19 +80,21 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve => serve(cli.db).await,
+        Command::Serve => serve(cli.db, cli.ollama_url).await,
     }
 }
 
 /// Resolve the DB path, open the store, and serve the MCP stdio transport.
-async fn serve(db_flag: Option<PathBuf>) -> anyhow::Result<()> {
+async fn serve(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<()> {
     let db_path = resolve_db_path(db_flag).context("resolving database path")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
+    let embedder = Arc::new(OllamaClient::new(ollama_url));
     let service = MemoryService::new(
         Arc::new(store),
         Arc::new(SystemClock),
+        embedder,
         DecayConfig::default(),
     );
     let state = Arc::new(AppState { service });

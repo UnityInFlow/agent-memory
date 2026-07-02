@@ -3,9 +3,9 @@
 //! These use a REAL on-disk temp-file DB (never `:memory:`) so the restart-
 //! durability behavior is genuinely exercised: store → drop → reopen the same path.
 //!
-//! Offline-by-construction note: `agent-memory-core` has NO `reqwest`/HTTP/network
-//! dependency (see crate `Cargo.toml`), so the store/list path cannot make a network
-//! call. This is a compile-time guarantee — there is nothing to assert at runtime.
+//! Offline note: since Phase 2 the core carries `reqwest` for the Ollama
+//! embedder, but these tests inject a deterministic `FakeEmbedder`, so the
+//! store/list path under test never makes a network call.
 
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
 use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::embed::FakeEmbedder;
 use agent_memory_core::service::{ListArgs, MemoryService};
 use agent_memory_core::store::sqlite::SqliteStore;
 
@@ -38,7 +39,10 @@ fn new_memory(mem_type: MemoryType, content: &str) -> NewMemory {
 
 fn service_for(path: &std::path::Path, clock: Arc<dyn Clock>) -> MemoryService {
     let store = SqliteStore::open(path).expect("open store");
-    MemoryService::new(Arc::new(store), clock, DecayConfig::default())
+    // Succeeding hash-vector FakeEmbedder: store/list behavior under test is
+    // embedding-agnostic; deterministic vectors keep the semantic path harmless.
+    let embedder = Arc::new(FakeEmbedder::with_vectors(std::collections::HashMap::new()));
+    MemoryService::new(Arc::new(store), clock, embedder, DecayConfig::default())
 }
 
 #[tokio::test]

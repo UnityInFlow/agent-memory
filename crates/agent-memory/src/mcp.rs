@@ -168,7 +168,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Keyword-search stored memories (FTS5), ranked by relevance blended with decay score. Returns matches with their decay scores; an empty list when nothing matches."
+        description = "Search stored memories by semantic similarity (local Ollama embeddings) blended with decay, falling back to keyword/FTS5 search when the embedder is unavailable. Returns {search_mode: 'semantic'|'keyword', results: [...]}; results is empty when nothing matches."
     )]
     async fn memory_search(
         &self,
@@ -182,7 +182,9 @@ impl MemoryMcp {
             None => None,
         };
 
-        let views = self
+        // The service returns the shared SearchOutcome envelope; serialize it
+        // WHOLE so the top-level search_mode surfaces degraded state (SEARCH-03).
+        let outcome = self
             .state
             .service
             .search(ServiceSearchArgs {
@@ -195,7 +197,7 @@ impl MemoryMcp {
             .await
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        let json = serde_json::to_string(&views)
+        let json = serde_json::to_string(&outcome)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
