@@ -67,7 +67,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-03-PLAN.md — Idempotent GSD STATE.md import: tolerant parser + `import --from gsd-state` subcommand + batch embed (INTEROP-01)
+- [x] 02-03-PLAN.md — Idempotent GSD STATE.md import: tolerant parser + `import --from gsd-state` subcommand + batch embed (INTEROP-01)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -81,4 +81,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
-| 2. Semantic Search, Interop & Release | 2/4 | In Progress|  |
+| 2. Semantic Search, Interop & Release | 3/4 | In Progress|  |

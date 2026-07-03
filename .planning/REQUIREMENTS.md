@@ -34,7 +34,7 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 
 ### Interop (INTEROP)
 
-- [ ] **INTEROP-01**: User can import memories from a GSD STATE.md file (`agent-memory import --from gsd-state .planning/STATE.md`)
+- [x] **INTEROP-01**: User can import memories from a GSD STATE.md file (`agent-memory import --from gsd-state .planning/STATE.md`)
 
 ### Distribution (DIST)
 
@@ -91,7 +91,7 @@ Each v1 requirement maps to exactly one phase.
 | SEARCH-02 | Phase 2 | Complete |
 | SEARCH-03 | Phase 2 | Complete |
 | API-01 | Phase 2 | Complete |
-| INTEROP-01 | Phase 2 | Pending |
+| INTEROP-01 | Phase 2 | Complete |
 | DIST-01 | Phase 2 | Pending |
 | DIST-02 | Phase 2 | Pending |
 
