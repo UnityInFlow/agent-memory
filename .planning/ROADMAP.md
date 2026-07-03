@@ -12,7 +12,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 - Decimal phases (2.1, 2.2): Urgent insertions (marked INSERTED)
 
 - [x] **Phase 1: Core Memory Foundation** - Local SQLite-backed typed memory with decay/TTL, keyword search, and an MCP stdio server — works with zero cloud and zero Ollama (completed 2026-06-25)
-- [x] **Phase 2: Semantic Search, Interop & Release** - Local Ollama semantic search (graceful keyword fallback), REST API, GSD STATE.md import, and cross-platform binaries + Homebrew (completed 2026-07-03)
+- [x] **Phase 2: Semantic Search, Interop & Release** - Local Ollama semantic search (graceful keyword fallback), REST API, GSD STATE.md import, and cross-platform binaries + Homebrew (completed 2026-07-03; verification found 2 gaps → gap-closure plan 02-05 pending)
 
 ## Phase Details
 
@@ -55,7 +55,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
   4. Running `agent-memory import --from gsd-state .planning/STATE.md` loads memories from a GSD STATE.md file and they become searchable; re-running it does not duplicate them.
   5. A user installs the tool from a pre-built binary (macOS arm64/x86_64, Linux x86_64/aarch64) or via `brew install` and the MCP server launches successfully.
 
-**Plans**: 4 plans (coarse, vertical MVP slices — serial waves: every slice shares `main.rs`/`service.rs`/`Cargo.toml` ownership)
+**Plans**: 5 plans (4 executed coarse vertical MVP slices + 1 gap-closure plan from 02-VERIFICATION.md)
 
 **Wave 1**
 
@@ -73,6 +73,10 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 - [x] 02-04-PLAN.md — Cross-platform release: publish repo, darwin cross-compile spike gate, zigbuild release workflow, v0.0.1 + Homebrew tap (DIST-01, DIST-02)
 
+**Wave 5 — gap closure** *(from 02-VERIFICATION.md, 2026-07-03)*
+
+- [ ] 02-05-PLAN.md — Gap closure: keyword-fallback tag filter (CR-01) + malformed-FTS5-query 400/invalid_params two-tier error taxonomy (WR-05/WR-04) (SEARCH-03, API-01)
+
 ## Progress
 
 **Execution Order:**
@@ -81,4 +85,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
-| 2. Semantic Search, Interop & Release | 4/4 | Complete   | 2026-07-03 |
+| 2. Semantic Search, Interop & Release | 4/5 | Gap closure pending (02-05) | — |
