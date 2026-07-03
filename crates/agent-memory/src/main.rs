@@ -76,6 +76,24 @@ enum Command {
         #[arg(long)]
         allow_remote: bool,
     },
+    /// Import memories from an external file (INTEROP-01). Re-running the same
+    /// import is a no-op: duplicates are skipped on the exact
+    /// (source, type, content) key.
+    Import {
+        /// Source format. Supported: gsd-state (a GSD .planning/STATE.md file).
+        #[arg(long)]
+        from: String,
+
+        /// Path to the file to import.
+        path: PathBuf,
+
+        /// Scope stamped on every imported memory. Default: the GSD project
+        /// directory name — the parent of the nearest `.planning` component in
+        /// the (canonicalized) path — or the current directory's name when the
+        /// path has no `.planning` ancestor.
+        #[arg(long)]
+        scope: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -100,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(cli.db, cli.ollama_url).await,
         Command::ServeRest { addr, allow_remote } => {
             serve_rest(cli.db, cli.ollama_url, addr, allow_remote).await
+        }
+        Command::Import { from, path, scope } => {
+            run_import(cli.db, cli.ollama_url, from, path, scope).await
         }
     }
 }
@@ -194,6 +215,63 @@ async fn serve_rest(
         .await
         .context("serving REST")?;
     Ok(())
+}
+
+/// Run a one-shot import (INTEROP-01): parse the file into typed drafts, wire
+/// the store/embedder exactly like [`serve`], import idempotently, and print
+/// the report to STDOUT. stdout is sanctioned here — this is a CLI subcommand,
+/// not the MCP transport (MCP-05 applies only to `serve`).
+async fn run_import(
+    db_flag: Option<PathBuf>,
+    ollama_url: String,
+    from: String,
+    path: PathBuf,
+    scope: Option<String>,
+) -> anyhow::Result<()> {
+    if from != "gsd-state" {
+        anyhow::bail!("unsupported --from value {from:?} (supported formats: gsd-state)");
+    }
+
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let scope = scope.unwrap_or_else(|| default_scope_for(&path));
+    let parsed = agent_memory_core::import::gsd_state::parse_gsd_state(&text, Some(scope));
+
+    let db_path = resolve_db_path(db_flag).context("resolving database path")?;
+    let store = SqliteStore::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+    let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url));
+    let service = MemoryService::new(
+        Arc::new(store),
+        Arc::new(SystemClock),
+        embedder,
+        DecayConfig::default(),
+    );
+
+    let report = service.import(parsed.drafts).await.context("importing")?;
+    println!(
+        "imported: {}, skipped duplicates: {}, malformed lines skipped: {}",
+        report.imported, report.skipped_duplicates, parsed.skipped
+    );
+    Ok(())
+}
+
+/// Default scope for an import when `--scope` is absent: the GSD project
+/// directory name — the parent of the nearest `.planning` component in the
+/// canonicalized path — else the current working directory's name.
+fn default_scope_for(path: &std::path::Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for ancestor in canonical.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == ".planning") {
+            if let Some(project) = ancestor.parent().and_then(|p| p.file_name()) {
+                return project.to_string_lossy().into_owned();
+            }
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "default".to_string())
 }
 
 /// Spawn the detached one-shot embedder health probe.

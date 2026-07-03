@@ -64,6 +64,17 @@ pub struct SearchOutcome {
     pub results: Vec<MemoryView>,
 }
 
+/// Outcome of one [`MemoryService::import`] batch (INTEROP-01): how many drafts
+/// landed as new rows and how many were dropped as exact duplicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ImportReport {
+    /// Drafts inserted as new memories.
+    pub imported: usize,
+    /// Drafts skipped because an identical `(source, mem_type, content)` row
+    /// already exists — the idempotency guarantee.
+    pub skipped_duplicates: usize,
+}
+
 /// The core memory service: validates input, stamps timestamps from the injected
 /// clock, embeds best-effort via the injected [`Embedder`], and delegates
 /// persistence to the [`Store`].
@@ -228,6 +239,83 @@ impl MemoryService {
                 })
             }
         }
+    }
+
+    /// Import a batch of drafts idempotently (INTEROP-01).
+    ///
+    /// 1. **Dedup** — every draft is checked against the store on the exact
+    ///    `(source, mem_type, content)` key via [`Store::exists`], in ONE
+    ///    `spawn_blocking` hop over the whole batch. An edited bullet imports
+    ///    as a NEW memory by design: the key is exact content equality — the
+    ///    idempotency contract (phase success criterion 4) requires only that
+    ///    an unchanged re-import creates no duplicates.
+    /// 2. **Batch embed** — all new contents go to the embedder in ONE call
+    ///    (`/api/embed` accepts an array). On failure, one warning is logged
+    ///    and every draft inserts with a pending embedding — an import NEVER
+    ///    fails because Ollama is down (SEARCH-03; the sweep backfills later).
+    /// 3. **Insert** — new drafts land via the standard [`Store::insert`]
+    ///    path, all stamped with one clock reading.
+    pub async fn import(&self, drafts: Vec<NewMemory>) -> Result<ImportReport, MemoryError> {
+        let now = self.clock.now();
+
+        // (1) Partition new vs duplicate in one blocking hop (read pool).
+        let store = self.store.clone();
+        let (fresh, skipped_duplicates) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<NewMemory>, usize), MemoryError> {
+                let mut fresh = Vec::new();
+                let mut duplicates = 0usize;
+                for draft in drafts {
+                    let source = draft.source.as_deref().unwrap_or("");
+                    if store.exists(source, draft.mem_type, &draft.content)? {
+                        duplicates += 1;
+                    } else {
+                        fresh.push(draft);
+                    }
+                }
+                Ok((fresh, duplicates))
+            })
+            .await
+            .map_err(MemoryError::Join)??;
+
+        if fresh.is_empty() {
+            return Ok(ImportReport {
+                imported: 0,
+                skipped_duplicates,
+            });
+        }
+
+        // (2) One best-effort batch embed call for every new draft.
+        let contents: Vec<String> = fresh.iter().map(|d| d.content.clone()).collect();
+        let embeddings = match self.embedder.embed(&contents).await {
+            Ok(vectors) if vectors.len() == fresh.len() => Some(vectors),
+            Ok(_) => {
+                tracing::warn!("import embedding skipped (batch size mismatch); rows land pending");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("import embedding failed ({e}); rows land pending");
+                None
+            }
+        };
+
+        // (3) Insert every new draft through the standard store path.
+        let store = self.store.clone();
+        let imported = tokio::task::spawn_blocking(move || -> Result<usize, MemoryError> {
+            let mut imported = 0usize;
+            for (i, draft) in fresh.into_iter().enumerate() {
+                let embedding = embeddings.as_ref().map(|v| v[i].clone());
+                store.insert(draft, embedding, now)?;
+                imported += 1;
+            }
+            Ok(imported)
+        })
+        .await
+        .map_err(MemoryError::Join)??;
+
+        Ok(ImportReport {
+            imported,
+            skipped_duplicates,
+        })
     }
 
     /// Fire-and-forget recency bump: retrieving a memory bumps its

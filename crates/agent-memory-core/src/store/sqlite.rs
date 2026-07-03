@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
@@ -312,6 +312,26 @@ impl Store for SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn exists(
+        &self,
+        source: &str,
+        mem_type: MemoryType,
+        content: &str,
+    ) -> Result<bool, MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        // The INTEROP-01 dedup probe: all three key values bound, never
+        // formatted into the SQL (T-02-20).
+        let found = conn
+            .query_row(
+                "SELECT 1 FROM memories \
+                 WHERE source = ?1 AND mem_type = ?2 AND content = ?3 LIMIT 1",
+                params![source, mem_type.as_wire_str(), content],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(found.is_some())
     }
 
     fn list(&self, args: ListArgs, _now: i64) -> Result<Vec<MemoryView>, MemoryError> {

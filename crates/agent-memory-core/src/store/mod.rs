@@ -10,7 +10,7 @@ pub mod migrations;
 pub mod sqlite;
 
 use crate::decay::{DecayConfig, RankWeights};
-use crate::domain::{MemoryError, MemoryView, NewMemory};
+use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
 use crate::service::{ListArgs, SearchArgs};
 
 /// Synchronous persistence interface, implemented by [`sqlite::SqliteStore`].
@@ -46,6 +46,16 @@ pub trait Store: Send + Sync {
     /// The ids + contents of up to `limit` rows still awaiting an embedding
     /// (`embedding_status = 0`), oldest first — the sweep backfill work queue.
     fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError>;
+
+    /// The INTEROP-01 idempotency probe: does a row with exactly this
+    /// `(source, mem_type, content)` key already exist? `MemoryService::import`
+    /// checks it before every insert so re-importing the same file is a no-op.
+    fn exists(
+        &self,
+        source: &str,
+        mem_type: MemoryType,
+        content: &str,
+    ) -> Result<bool, MemoryError>;
 
     /// List stored memories newest-first, honoring optional type/tag/scope filters
     /// and an optional limit. `now` is reserved for on-read decay recomputation in
