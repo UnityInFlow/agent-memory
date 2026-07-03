@@ -38,8 +38,8 @@ Requirements for the v0.0.1 release. Each maps to a roadmap phase.
 
 ### Distribution (DIST)
 
-- [ ] **DIST-01**: Pre-built binaries are published for macOS (arm64/x86_64) and Linux (x86_64/aarch64)
-- [ ] **DIST-02**: A Homebrew formula installs the binary
+- [x] **DIST-01**: Pre-built binaries are published for macOS (arm64/x86_64) and Linux (x86_64/aarch64)
+- [x] **DIST-02**: A Homebrew formula installs the binary
 
 ## v2 Requirements
 
@@ -92,8 +92,8 @@ Each v1 requirement maps to exactly one phase.
 | SEARCH-03 | Phase 2 | Complete |
 | API-01 | Phase 2 | Complete |
 | INTEROP-01 | Phase 2 | Complete |
-| DIST-01 | Phase 2 | Pending |
-| DIST-02 | Phase 2 | Pending |
+| DIST-01 | Phase 2 | Complete |
+| DIST-02 | Phase 2 | Complete |
 
 **Coverage:**
 

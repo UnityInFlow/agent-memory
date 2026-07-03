@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
+status: verifying
 stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-07-03T06:07:34.915Z"
+last_updated: "2026-07-03T07:57:15.551Z"
 last_activity: 2026-07-02 -- Phase 02 execution started
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 7
-  completed_plans: 6
-  percent: 50
+  completed_plans: 7
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 
 Phase: 02 (semantic-search-interop-release) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-02 -- Phase 02 execution started
 
 Progress: [██████████] 100% (Phase 1 plans)
@@ -55,6 +55,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 | Phase 02 P01 | 26 min | 3 tasks | 20 files |
 | Phase 02 P02 | 10 min | 2 tasks | 8 files |
 | Phase 02 P03 | 40 min | 2 tasks | 9 files |
+| Phase 02 P04 | 1h 46m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,9 @@ Recent decisions affecting current work:
 - [Phase 02-01]: Local darwin zigbuild canary PASSED (aarch64-apple-darwin builds+runs incl. sqlite-vec bundled C) — non-authoritative (darwin host, zig 0.16.0 vs pinned 0.14.1) but a strong positive prior for the 02-04 orangepi spike gate
 - [Phase 02-02]: AppState carries Arc<dyn Embedder> and spawn_health_probe takes the trait object — one wiring shape for serve and serve-rest; REST /health reads embedder status without reaching into service internals
 - [Phase 02-02]: REST forget 404 body reuses the exact mcp.rs not-found JSON ({id, deleted:false, reason:not_found}) instead of the generic ApiError shape — cross-transport body consistency
+- [Phase 02-04]: chrono trimmed to default-features=false, features=[now] (UTC-only) — the default clock feature pulls iana-time-zone -> core-foundation-sys, un-linkable by zig darwin cross without a macOS SDK; Local time must never be reintroduced
+- [Phase 02-04]: v0.0.1 ships without musl binaries: sqlite-vec.c uses BSD u_int*_t typedefs musl lacks; gnu covers Linux (musl was best-effort); fix upstream or CFLAGS shim in v2
+- [Phase 02-04]: Coverage-bearing tests must run in-process: a SIGKILL'd spawned binary flushes no LLVM profile data — tests/rest.rs contributes 0%; the direct handler tests carry the 80% gate
 
 ### Pending Todos
 
@@ -111,6 +115,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-03T06:07:34.911Z
+Last session: 2026-07-03T07:57:01.205Z
 Stopped at: Completed 02-03-PLAN.md
 Resume file: None
