@@ -39,8 +39,13 @@ anyhow = "1"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
-# Time + paths
-chrono = "0.4"
+# Time + paths.
+# chrono is trimmed to `now` (Utc::now only — the codebase is UTC-everywhere,
+# Phase 1 rule): the default `clock` feature pulls iana-time-zone →
+# core-foundation-sys, whose `-framework CoreFoundation` cannot be linked by
+# zig when cross-compiling to apple-darwin (no macOS SDK on the Linux runner —
+# the 02-04 spike failure). `Local` time must never be reintroduced.
+chrono = { version = "0.4", default-features = false, features = ["now"] }
 dirs = "6"
 
 # sqlite-vec 0.1.9: vec0 virtual table for KNN semantic search (SEARCH-02). Its
