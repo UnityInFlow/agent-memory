@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-07-03T09:10:13.694Z"
-last_activity: 2026-07-02 -- Phase 02 execution started
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-07-03T11:53:53.091Z"
+last_activity: 2026-07-03 -- Phase 02 execution started
 progress:
   total_phases: 2
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
+  total_plans: 8
+  completed_plans: 8
   percent: 100
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-06-24)
 ## Current Position
 
 Phase: 02 (semantic-search-interop-release) — EXECUTING
-Plan: 4 of 4
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-07-02 -- Phase 02 execution started
+Last activity: 2026-07-03 -- Phase 02 execution started
 
 Progress: [██████████] 100% (Phase 1 plans)
 
@@ -56,6 +56,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 | Phase 02 P02 | 10 min | 2 tasks | 8 files |
 | Phase 02 P03 | 40 min | 2 tasks | 9 files |
 | Phase 02 P04 | 1h 46m | 3 tasks | 7 files |
+| Phase 02 P05 | 8 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,8 @@ Recent decisions affecting current work:
 - [Phase 02-04]: chrono trimmed to default-features=false, features=[now] (UTC-only) — the default clock feature pulls iana-time-zone -> core-foundation-sys, un-linkable by zig darwin cross without a macOS SDK; Local time must never be reintroduced
 - [Phase 02-04]: v0.0.1 ships without musl binaries: sqlite-vec.c uses BSD u_int*_t typedefs musl lacks; gnu covers Linux (musl was best-effort); fix upstream or CFLAGS shim in v2
 - [Phase 02-04]: Coverage-bearing tests must run in-process: a SIGKILL'd spawned binary flushes no LLVM profile data — tests/rest.rs contributes 0%; the direct handler tests carry the 80% gate
+- [Phase ?]: [02-05] map_fts_query_error classifies FTS5 parse failures at the store seam (markers: fts5: syntax error / unterminated string) as MemoryError::InvalidQuery -> REST 400 / MCP invalid_params; prepare errors stay internal
+- [Phase ?]: [02-05] shared map_mcp_error gives MCP the same client/internal error split as REST map_memory_error; NotFound-as-error is internal_error, clean not-found stays the Ok(false) forget result
 
 ### Pending Todos
 
@@ -115,6 +118,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-03T07:57:01.205Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-07-03T11:53:53.086Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None

@@ -75,7 +75,7 @@ agent-memory ships as a single local Rust binary that gives AI agents a persiste
 
 **Wave 5 — gap closure** *(from 02-VERIFICATION.md, 2026-07-03)*
 
-- [ ] 02-05-PLAN.md — Gap closure: keyword-fallback tag filter (CR-01) + malformed-FTS5-query 400/invalid_params two-tier error taxonomy (WR-05/WR-04) (SEARCH-03, API-01)
+- [x] 02-05-PLAN.md — Gap closure: keyword-fallback tag filter (CR-01) + malformed-FTS5-query 400/invalid_params two-tier error taxonomy (WR-05/WR-04) (SEARCH-03, API-01)
 
 ## Progress
 
@@ -85,4 +85,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Memory Foundation | 3/3 | Complete    | 2026-06-25 |
-| 2. Semantic Search, Interop & Release | 4/5 | Gap closure pending (02-05) | — |
+| 2. Semantic Search, Interop & Release | 5/5 | Complete   | 2026-07-03 |
