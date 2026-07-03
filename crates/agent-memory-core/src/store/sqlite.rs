@@ -390,6 +390,7 @@ impl Store for SqliteStore {
              WHERE memories_fts MATCH ?1 \
                AND (?2 IS NULL OR m.mem_type = ?2) \
                AND (?3 IS NULL OR m.scope = ?3) \
+               AND (?10 IS NULL OR m.tags LIKE '%' || ?10 || '%') \
              ORDER BY ( (-bm25(memories_fts)) * ?4 \
                         + exp( -0.6931471805599453 * MAX(?6 - m.last_accessed, 0) \
                                / (CASE WHEN m.mem_type IN \
@@ -410,6 +411,7 @@ impl Store for SqliteStore {
                 cfg.half_life_secs,
                 pinned_hl,
                 limit,
+                args.tag,
             ],
             row_to_view,
         );

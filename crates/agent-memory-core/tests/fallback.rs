@@ -80,6 +80,56 @@ async fn store_succeeds_with_failing_embedder_and_row_is_listable() {
 }
 
 #[tokio::test]
+async fn keyword_fallback_honors_tag_filter() {
+    // Gap 1 / CR-01 regression: the degraded keyword mode must honor the SAME
+    // tag filter the semantic path does — a tag-filtered search with a dead
+    // embedder may never return the unfiltered superset (SEARCH-03 / SC2).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let clock = Arc::new(TestClock::new(1_000));
+    let service = service_for(&db_path, clock.clone(), Arc::new(FakeEmbedder::failing()));
+
+    let mut alpha = new_memory("the deploy pipeline for staging", MemoryType::Pattern);
+    alpha.tags = vec!["alpha".to_string()];
+    let alpha_id = service
+        .store(alpha)
+        .await
+        .expect("store alpha row while embedder is down");
+
+    let mut beta = new_memory("the release pipeline for production", MemoryType::Pattern);
+    beta.tags = vec!["beta".to_string()];
+    service
+        .store(beta)
+        .await
+        .expect("store beta row while embedder is down");
+
+    let outcome = service
+        .search(SearchArgs {
+            query: "pipeline".to_string(),
+            tag: Some("alpha".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("tag-filtered search MUST NOT error when the embedder is down");
+
+    assert_eq!(
+        outcome.search_mode,
+        SearchMode::Keyword,
+        "a dead embedder must surface search_mode 'keyword'"
+    );
+    assert_eq!(
+        outcome.results.len(),
+        1,
+        "the tag filter must exclude the beta-tagged row in keyword mode, got: {:?}",
+        outcome.results
+    );
+    assert_eq!(
+        outcome.results[0].id, alpha_id,
+        "the single result must be the alpha-tagged row"
+    );
+}
+
+#[tokio::test]
 async fn search_with_failing_embedder_returns_keyword_results_never_error_or_empty() {
     // The Pitfall 2 kill-test: a dead embedder must route to the FTS5 path and
     // return the keyword matches — NOT an error, NOT an empty list.
