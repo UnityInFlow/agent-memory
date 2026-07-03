@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::domain::{MemoryError, MemoryType, NewMemory};
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
 use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs, SearchMode};
 use agent_memory_core::store::sqlite::SqliteStore;
@@ -126,6 +126,38 @@ async fn keyword_fallback_honors_tag_filter() {
     assert_eq!(
         outcome.results[0].id, alpha_id,
         "the single result must be the alpha-tagged row"
+    );
+}
+
+#[tokio::test]
+async fn malformed_fts5_query_maps_to_invalid_query_in_keyword_mode() {
+    // Gap 2 / WR-05 regression: a query FTS5 cannot parse (a lone double-quote)
+    // is CLIENT input, not an internal failure — the store seam must surface it
+    // as MemoryError::InvalidQuery, never MemoryError::Sqlite (API-01).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let clock = Arc::new(TestClock::new(1_000));
+    let service = service_for(&db_path, clock.clone(), Arc::new(FakeEmbedder::failing()));
+
+    service
+        .store(new_memory(
+            "any row so the table is non-empty",
+            MemoryType::Pattern,
+        ))
+        .await
+        .expect("store succeeds while embedder is down");
+
+    let err = service
+        .search(SearchArgs {
+            query: "\"".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a lone double-quote is not a valid FTS5 match expression");
+
+    assert!(
+        matches!(err, MemoryError::InvalidQuery(_)),
+        "malformed FTS5 input must map to InvalidQuery, got: {err:?}"
     );
 }
 

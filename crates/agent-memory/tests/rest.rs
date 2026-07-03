@@ -198,6 +198,25 @@ async fn rest_end_to_end_store_list_search_forget_health() {
         "search results must contain the stored id {id}, got: {body}"
     );
 
+    // POST /api/search with a malformed FTS5 query (a lone double-quote) in
+    // keyword mode → 400 with an error body — CLIENT input, never a 500.
+    let resp = client
+        .post(format!("{base}/api/search"))
+        .json(&serde_json::json!({ "query": "\"" }))
+        .send()
+        .await
+        .expect("malformed-query search request");
+    assert_eq!(
+        resp.status(),
+        400,
+        "malformed FTS5 query must map to 400, never 500"
+    );
+    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
+    assert!(
+        body.get("error").and_then(|e| e.as_str()).is_some(),
+        "400 body must carry an error field, got: {body}"
+    );
+
     // DELETE /api/memories/{id} → 200 deleted:true, then 404 on the SAME id.
     let resp = client
         .delete(format!("{base}/api/memories/{id}"))

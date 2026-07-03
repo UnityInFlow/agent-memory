@@ -121,6 +121,9 @@ pub enum MemoryError {
     #[error("invalid memory type '{0}' (expected one of DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT)")]
     InvalidType(String),
 
+    #[error("invalid search query {0:?}: not a valid FTS5 match expression")]
+    InvalidQuery(String),
+
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 

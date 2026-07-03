@@ -81,11 +81,14 @@ pub struct ListQuery {
 }
 
 /// Two-tier [`MemoryError`] → HTTP mapping, mirroring `mcp.rs`'s
-/// `invalid_params` / `internal_error` split: `InvalidType` is client input
-/// (400), `NotFound` is a missing resource (404), everything else is 500.
+/// `invalid_params` / `internal_error` split: `InvalidType` and `InvalidQuery`
+/// are client input (400), `NotFound` is a missing resource (404), everything
+/// else is 500.
 fn map_memory_error(e: MemoryError) -> ApiError {
     match &e {
-        MemoryError::InvalidType(_) => ApiError::BadRequest(e.to_string()),
+        MemoryError::InvalidType(_) | MemoryError::InvalidQuery(_) => {
+            ApiError::BadRequest(e.to_string())
+        }
         MemoryError::NotFound => ApiError::NotFound,
         MemoryError::Sqlite(_)
         | MemoryError::Pool(_)
@@ -392,6 +395,49 @@ mod tests {
         assert_eq!(body["search_mode"], "keyword");
         let results = body["results"].as_array().expect("results array");
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_with_malformed_query_returns_400_never_500() {
+        // Gap 2 / WR-05: a lone double-quote is not a valid FTS5 match
+        // expression — CLIENT input must map to 400, never a 500 (API-01).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        store_handler(
+            State(state.clone()),
+            Json(store_request("any searchable row", "PATTERN")),
+        )
+        .await
+        .expect("store succeeds");
+
+        let err = search_handler(
+            State(state),
+            Json(SearchRequest {
+                query: "\"".to_string(),
+                r#type: None,
+                tag: None,
+                scope: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("malformed FTS5 query is rejected as client input");
+
+        let resp = err.into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed FTS5 query must map to 400, never 500"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            !body["error"]
+                .as_str()
+                .expect("400 body carries a string error field")
+                .is_empty(),
+            "the error message must be non-empty, got: {body}"
+        );
     }
 
     #[tokio::test]

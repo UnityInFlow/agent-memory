@@ -12,11 +12,34 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
-use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::domain::{MemoryError, MemoryType, NewMemory};
 use agent_memory_core::embed::Embedder;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, MemoryService, SearchArgs as ServiceSearchArgs,
 };
+
+/// Shared two-tier [`MemoryError`] → [`McpError`] mapping for all four tool
+/// service calls — the mirror of `rest/handlers.rs`'s `map_memory_error`
+/// (closes review WR-04): client input (`InvalidType`, `InvalidQuery`) reports
+/// as `invalid_params`; internal failures (`Sqlite`, `Pool`, `Join`,
+/// `Migration`, `NotFound`) report as `internal_error`, so agents never enter
+/// argument-repair loops over a DB fault (T-02G-03).
+///
+/// `NotFound` as an *error* only arises from internal store conditions (e.g. a
+/// poisoned writer mutex) — MCP's clean not-found is the `Ok(false)` forget
+/// result, unchanged.
+fn map_mcp_error(e: MemoryError) -> McpError {
+    match &e {
+        MemoryError::InvalidType(_) | MemoryError::InvalidQuery(_) => {
+            McpError::invalid_params(e.to_string(), None)
+        }
+        MemoryError::Sqlite(_)
+        | MemoryError::Pool(_)
+        | MemoryError::Join(_)
+        | MemoryError::Migration(_)
+        | MemoryError::NotFound => McpError::internal_error(e.to_string(), None),
+    }
+}
 
 /// Shared application state handed to every tool invocation (and to the REST
 /// handlers — both transports adapt the same state, same service).
@@ -130,12 +153,7 @@ impl MemoryMcp {
             ttl_secs: args.ttl_secs,
         };
 
-        let id = self
-            .state
-            .service
-            .store(new)
-            .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let id = self.state.service.store(new).await.map_err(map_mcp_error)?;
 
         Ok(CallToolResult::success(vec![Content::text(id.to_string())]))
     }
@@ -165,7 +183,7 @@ impl MemoryMcp {
                 limit: args.limit,
             })
             .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(map_mcp_error)?;
 
         let json = serde_json::to_string(&views)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -200,7 +218,7 @@ impl MemoryMcp {
                 limit: args.limit,
             })
             .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(map_mcp_error)?;
 
         let json = serde_json::to_string(&outcome)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -219,7 +237,7 @@ impl MemoryMcp {
             .service
             .forget(args.id)
             .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(map_mcp_error)?;
 
         // Ok(false) is a clean not-found, NOT an error (MCP-04). Both branches are
         // a successful tool call returning a small JSON status object.
@@ -247,5 +265,32 @@ impl ServerHandler for MemoryMcp {
                 .to_string(),
         );
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_mcp_error_splits_client_and_internal_tiers() {
+        let invalid_params_code = McpError::invalid_params("x", None).code;
+        let internal_error_code = McpError::internal_error("x", None).code;
+
+        assert_eq!(
+            map_mcp_error(MemoryError::InvalidQuery("\"".into())).code,
+            invalid_params_code,
+            "a malformed FTS5 query is client input → invalid_params"
+        );
+        assert_eq!(
+            map_mcp_error(MemoryError::InvalidType("BOGUS".into())).code,
+            invalid_params_code,
+            "an unknown memory type is client input → invalid_params"
+        );
+        assert_eq!(
+            map_mcp_error(MemoryError::NotFound).code,
+            internal_error_code,
+            "NotFound-as-error only arises from internal store conditions → internal_error"
+        );
     }
 }

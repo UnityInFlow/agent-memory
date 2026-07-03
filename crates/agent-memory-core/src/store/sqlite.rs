@@ -184,6 +184,27 @@ fn row_to_view(row: &rusqlite::Row<'_>) -> Result<MemoryView, rusqlite::Error> {
     })
 }
 
+/// Classify a post-bind FTS5 execution error at the store seam: a MATCH string
+/// FTS5 cannot parse is CLIENT input → [`MemoryError::InvalidQuery`]; anything
+/// else stays an internal [`MemoryError::Sqlite`].
+///
+/// Observed FTS5 query-parse messages from the bundled SQLite: a lone `"`
+/// reports `unterminated string`; other malformed expressions (dangling
+/// operators, bad NEAR syntax, …) report `fts5: syntax error`. The regression
+/// test in `tests/fallback.rs` defines correctness; the string markers serve it.
+///
+/// Only errors surfacing AFTER the MATCH parameter is bound (statement step /
+/// row iteration) go through here — a `conn.prepare` failure (e.g. missing
+/// fts5 module) is an internal error, not client input.
+fn map_fts_query_error(query: &str, e: rusqlite::Error) -> MemoryError {
+    let msg = e.to_string();
+    if msg.contains("fts5: syntax error") || msg.contains("unterminated string") {
+        MemoryError::InvalidQuery(query.to_string())
+    } else {
+        MemoryError::Sqlite(e)
+    }
+}
+
 impl Store for SqliteStore {
     fn insert(
         &self,
@@ -416,13 +437,16 @@ impl Store for SqliteStore {
             row_to_view,
         );
 
-        // A malformed FTS5 MATCH string surfaces here as a typed Sqlite error,
-        // which the service maps to a clean invalid-params error — no panic
-        // (T-02-02). A valid query that matches nothing yields an empty vec.
-        let rows = rows?;
+        // A malformed FTS5 MATCH string surfaces at step time (the bound MATCH
+        // parses on execution, not prepare) and is mapped HERE, at the store
+        // seam, to MemoryError::InvalidQuery via map_fts_query_error — which
+        // both transports surface as a client error (REST 400 / MCP
+        // invalid_params), never a panic and never a 500 (T-02-02, WR-05).
+        // A valid query that matches nothing yields an empty vec.
+        let rows = rows.map_err(|e| map_fts_query_error(&args.query, e))?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row?);
+            out.push(row.map_err(|e| map_fts_query_error(&args.query, e))?);
         }
         Ok(out)
     }
