@@ -12,7 +12,17 @@ name: Spike — Windows + musl cross-compile (Phase 3, D-10/D-11)
 # sanctioned ecosystem D-02 exception and supersedes the inner CLAUDE.md's
 # "never ubuntu-latest" for this repo.
 #
-# VERDICT (Phase 3, D-11): pending — recorded by Task 3 after the dispatch
+# VERDICT (Phase 3, D-11, recorded 2026-07-12, run https://github.com/UnityInFlow/agent-memory/actions/runs/29196226289):
+#   x86_64-unknown-linux-musl (zigbuild): GREEN — cargo-zigbuild 0.23.0 + zig 0.14.1;
+#     CFLAGS_x86_64_unknown_linux_musl='-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t';
+#     static binary executed `--version` on the x86_64 runner (strongest smoke signal)
+#   aarch64-unknown-linux-musl (zigbuild): GREEN — same -Du_int*_t shim (aarch64-suffixed var); presence-only (foreign arch)
+#   x86_64-pc-windows-msvc (xwin): GREEN — cargo-xwin 0.23.0 + rustup llvm-tools; `cargo xwin build`
+#     compiled bundled sqlite3.c + sqlite-vec.c via clang-cl; agent-memory.exe present
+#   x86_64-pc-windows-gnu (mingw): GREEN — apt gcc-mingw-w64-x86-64,
+#     CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc; agent-memory.exe present
+#   Phase 6: Windows leg = cargo-xwin 0.23.0 msvc (first rung of the D-11 ladder — msvc green,
+#   gnu also green as proven fallback); musl legs = zigbuild 0.23.0 + CFLAGS -Du_int*_t shim: GREEN (both)
 on:
   workflow_dispatch:
 
