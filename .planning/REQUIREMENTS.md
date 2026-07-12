@@ -58,10 +58,23 @@ Acknowledged but deferred — not in this milestone.
 
 ## Traceability
 
-Filled by roadmap creation.
+Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped to Phases 3-6.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| API-02 | Phase 3 | Pending |
+| API-03 | Phase 3 | Pending |
+| MCP-06 | Phase 4 | Pending |
+| MCP-07 | Phase 4 | Pending |
+| STORE-05 | Phase 4 | Pending |
+| SEARCH-04 | Phase 4 | Pending |
+| SEARCH-05 | Phase 4 | Pending |
+| DIST-04 | Phase 5 | Pending |
+| INTEROP-02 | Phase 5 | Pending |
+| DIST-05 | Phase 6 | Pending |
+| DIST-03 | Phase 6 | Pending |
+| DIST-06 | Phase 6 | Pending |
 
 ---
 *Requirements defined: 2026-07-12 from approved v2 backlog + 4-dimension research (research/SUMMARY.md)*
+*Traceability filled: 2026-07-12 by roadmap creation (Phases 3-6)*
