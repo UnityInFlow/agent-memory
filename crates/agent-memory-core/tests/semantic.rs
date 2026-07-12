@@ -240,6 +240,81 @@ async fn forgotten_memory_never_resurfaces_semantically() {
     assert_eq!(vec_rows, 0, "forget must delete the vec_memories row");
 }
 
+#[tokio::test]
+async fn tag_filter_is_exact_on_knn_path() {
+    // API-03 / D-07..D-09 regression, knn_search site: tag=rust must match
+    // ONLY a memory tagged exactly "rust" — never "rustling" (substring
+    // over-match) and never "Rust" (case-insensitivity). tag=None keeps the
+    // NULL-disables-filter convention.
+    let shared = unit_axis(0);
+    let mut vectors = HashMap::new();
+    vectors.insert(
+        "the deploy pipeline for staging".to_string(),
+        shared.clone(),
+    );
+    vectors.insert(
+        "the release pipeline for production".to_string(),
+        shared.clone(),
+    );
+    vectors.insert("pipeline".to_string(), shared);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let clock = Arc::new(TestClock::new(1_000));
+    let embedder = Arc::new(FakeEmbedder::with_vectors(vectors));
+    let service = service_for(&db_path, clock.clone(), embedder);
+
+    let mut rust_row = new_memory("the deploy pipeline for staging", MemoryType::Pattern);
+    rust_row.tags = vec!["rust".to_string()];
+    let rust_id = service.store(rust_row).await.expect("store rust row");
+
+    let mut rustling_row = new_memory("the release pipeline for production", MemoryType::Pattern);
+    rustling_row.tags = vec!["rustling".to_string()];
+    service
+        .store(rustling_row)
+        .await
+        .expect("store rustling row");
+
+    let search = |tag: Option<&str>| SearchArgs {
+        query: "pipeline".to_string(),
+        tag: tag.map(str::to_string),
+        ..Default::default()
+    };
+
+    let outcome = service
+        .search(search(Some("rust")))
+        .await
+        .expect("tag-filtered semantic search");
+    assert_eq!(outcome.search_mode, SearchMode::Semantic);
+    assert_eq!(
+        outcome.results.len(),
+        1,
+        "tag=rust must match ONLY the exactly-rust-tagged row on the knn path, got: {:?}",
+        outcome.results
+    );
+    assert_eq!(outcome.results[0].id, rust_id);
+
+    let outcome = service
+        .search(search(Some("Rust")))
+        .await
+        .expect("case-mismatched tag search");
+    assert!(
+        outcome.results.is_empty(),
+        "tag matching must be case-sensitive: 'Rust' must not match 'rust' (D-08), got: {:?}",
+        outcome.results
+    );
+
+    let outcome = service
+        .search(search(None))
+        .await
+        .expect("unfiltered semantic search");
+    assert_eq!(
+        outcome.results.len(),
+        2,
+        "tag=None must disable the filter and return both rows"
+    );
+}
+
 /// Live end-to-end proof against a REAL local Ollama (Open Question 4 policy:
 /// CI never runs this — `cargo test -p agent-memory-core --test semantic -- --ignored`).
 #[tokio::test]

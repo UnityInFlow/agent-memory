@@ -138,6 +138,65 @@ async fn omitted_scope_persists_null_and_filters_apply() {
 }
 
 #[tokio::test]
+async fn list_tag_filter_is_exact_and_case_sensitive() {
+    // API-03 / D-07..D-09 regression, list site: tag=rust must match ONLY the
+    // exactly-rust-tagged row — never "rustling" (substring) and never via
+    // "Rust" (case). tag=None keeps the NULL-disables-filter convention.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let clock = Arc::new(TestClock::new(4_000));
+    let service = service_for(&db_path, clock.clone());
+
+    clock.advance(1);
+    let mut rust_row = new_memory(MemoryType::Pattern, "the deploy pipeline for staging");
+    rust_row.tags = vec!["rust".to_string()];
+    let rust_id = service.store(rust_row).await.expect("store rust row");
+
+    clock.advance(1);
+    let mut rustling_row = new_memory(MemoryType::Pattern, "the release pipeline for production");
+    rustling_row.tags = vec!["rustling".to_string()];
+    service
+        .store(rustling_row)
+        .await
+        .expect("store rustling row");
+
+    let list_by_tag = |tag: Option<&str>| ListArgs {
+        tag: tag.map(str::to_string),
+        ..ListArgs::default()
+    };
+
+    let rows = service
+        .list(list_by_tag(Some("rust")))
+        .await
+        .expect("tag-filtered list");
+    assert_eq!(
+        rows.len(),
+        1,
+        "tag=rust must match ONLY the exactly-rust-tagged row on the list path, got: {rows:?}"
+    );
+    assert_eq!(rows[0].id, rust_id);
+
+    let rows = service
+        .list(list_by_tag(Some("Rust")))
+        .await
+        .expect("case-mismatched tag list");
+    assert!(
+        rows.is_empty(),
+        "tag matching must be case-sensitive: 'Rust' must not match 'rust' (D-08), got: {rows:?}"
+    );
+
+    let rows = service
+        .list(list_by_tag(None))
+        .await
+        .expect("unfiltered list");
+    assert_eq!(
+        rows.len(),
+        2,
+        "tag=None must disable the filter and return both rows"
+    );
+}
+
+#[tokio::test]
 async fn limit_caps_count_and_order_is_newest_first() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");

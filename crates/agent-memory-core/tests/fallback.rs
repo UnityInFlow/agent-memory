@@ -130,6 +130,70 @@ async fn keyword_fallback_honors_tag_filter() {
 }
 
 #[tokio::test]
+async fn keyword_fallback_tag_filter_is_exact() {
+    // API-03 / D-07..D-09 regression, keyword-search site: extends the 02-05
+    // keyword_fallback_honors_tag_filter shape with the substring/case locks —
+    // tag=rust must not match "rustling", and "Rust" must not match "rust".
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let clock = Arc::new(TestClock::new(1_000));
+    let service = service_for(&db_path, clock.clone(), Arc::new(FakeEmbedder::failing()));
+
+    let mut rust_row = new_memory("the deploy pipeline for staging", MemoryType::Pattern);
+    rust_row.tags = vec!["rust".to_string()];
+    let rust_id = service
+        .store(rust_row)
+        .await
+        .expect("store rust row while embedder is down");
+
+    let mut rustling_row = new_memory("the release pipeline for production", MemoryType::Pattern);
+    rustling_row.tags = vec!["rustling".to_string()];
+    service
+        .store(rustling_row)
+        .await
+        .expect("store rustling row while embedder is down");
+
+    let search = |tag: Option<&str>| SearchArgs {
+        query: "pipeline".to_string(),
+        tag: tag.map(str::to_string),
+        ..Default::default()
+    };
+
+    let outcome = service
+        .search(search(Some("rust")))
+        .await
+        .expect("tag-filtered keyword search");
+    assert_eq!(outcome.search_mode, SearchMode::Keyword);
+    assert_eq!(
+        outcome.results.len(),
+        1,
+        "tag=rust must match ONLY the exactly-rust-tagged row in keyword mode, got: {:?}",
+        outcome.results
+    );
+    assert_eq!(outcome.results[0].id, rust_id);
+
+    let outcome = service
+        .search(search(Some("Rust")))
+        .await
+        .expect("case-mismatched tag keyword search");
+    assert!(
+        outcome.results.is_empty(),
+        "tag matching must be case-sensitive: 'Rust' must not match 'rust' (D-08), got: {:?}",
+        outcome.results
+    );
+
+    let outcome = service
+        .search(search(None))
+        .await
+        .expect("unfiltered keyword search");
+    assert_eq!(
+        outcome.results.len(),
+        2,
+        "tag=None must disable the filter and return both rows"
+    );
+}
+
+#[tokio::test]
 async fn malformed_fts5_query_maps_to_invalid_query_in_keyword_mode() {
     // Gap 2 / WR-05 regression: a query FTS5 cannot parse (a lone double-quote)
     // is CLIENT input, not an internal failure — the store seam must surface it
