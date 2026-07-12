@@ -267,7 +267,9 @@ impl Store for SqliteStore {
         // candidates by the similarity×decay blend, so fetch limit*4, capped.
         let k = (args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1) * 4).min(MAX_KNN_K);
         // The query vector binds as a BLOB via bytemuck — never string-formatted
-        // into the SQL (T-02-01). `k` and every filter are bound too.
+        // into the SQL (T-02-01). `k` and every filter are bound too. The tag
+        // filter is an exact, case-sensitive json_each equality over the JSON
+        // tags array (API-03 / D-07) — same bound parameter as before.
         let query_blob: &[u8] = bytemuck::cast_slice(&query);
 
         let mut stmt = conn.prepare(
@@ -279,7 +281,8 @@ impl Store for SqliteStore {
              FROM knn JOIN memories m ON m.id = knn.memory_id \
              WHERE (?3 IS NULL OR m.mem_type = ?3) \
                AND (?4 IS NULL OR m.scope = ?4) \
-               AND (?5 IS NULL OR m.tags LIKE '%' || ?5 || '%') \
+               AND (?5 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) \
+                                          WHERE json_each.value = ?5)) \
              ORDER BY knn.distance ASC",
         )?;
 
@@ -362,14 +365,17 @@ impl Store for SqliteStore {
         let conn = self.reads.get().map_err(MemoryError::Pool)?;
         let mem_type_filter: Option<String> = args.mem_type.map(|t| t.as_wire_str().to_string());
 
-        // All filters parameterized; a NULL bound disables that predicate.
+        // All filters parameterized; a NULL bound disables that predicate. The
+        // tag filter matches whole tags exactly and case-sensitively via
+        // json_each equality (API-03 / D-07).
         let mut stmt = conn.prepare(
             "SELECT id, mem_type, content, tags, source, scope, base_weight, \
                     decay_score, access_count, created_at, last_accessed, expires_at \
              FROM memories \
              WHERE (?1 IS NULL OR mem_type = ?1) \
                AND (?2 IS NULL OR scope = ?2) \
-               AND (?3 IS NULL OR tags LIKE '%' || ?3 || '%') \
+               AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) \
+                                          WHERE json_each.value = ?3)) \
              ORDER BY created_at DESC, id DESC \
              LIMIT CASE WHEN ?4 IS NULL THEN -1 ELSE ?4 END",
         )?;
@@ -405,6 +411,8 @@ impl Store for SqliteStore {
         // so a recency bump immediately re-ranks. The CASE picks the longer
         // half-life for pinned types (DECISION/ARCHITECTURE/CONSTRAINT, D-08).
         // All params bound — the FTS5 MATCH string is never concatenated (T-02-01).
+        // The tag filter is an exact, case-sensitive json_each equality
+        // (API-03 / D-07); the FTS5 error routing below is untouched.
         let mut stmt = conn.prepare(
             "SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
                     m.base_weight, m.decay_score, m.access_count, m.created_at, \
@@ -414,7 +422,8 @@ impl Store for SqliteStore {
              WHERE memories_fts MATCH ?1 \
                AND (?2 IS NULL OR m.mem_type = ?2) \
                AND (?3 IS NULL OR m.scope = ?3) \
-               AND (?10 IS NULL OR m.tags LIKE '%' || ?10 || '%') \
+               AND (?10 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) \
+                                           WHERE json_each.value = ?10)) \
              ORDER BY ( (-bm25(memories_fts)) * ?4 \
                         + exp( -0.6931471805599453 * MAX(?6 - m.last_accessed, 0) \
                                / (CASE WHEN m.mem_type IN \

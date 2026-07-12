@@ -52,7 +52,7 @@ pub struct SearchRequest {
     /// Filter by memory type (UPPERCASE). Omit for all types.
     #[serde(default)]
     pub r#type: Option<String>,
-    /// Filter by a tag substring. Omit for all.
+    /// Filter by an exact tag (case-sensitive). Omit for all.
     #[serde(default)]
     pub tag: Option<String>,
     /// Filter by logical scope. Omit for all scopes.
@@ -69,7 +69,7 @@ pub struct ListQuery {
     /// Filter by memory type (UPPERCASE). Omit for all types.
     #[serde(default)]
     pub r#type: Option<String>,
-    /// Filter by a tag substring. Omit for all.
+    /// Filter by an exact tag (case-sensitive). Omit for all.
     #[serde(default)]
     pub tag: Option<String>,
     /// Filter by logical scope. Omit for all scopes.
