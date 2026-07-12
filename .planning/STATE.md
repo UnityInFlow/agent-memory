@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: milestone_complete
-stopped_at: Phase 02 complete — milestone v1.0 ready to archive
-last_updated: "2026-07-12T08:08:25.785Z"
-last_activity: 2026-07-12
+status: Awaiting next milestone
+stopped_at: Phase 02 complete (UAT closed, security verified, 25/25 threats closed) — milestone v1.0 ready to archive
+last_updated: "2026-07-12T08:12:08.051Z"
+last_activity: 2026-07-12 — Milestone v1.0 completed and archived
 progress:
   total_phases: 2
   completed_phases: 2
@@ -25,12 +25,10 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 
 ## Current Position
 
-Phase: 02 (complete — last phase of milestone v1.0)
-Plan: All executed
-Status: Milestone complete, ready to archive
-Last activity: 2026-07-12
-
-Progress: [████████████████████] 8/8 plans (100%)
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-12 — Milestone v1.0 completed and archived
 
 ## Performance Metrics
 
@@ -99,6 +97,7 @@ None yet.
 None open for milestone v1.0 — all Phase 1 pitfalls (stdout purity, spawn_blocking writer lane, decay-never-deletes, injectable Clock/WAL) were resolved in the foundation and verified; the Phase 2 release shipped via the orangepi serial-build path (ecosystem OPS-01 standard).
 
 Carried notes for v2 planning:
+
 - musl Linux binaries blocked by sqlite-vec.c BSD typedefs (upstream fix or CFLAGS shim).
 - REST boundary-value hardening (limit/ttl_secs extremes, tag LIKE substring over-match) recorded as warnings in 02-REVIEW.md — not release-blocking.
 
@@ -118,3 +117,7 @@ Items acknowledged and carried forward:
 Last session: 2026-07-12
 Stopped at: Phase 02 complete (UAT closed, security verified, 25/25 threats closed) — milestone v1.0 ready to archive
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

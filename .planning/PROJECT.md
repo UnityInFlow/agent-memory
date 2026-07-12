@@ -39,6 +39,7 @@ An agent can persist a structured memory and retrieve the right one later — ac
 
 ## Context
 
+- **Current state (v1.0 milestone, shipped 2026-07-12):** v0.0.1 released publicly — GitHub Release with 4 checksummed target tarballs (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew tap (`brew install unityinflow/tap/agent-memory`). ~5,400 LOC Rust across `agent-memory-core` + `agent-memory` crates; clippy `-D warnings` clean; >80% coverage CI gate; 25/25 STRIDE threats closed. Known v2 debt: musl binaries (sqlite-vec BSD typedefs), Windows (cfg(unix) refactor), REST boundary-value hardening, SEARCH-04 hybrid RRF, MCP-06 update/relations, DIST-04 export.
 - **Ecosystem position:** Tool 10 of 20 in UnityInFlow. Phase 3. Its own `CLAUDE.md` marks it *"Planned — no strict blocking dependencies,"* so it can proceed in parallel with the active Phase 2 close-out (budget-breaker starter, kore v0.1.0).
 - **Why it exists:** Every agent tool reinvents state storage (GSD has STATE.md, Superpowers has skill context, RTK has its own SQLite DB). Switching runtimes loses all project context. A standard MCP memory API works across tools and survives sessions.
 - **Harness already set up:** RTK (global), Superpowers, GSD, and memtrace are wired; `.claude/` has Rust-adapted hooks (pre-bash safety, rustfmt-on-write, clippy+test on Stop); `.mcp.json` enables context7. The repo is its own git repo and indexed in memtrace.
@@ -92,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-12 after Phase 2 (milestone v1.0 complete — v0.0.1 released)*
+*Last updated: 2026-07-12 after v1.0 milestone (v0.0.1 released)*
