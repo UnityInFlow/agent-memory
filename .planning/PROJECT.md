@@ -37,6 +37,8 @@ An agent can persist a structured memory and retrieve the right one later — ac
 - ✓ REST API for non-MCP integrations (loopback-guarded) — Phase 2
 - ✓ Import from GSD STATE.md format (`agent-memory import --from gsd-state`), idempotent — Phase 2
 - ✓ Pre-built binaries (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew formula — Phase 2
+- ✓ Input validation at the shared MemoryService seam — limit (1–200) and ttl_secs (1–3155760000) rejected as REST 400 / MCP invalid_params, never 500, never a silent clamp (API-02) — Validated in Phase 3 (v1.1)
+- ✓ Exact tag matching via json_each equality on all three query paths — 'rustling' no longer matches tag=rust (API-03, behavioral change recorded for v0.1.0 notes) — Validated in Phase 3 (v1.1)
 
 ### Active
 
@@ -51,7 +53,8 @@ An agent can persist a structured memory and retrieve the right one later — ac
 
 ## Context
 
-- **Current state (v1.0 milestone, shipped 2026-07-12):** v0.0.1 released publicly — GitHub Release with 4 checksummed target tarballs (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew tap (`brew install unityinflow/tap/agent-memory`). ~5,400 LOC Rust across `agent-memory-core` + `agent-memory` crates; clippy `-D warnings` clean; >80% coverage CI gate; 25/25 STRIDE threats closed. Known v2 debt: musl binaries (sqlite-vec BSD typedefs), Windows (cfg(unix) refactor), REST boundary-value hardening, SEARCH-04 hybrid RRF, MCP-06 update/relations, DIST-04 export.
+- **Current state (v1.1 Phase 3 complete, 2026-07-12):** API hardening landed on the shipped v0.0.1 codebase (validation seam + exact tag matching, 7/7 must-haves verified); CI revived on GitHub-hosted `ubuntu-latest` (D-12); cross-compile spike answered the milestone's feasibility unknown — all 4 legs GREEN, Phase 6 adopts cargo-xwin 0.23.0/msvc with mingw-w64/gnu fallback and the musl CFLAGS shim proven. Next: Phase 4 (memory_update, relations, hybrid RRF).
+- **v1.0 baseline (shipped 2026-07-12):** v0.0.1 released publicly — GitHub Release with 4 checksummed target tarballs (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew tap (`brew install unityinflow/tap/agent-memory`). ~5,400 LOC Rust across `agent-memory-core` + `agent-memory` crates; clippy `-D warnings` clean; >80% coverage CI gate; 25/25 STRIDE threats closed. Known v2 debt: musl binaries (sqlite-vec BSD typedefs), Windows (cfg(unix) refactor), REST boundary-value hardening, SEARCH-04 hybrid RRF, MCP-06 update/relations, DIST-04 export.
 - **Ecosystem position:** Tool 10 of 20 in UnityInFlow. Phase 3. Its own `CLAUDE.md` marks it *"Planned — no strict blocking dependencies,"* so it can proceed in parallel with the active Phase 2 close-out (budget-breaker starter, kore v0.1.0).
 - **Why it exists:** Every agent tool reinvents state storage (GSD has STATE.md, Superpowers has skill context, RTK has its own SQLite DB). Switching runtimes loses all project context. A standard MCP memory API works across tools and survives sessions.
 - **Harness already set up:** RTK (global), Superpowers, GSD, and memtrace are wired; `.claude/` has Rust-adapted hooks (pre-bash safety, rustfmt-on-write, clippy+test on Stop); `.mcp.json` enables context7. The repo is its own git repo and indexed in memtrace.
@@ -86,6 +89,8 @@ An agent can persist a structured memory and retrieve the right one later — ac
 | v0.0.1 ships gnu-only Linux binaries (no musl) | sqlite-vec.c uses BSD `u_int*_t` typedefs musl lacks; gnu covers Linux | Accepted — upstream fix or CFLAGS shim in v2 |
 | chrono trimmed to `default-features=false, features=["now"]` (UTC-only) | Default clock feature pulls core-foundation-sys, un-linkable by zig darwin cross | ✓ Good — Local time must never be reintroduced |
 | Two-tier error taxonomy at the store seam (InvalidQuery → 400/invalid_params; internal → 500/internal_error) | Bad client input must never read as a server fault, on either transport | ✓ Good — proven live at 4 layers (02-05) |
+| Phase 6 Windows toolchain: cargo-xwin 0.23.0/msvc first, mingw-w64/gnu as proven fallback; musl via zigbuild + `-Du_int*_t` CFLAGS shim | Phase 3 spike ran all 4 legs GREEN in one hosted dispatch (run 29196226289) — feasibility unknown answered before distribution work | ✓ Verdict recorded in spike-cross-compile.yml header |
+| CI on GitHub-hosted `ubuntu-latest` for this public repo (ecosystem D-02 exception) | OPS-02 makes org self-hosted runners unreachable from public repos; the gate was silently dead | ✓ Good — first green runs since going public (D-12) |
 
 ## Evolution
 
@@ -105,4 +110,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-12 after v1.0 milestone (v0.0.1 released)*
+*Last updated: 2026-07-12 after v1.1 Phase 3 (API hardening & toolchain spikes complete)*
