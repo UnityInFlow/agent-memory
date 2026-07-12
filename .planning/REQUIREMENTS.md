@@ -20,8 +20,8 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### REST & Input Hardening (API)
 
-- [ ] **API-02**: Out-of-bounds `limit` and `ttl_secs` (zero, negative, absurd extremes) are rejected at the shared core seam as invalid input → REST 400 / MCP `invalid_params` — never a 500, never a silent clamp — across all v1.0 **and** new v1.1 surfaces
-- [ ] **API-03**: Tag filtering matches exact tags (json_each equality) instead of LIKE substring over-match — `tag=rust` no longer matches `rustling` (behavioral change, called out in release notes)
+- [x] **API-02**: Out-of-bounds `limit` and `ttl_secs` (zero, negative, absurd extremes) are rejected at the shared core seam as invalid input → REST 400 / MCP `invalid_params` — never a 500, never a silent clamp — across all v1.0 **and** new v1.1 surfaces
+- [x] **API-03**: Tag filtering matches exact tags (json_each equality) instead of LIKE substring over-match — `tag=rust` no longer matches `rustling` (behavioral change, called out in release notes)
 
 ### Storage & Migration Hygiene (STORE)
 
@@ -62,8 +62,8 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| API-02 | Phase 3 | Pending |
-| API-03 | Phase 3 | Pending |
+| API-02 | Phase 3 | Complete |
+| API-03 | Phase 3 | Complete |
 | MCP-06 | Phase 4 | Pending |
 | MCP-07 | Phase 4 | Pending |
 | STORE-05 | Phase 4 | Pending |

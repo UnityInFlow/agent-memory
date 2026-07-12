@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
-status: planning
-stopped_at: Phase 3 context gathered
-last_updated: "2026-07-12T08:48:21.490Z"
-last_activity: "2026-07-12 — v1.1 roadmap created: 4 coarse phases (3-6), 12/12 requirements mapped"
+status: executing
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-07-12T14:04:33.910Z"
+last_activity: 2026-07-12 -- Phase 03 execution started
 progress:
   total_phases: 4
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 2
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Milestone v1.1 roadmap created (Phases 3-6) — Phase 3 (API Hardening & Toolchain Spikes) ready to plan
+**Current focus:** Phase 03 — api-hardening-toolchain-spikes
 
 ## Current Position
 
-Phase: 3 of 6 — API Hardening & Toolchain Spikes (first phase of v1.1)
-Plan: —
-Status: Ready to plan
-Last activity: 2026-07-12 — v1.1 roadmap created: 4 coarse phases (3-6), 12/12 requirements mapped
+Phase: 03 (api-hardening-toolchain-spikes) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-07-12 -- Phase 03 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 02 P03 | 40 min | 2 tasks | 9 files |
 | Phase 02 P04 | 1h 46m | 3 tasks | 7 files |
 | Phase 02 P05 | 8 min | 2 tasks | 6 files |
+| Phase 03 P01 | 12 min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,9 @@ Recent decisions affecting current work:
 - [Phase 02-04]: chrono trimmed to default-features=false, features=[now] (UTC-only) — the default clock feature pulls iana-time-zone -> core-foundation-sys, un-linkable by zig darwin cross; Local time must never be reintroduced.
 - [Phase 02-04]: v0.0.1 shipped without musl binaries: sqlite-vec.c uses BSD u_int*_t typedefs musl lacks — CFLAGS shim scheduled as DIST-05 (Phase 6).
 - [02-05]: Two-tier error taxonomy at the store seam (InvalidQuery → 400/invalid_params; internal → 500/internal_error) proven live at 4 layers — Phase 3 extends this same taxonomy with InvalidArgument.
+- [03-01]: Bounds consts live in domain.rs beside MemoryError; MAX_KNN_K re-defined as crate::domain::MAX_LIMIT (single source of truth, D-03)
+- [03-01]: deny_unknown_fields NOT added (discretion resolved) — keeps the v0.1.0 release-notes delta to exactly the two decided behavioral changes
+- [03-01]: import() validates ttl per draft through the shared helper — the store() bypass is closed structurally for Phase 5 JSONL import
 
 ### Pending Todos
 
@@ -110,8 +114,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-12T08:48:21.486Z
-Stopped at: Phase 3 context gathered
+Last session: 2026-07-12T14:04:33.906Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: .planning/phases/03-api-hardening-toolchain-spikes/03-CONTEXT.md
 
 ## Operator Next Steps

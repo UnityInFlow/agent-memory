@@ -49,7 +49,8 @@ Full phase details: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md)
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — Validation seam (`MemoryError::InvalidArgument` + pub bounds consts, all 7 surfaces incl. the import bypass, clamp removed) + json_each exact tag matching at all 3 predicate sites + doc/README contract updates (API-02, API-03)
+
+- [x] 03-01-PLAN.md — Validation seam (`MemoryError::InvalidArgument` + pub bounds consts, all 7 surfaces incl. the import bypass, clamp removed) + json_each exact tag matching at all 3 predicate sites + doc/README contract updates (API-02, API-03)
 - [ ] 03-02-PLAN.md — CI revival (ci.yml → GitHub-hosted ubuntu-latest, D-12) + hosted 4-leg Windows/musl cross-compile spike dispatched live with the D-11 toolchain verdict recorded for Phase 6
 
 ### Phase 4: Memory Update, Relations & Hybrid Search
@@ -106,7 +107,7 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 |-------|-----------|----------------|--------|-----------|
 | 1. Core Memory Foundation | v1.0 | 3/3 | Complete | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
-| 3. API Hardening & Toolchain Spikes | v1.1 | 0/2 | Planned | - |
+| 3. API Hardening & Toolchain Spikes | v1.1 | 1/2 | In Progress|  |
 | 4. Memory Update, Relations & Hybrid Search | v1.1 | 0/? | Not started | - |
 | 5. Portable Export & Import | v1.1 | 0/? | Not started | - |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
