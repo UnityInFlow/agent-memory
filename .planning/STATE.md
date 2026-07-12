@@ -3,8 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
 status: planning
-last_updated: "2026-07-12"
-last_activity: 2026-07-12
+stopped_at: Phase 3 context gathered
+last_updated: "2026-07-12T08:48:21.490Z"
+last_activity: "2026-07-12 — v1.1 roadmap created: 4 coarse phases (3-6), 12/12 requirements mapped"
 progress:
   total_phases: 4
   completed_phases: 0
@@ -109,9 +110,9 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-12
-Stopped at: v1.1 roadmap created (Phases 3-6, 12/12 requirements mapped) — Phase 3 ready to plan
-Resume file: None
+Last session: 2026-07-12T08:48:21.486Z
+Stopped at: Phase 3 context gathered
+Resume file: .planning/phases/03-api-hardening-toolchain-spikes/03-CONTEXT.md
 
 ## Operator Next Steps
 
