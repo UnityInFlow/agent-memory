@@ -1,46 +1,51 @@
-name: Spike — cross-compile all release triples
+name: Spike — Windows + musl cross-compile (Phase 3, D-10/D-11)
 
-# PURPOSE: de-risk the darwin bundled-C (sqlite3.c + sqlite-vec.c) cross-compile
-# BEFORE any release work starts (RESEARCH Pitfall 1). The known failure modes
-# (`TargetConditionals.h` not found, zig `-nostdinc`, zigbuild #316 iconv) must
-# surface here, in a dispatchable spike, not at tag time. Plan 02-04 publishes
-# the repo and runs this workflow as the release gate; if a darwin leg fails,
-# the pre-approved Plan B (plain BLOB column + in-Rust brute-force cosine)
-# replaces sqlite-vec before release.
+# PURPOSE: Phase 3 spike — does this workspace's bundled C (sqlite3.c +
+# sqlite-vec.c) cross-compile for Windows and musl from a hosted Linux runner?
+# The answer de-risks Phase 6 (DIST-03 Windows binary, DIST-05 musl binaries):
+# a recorded per-leg verdict lets Phase 6 start with the milestone's only
+# feasibility unknown already answered.
 #
-# UnityInFlow org self-hosted runners ONLY — never ubuntu-latest (CLAUDE.md).
-# cargo-zigbuild is host-arch-independent, so the single ARM64 orangepi runner
-# cross-compiles all six triples serially (the Hetzner X64 fleet is
-# intermittently offline — recurring ecosystem blocker, STATE.md carry-forward).
+# Runner policy (D-10): this repo is public and the org runner group enforces
+# `allows_public_repositories: false` (OPS-02, enforced 2026-07-09), so
+# self-hosted jobs can NEVER run here. GitHub-hosted secretless CI is the
+# sanctioned ecosystem D-02 exception and supersedes the inner CLAUDE.md's
+# "never ubuntu-latest" for this repo.
+#
+# VERDICT (Phase 3, D-11): pending — recorded by Task 3 after the dispatch
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read # secretless, read-only (ecosystem D-02 exception)
+
 env:
   CARGO_TERM_COLOR: always
-  # Pinned toolchain for cargo-zigbuild cross-compilation. NEVER use "latest" —
-  # zig <-> cargo-zigbuild compatibility is version-coupled.
+  # Pinned tool versions — NEVER "latest". zig <-> cargo-zigbuild compatibility
+  # is version-coupled; the xwin pin makes the verdict reproducible.
   ZIG_VERSION: '0.14.1'
   CARGO_ZIGBUILD_VERSION: '0.23.0'
+  CARGO_XWIN_VERSION: '0.23.0'
+  # musl typedef shim (DIST-05 groundwork): sqlite-vec.c uses BSD u_int*_t
+  # typedefs that musl lacks. Target-suffixed ONLY — a bare CFLAGS would bleed
+  # the -Du_int*_t macros into the gnu/msvc legs.
+  CFLAGS_x86_64_unknown_linux_musl: '-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t'
+  CFLAGS_aarch64_unknown_linux_musl: '-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t'
 
 jobs:
-  spike-build:
-    name: zigbuild ${{ matrix.target }}
-    runs-on: [orangepi]
-    # Pitfall 1 gate: EVERY leg is loud. Unlike the injection-scanner release
-    # template, there is NO experimental/continue-on-error anywhere — a darwin
-    # failure is exactly the signal this spike exists to catch.
-    continue-on-error: false
+  spike:
+    name: ${{ matrix.tool }} ${{ matrix.target }}
+    runs-on: ubuntu-latest # D-10: the only runnable option on this public repo
     strategy:
-      # fail-fast disabled: surface ALL target failures in one dispatch.
+      # fail-fast disabled: surface ALL leg verdicts in one dispatch — a red
+      # Windows leg is exactly the data this spike exists to collect (A4).
       fail-fast: false
       matrix:
-        target:
-          - aarch64-apple-darwin
-          - x86_64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - { target: x86_64-unknown-linux-musl, tool: zigbuild }
+          - { target: aarch64-unknown-linux-musl, tool: zigbuild }
+          - { target: x86_64-pc-windows-msvc, tool: xwin }
+          - { target: x86_64-pc-windows-gnu, tool: mingw }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -50,12 +55,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install pinned zig + cargo-zigbuild
+      - name: Install pinned zig + cargo-zigbuild (musl legs)
+        if: matrix.tool == 'zigbuild'
         run: |
-          # zig from the OFFICIAL ziglang.org tarball, host-arch-matched — the
-          # self-hosted runners have no pip3 (mcp-hub 03-04 lesson). zig itself
-          # cross-compiles to every target, so only the host arch matters here.
-          # Pin BOTH versions — never `latest`.
+          # zig from the OFFICIAL ziglang.org tarball, host-arch-matched.
+          # zig itself cross-compiles to every target, so only the host arch
+          # matters here. Pin BOTH versions — never `latest`.
           set -euo pipefail
           case "$(uname -m)" in
             aarch64|arm64) ZIG_ARCH=aarch64 ;;
@@ -70,24 +75,55 @@ jobs:
           "$HOME/.zig/${ZIG_DIR}/zig" version
           cargo install --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild
 
-      - name: Build (cargo zigbuild, cross-compiled from this Linux host)
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory
+      - name: Install cargo-xwin (msvc leg)
+        if: matrix.tool == 'xwin'
+        run: |
+          # llvm-tools is the cargo-xwin prerequisite (upstream README).
+          # The MSVC CRT/SDK license is accepted implicitly by use — no flag
+          # needed. The xwin CRT/SDK fetch (~hundreds of MB) happens inside
+          # the build step on this fresh runner (Pitfall 8 — acceptable for a
+          # spike; re-dispatch on infra flakes, never gate the verdict on them).
+          rustup component add llvm-tools
+          cargo install --locked --version "${CARGO_XWIN_VERSION}" cargo-xwin
 
-      - name: Smoke test (host-arch-aware --version; foreign-arch/darwin = presence-only)
+      - name: Install mingw-w64 (gnu leg)
+        if: matrix.tool == 'mingw'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build (tool-dispatched per leg)
+        env:
+          # A3 belt-and-braces for the gnu leg: Rust defaults this target's
+          # linker to x86_64-w64-mingw32-gcc anyway — set it explicitly, zero
+          # risk (cargo only reads this var when building windows-gnu).
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/agent-memory"
-          test -f "$BIN" || { echo "ERROR: $BIN missing"; exit 1; }
+          case "${{ matrix.tool }}" in
+            zigbuild) cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory ;;
+            xwin)     cargo xwin build --release --locked --target ${{ matrix.target }} -p agent-memory ;;
+            mingw)    cargo build --release --locked --target ${{ matrix.target }} -p agent-memory ;;
+          esac
+
+      - name: Smoke test (suffix- and host-arch-aware)
+        run: |
+          set -euo pipefail
           TARGET="${{ matrix.target }}"
           case "$TARGET" in
-            *-apple-darwin)
-              # A macOS binary is never natively executable on a Linux host.
-              echo "apple-darwin build present -- presence-only (not executable on a Linux host)."
+            *-pc-windows-*)
+              # Pitfall 9: Windows binaries are agent-memory.exe — a suffixless
+              # presence check would false-negative the verdict. PE binaries do
+              # not run on Linux (no wine) — presence-only.
+              BIN="target/${TARGET}/release/agent-memory.exe"
+              test -f "$BIN" || { echo "ERROR: $BIN missing"; exit 1; }
+              echo "windows build present -- presence-only (PE binary, not executable on a Linux host)."
               ;;
             *)
+              BIN="target/${TARGET}/release/agent-memory"
+              test -f "$BIN" || { echo "ERROR: $BIN missing"; exit 1; }
               # Execute only when the target arch equals the runner arch —
-              # `Exec format error` otherwise (RESEARCH Pitfall 7, mcp-hub
-              # 03-04 precedent). Decide at runtime, never hardcode a triple.
+              # `Exec format error` otherwise. x86_64-musl is a STATIC binary
+              # on an x86_64 host: actually run --version (better signal than
+              # the v1.0 ARM64 self-hosted pipeline ever gave this leg).
               TARGET_ARCH="${TARGET%%-*}"            # x86_64 | aarch64
               HOST_ARCH="$(uname -m)"; [ "$HOST_ARCH" = "arm64" ] && HOST_ARCH=aarch64
               if [ "$TARGET_ARCH" = "$HOST_ARCH" ]; then
