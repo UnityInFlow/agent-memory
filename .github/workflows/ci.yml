@@ -6,16 +6,17 @@ on:
   pull_request:
     branches: [main]
 
-# UnityInFlow org self-hosted runners ONLY — never ubuntu-latest (CLAUDE.md).
-# The Hetzner X64 fleet (arc-runner-unityinflow) is the default; the orangepi
-# (ARM64) leg is the documented fallback for when the X64 fleet is offline.
+# Runner policy (Phase 3, D-12 / D-10): this repo is public and the org runner
+# group enforces `allows_public_repositories: false` (OPS-02, enforced
+# 2026-07-09), so self-hosted jobs can NEVER be picked up here. GitHub-hosted
+# secretless CI is the sanctioned ecosystem D-02 exception and supersedes the
+# inner CLAUDE.md's "never ubuntu-latest" for this repo.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [arc-runner-unityinflow, orangepi]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
