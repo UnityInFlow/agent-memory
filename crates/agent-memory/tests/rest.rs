@@ -217,6 +217,52 @@ async fn rest_end_to_end_store_list_search_forget_health() {
         "400 body must carry an error field, got: {body}"
     );
 
+    // POST /api/search with limit 0 → 400 carrying the valid range (API-02) —
+    // realism-only proof over real HTTP; the coverage-bearing tests are the
+    // in-process handler tests.
+    let resp = client
+        .post(format!("{base}/api/search"))
+        .json(&serde_json::json!({ "query": "sqlite", "limit": 0 }))
+        .send()
+        .await
+        .expect("zero-limit search request");
+    assert_eq!(resp.status(), 400, "limit=0 must map to 400, never 500");
+    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
+    assert!(
+        body.get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("limit must be between")),
+        "400 body must carry the limit range, got: {body}"
+    );
+
+    // POST /api/memories with ttl_secs -1 → 400 carrying the valid range.
+    let resp = client
+        .post(format!("{base}/api/memories"))
+        .json(&serde_json::json!({
+            "content": "never lands",
+            "type": "TODO",
+            "ttl_secs": -1
+        }))
+        .send()
+        .await
+        .expect("negative-ttl store request");
+    assert_eq!(resp.status(), 400, "ttl_secs=-1 must map to 400, never 500");
+    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
+    assert!(
+        body.get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("ttl_secs must be between")),
+        "400 body must carry the ttl_secs range, got: {body}"
+    );
+
+    // GET /api/memories?limit=201 → 400 (one past the valid maximum).
+    let resp = client
+        .get(format!("{base}/api/memories?limit=201"))
+        .send()
+        .await
+        .expect("over-limit list request");
+    assert_eq!(resp.status(), 400, "limit=201 must map to 400, never 500");
+
     // DELETE /api/memories/{id} → 200 deleted:true, then 404 on the SAME id.
     let resp = client
         .delete(format!("{base}/api/memories/{id}"))

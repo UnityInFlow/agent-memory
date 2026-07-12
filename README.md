@@ -103,12 +103,17 @@ stored in one is immediately retrievable in another.
 
 ## The four tools
 
-| Tool | Purpose |
-|------|---------|
-| `memory_store` | Persist a typed memory; returns its id. |
-| `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. |
-| `memory_list` | List memories newest-first, with optional type/tag/scope filters. |
-| `memory_forget` | Delete a memory by id (clean not-found for unknown ids). |
+| Tool | Purpose | Validated parameters |
+|------|---------|----------------------|
+| `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
+| `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive) |
+| `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive) |
+| `memory_forget` | Delete a memory by id (clean not-found for unknown ids). | — |
+
+Out-of-bounds values are rejected as client errors (`invalid_params` over MCP)
+with a message naming the field, the valid range, and the offending value —
+e.g. `invalid argument: limit must be between 1 and 200 (got 0)`. They are
+never silently clamped and never produce an internal error.
 
 ### `memory_store`
 
@@ -124,7 +129,9 @@ stored in one is immediately retrievable in another.
 
 `content` and `type` are required; `tags`, `source`, `scope`, and `ttl_secs` are
 optional. A non-null `ttl_secs` makes the memory expire that many seconds after it
-is stored — the background sweep then removes it.
+is stored — the background sweep then removes it. A present `ttl_secs` must be
+between 1 and 3155760000 (~100 years); anything else is rejected with the range
+in the error message.
 
 ### `memory_search`
 
@@ -141,13 +148,18 @@ each with a freshly-recomputed `decay_score`:
 
 `search_mode` is `"semantic"` when the query was answered via embeddings and
 `"keyword"` when the FTS5 path served it (Ollama absent or unreachable). A
-query that matches nothing returns an empty list, never an error.
+query that matches nothing returns an empty list, never an error. A present
+`limit` must be between 1 and 200 (omitted defaults to 50); a `tag` filter
+matches whole tags exactly and case-sensitively.
 
 ### `memory_list`
 
 ```json
 { "type": "TODO", "scope": "kore-runtime", "limit": 20 }
 ```
+
+A present `limit` must be between 1 and 200 (omitted returns everything); a
+`tag` filter matches an exact tag (case-sensitive).
 
 ### `memory_forget`
 
@@ -194,13 +206,19 @@ agent-memory serve-rest                       # binds 127.0.0.1:7437 by default
 agent-memory serve-rest --addr 127.0.0.1:8080 # custom loopback bind
 ```
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/api/memories` | Store a memory (same fields as `memory_store`) |
-| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit` query params |
-| `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope |
-| `DELETE` | `/api/memories/{id}` | Forget by id (404 with a structured body for unknown ids) |
-| `GET` | `/health` | Liveness + embedder reachability status |
+| Method | Path | Purpose | Validated parameters |
+|--------|------|---------|----------------------|
+| `POST` | `/api/memories` | Store a memory (same fields as `memory_store`) | `ttl_secs`: 1–3155760000 when present; omitted = no expiry |
+| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit` query params | `limit`: 1–200 when present; omitted = unlimited. `tag`: exact tag (case-sensitive) |
+| `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope | `limit`: 1–200 when present; omitted defaults to 50. `tag`: exact tag (case-sensitive) |
+| `DELETE` | `/api/memories/{id}` | Forget by id (404 with a structured body for unknown ids) | — |
+| `GET` | `/health` | Liveness + embedder reachability status | — |
+
+Out-of-bounds `limit`/`ttl_secs` values return **HTTP 400** with a JSON body
+whose `error` field names the field, range, and offending value — shaped
+`invalid argument: limit must be between 1 and 200 (got 0)` — never a 500 and
+never a silent clamp. The MCP transport rejects the same inputs identically as
+`invalid_params`, because validation lives once at the shared service seam.
 
 The REST daemon and the MCP stdio server can run concurrently against the same
 database file (WAL-mode SQLite with a serialized writer).
@@ -211,6 +229,20 @@ default**. Binding a non-loopback address requires the explicit
 when you do. **Never expose the REST API publicly** — anyone who can reach it
 can read and delete every memory. If you need remote access, keep it behind a
 VPN/SSH tunnel or an authenticating reverse proxy.
+
+## Behavioral changes in v0.1.0
+
+Two deliberate contract changes from v0.0.1 (both apply identically to MCP and
+REST):
+
+1. **Tag filtering is now an exact, case-sensitive match** instead of a
+   substring match — `tag=rust` no longer matches a memory tagged `rustling`,
+   and `Rust` does not match `rust`. This applies to search (semantic and
+   keyword paths) and list.
+2. **Out-of-bounds `limit` and `ttl_secs` now return client errors** (HTTP 400
+   / MCP `invalid_params`) carrying the valid range, instead of being silently
+   clamped or accepted. Valid boundaries (`limit` 1–200, `ttl_secs`
+   1–3155760000) and omitted values behave exactly as before.
 
 ## Import from GSD
 
