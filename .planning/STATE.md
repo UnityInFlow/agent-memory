@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-07-03T11:53:53.091Z"
-last_activity: 2026-07-03 -- Phase 02 execution started
+status: milestone_complete
+stopped_at: Phase 02 complete — milestone v1.0 ready to archive
+last_updated: "2026-07-12T08:08:25.785Z"
+last_activity: 2026-07-12
 progress:
   total_phases: 2
   completed_phases: 2
@@ -18,25 +18,25 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-06-24)
+See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 02 — semantic-search-interop-release
+**Current focus:** Milestone v1.0 complete — archive and plan next milestone
 
 ## Current Position
 
-Phase: 02 (semantic-search-interop-release) — EXECUTING
-Plan: 2 of 5
-Status: Ready to execute
-Last activity: 2026-07-03 -- Phase 02 execution started
+Phase: 02 (complete — last phase of milestone v1.0)
+Plan: All executed
+Status: Milestone complete, ready to archive
+Last activity: 2026-07-12
 
-Progress: [██████████] 100% (Phase 1 plans)
+Progress: [████████████████████] 8/8 plans (100%)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 6
+- Total plans completed: 11
 - Average duration: ~28 min
 - Total execution time: ~1.4 hours
 
@@ -45,6 +45,7 @@ Progress: [██████████] 100% (Phase 1 plans)
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 3 | - | - |
+| 02 | 5 | - | - |
 
 **Recent Trend:**
 
@@ -95,15 +96,11 @@ None yet.
 
 ### Blockers/Concerns
 
-Front-loaded Phase 1 pitfalls (must be resolved in the foundation, not retrofit):
+None open for milestone v1.0 — all Phase 1 pitfalls (stdout purity, spawn_blocking writer lane, decay-never-deletes, injectable Clock/WAL) were resolved in the foundation and verified; the Phase 2 release shipped via the orangepi serial-build path (ecosystem OPS-01 standard).
 
-- stdout purity: all logging to stderr or MCP stdio transport corrupts (Phase 1 hard gate, MCP-05).
-- Blocking async loop: wrap synchronous rusqlite in `spawn_blocking` / single-writer lane (Phase 1 architectural rule).
-- Decay must only re-rank, never delete; schema separates `decay_score` / `expires_at` / `last_accessed` (Phase 1 schema, STORE-03/04).
-- Injectable `Clock` + UTC timestamps + WAL + write serialization from day one.
-- `sqlite-vec` static-link + Windows support-vs-defer decision made in Phase 1 so `dirs`/path deps are gated consistently.
-
-Recurring ecosystem blocker: Hetzner X64 self-hosted fleet intermittently offline — plan Phase 2 release matrix for orangepi-only serial builds with host-arch-aware smoke tests. Validate `sqlite-vec` C cross-compile on orangepi early.
+Carried notes for v2 planning:
+- musl Linux binaries blocked by sqlite-vec.c BSD typedefs (upstream fix or CFLAGS shim).
+- REST boundary-value hardening (limit/ttl_secs extremes, tag LIKE substring over-match) recorded as warnings in 02-REVIEW.md — not release-blocking.
 
 ## Deferred Items
 
@@ -118,6 +115,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-03T11:53:53.086Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-07-12
+Stopped at: Phase 02 complete (UAT closed, security verified, 25/25 threats closed) — milestone v1.0 ready to archive
 Resume file: None

@@ -94,13 +94,18 @@ Each v1 requirement maps to exactly one phase.
 | INTEROP-01 | Phase 2 | Complete |
 | DIST-01 | Phase 2 | Complete |
 | DIST-02 | Phase 2 | Complete |
+| SEARCH-04 | — | Deferred (v2) |
+| MCP-06 | — | Deferred (v2) |
+| DIST-03 | — | Deferred (v2) |
+| DIST-04 | — | Deferred (v2) |
 
 **Coverage:**
 
 - v1 requirements: 16 total
 - Mapped to phases: 16 (Phase 1: 10, Phase 2: 6)
 - Unmapped: 0 ✓
+- v2 deferred (not in current roadmap): 4
 
 ---
 *Requirements defined: 2026-06-24*
-*Last updated: 2026-06-24 after roadmap creation (traceability populated)*
+*Last updated: 2026-07-12 after Phase 2 completion (v2 deferred rows added to traceability)*

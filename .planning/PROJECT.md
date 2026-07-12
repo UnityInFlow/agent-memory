@@ -14,21 +14,21 @@ An agent can persist a structured memory and retrieve the right one later — ac
 
 ### Validated
 
-(None yet — ship to validate)
+<!-- v0.0.1 shipped 2026-07-03 (Release v0.0.1, Homebrew tap); phases 1–2 verified 15/15 must-haves. -->
+
+- ✓ SQLite backend — zero cloud, zero account required — Phase 1
+- ✓ MCP server interface — `memory_store`, `memory_search`, `memory_list`, `memory_forget` — Phase 1
+- ✓ Memory types — DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT — Phase 1
+- ✓ Decay scoring — exponential decay, re-ranks but never deletes — Phase 1
+- ✓ TTL support — expiry via hourly sweep; TTL and explicit forget are the only removal paths — Phase 1
+- ✓ Semantic search via local Ollama embeddings (nomic-embed-text), graceful keyword/FTS5 fallback — Phase 2
+- ✓ REST API for non-MCP integrations (loopback-guarded) — Phase 2
+- ✓ Import from GSD STATE.md format (`agent-memory import --from gsd-state`), idempotent — Phase 2
+- ✓ Pre-built binaries (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew formula — Phase 2
 
 ### Active
 
-<!-- v0.0.1 acceptance criteria from CLAUDE.md. Hypotheses until shipped. -->
-
-- [ ] SQLite backend — zero cloud, zero account required
-- [ ] MCP server interface — `memory_store`, `memory_search`, `memory_list`, `memory_forget`
-- [ ] Memory types — DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT
-- [ ] Decay scoring — unused memories fade over time (exponential decay)
-- [ ] Semantic search via local Ollama embeddings (nomic-embed-text)
-- [ ] Import from GSD STATE.md format (`agent-memory import --from gsd-state .planning/STATE.md`)
-- [ ] TTL support — memories expire after a configurable period
-- [ ] REST API for non-MCP integrations
-- [ ] Pre-built binaries (macOS arm64/x86_64, Linux x86_64/aarch64, Windows) + Homebrew formula
+(None — v1.0 milestone complete. v2 candidates live in REQUIREMENTS.md: SEARCH-04 hybrid RRF, MCP-06 update/relations, DIST-03 Windows, DIST-04 export.)
 
 ### Out of Scope
 
@@ -62,13 +62,17 @@ An agent can persist a structured memory and retrieve the right one later — ac
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Rust (not JVM/Python) | Zero runtime dep, embedded SQLite, low footprint for a long-running daemon | — Pending |
-| SQLite via `rusqlite` as storage | Zero-config local experience, no server process | — Pending |
-| Local Ollama `nomic-embed-text` for embeddings | Keeps semantic search fully local — no cloud, no account | — Pending |
-| MCP server as the primary interface | Standard, cross-runtime; the whole point is tool-agnostic memory | — Pending |
-| REST API as secondary interface | Non-MCP integrations need a path in | — Pending |
-| Exponential decay scoring | Unused memories should fade so recall stays relevant | — Pending |
+| Rust (not JVM/Python) | Zero runtime dep, embedded SQLite, low footprint for a long-running daemon | ✓ Good — v0.0.1 shipped as a single static binary |
+| SQLite via `rusqlite` as storage | Zero-config local experience, no server process | ✓ Good — WAL + single-writer lane held up across MCP+REST sharing one file |
+| Local Ollama `nomic-embed-text` for embeddings | Keeps semantic search fully local — no cloud, no account | ✓ Good — with keyword/FTS5 fallback when Ollama is absent (SC2) |
+| MCP server as the primary interface | Standard, cross-runtime; the whole point is tool-agnostic memory | ✓ Good — stdio purity held (MCP-05); brewed binary launches from .mcp.json |
+| REST API as secondary interface | Non-MCP integrations need a path in | ✓ Good — shared SearchOutcome envelope keeps MCP/REST wire shapes aligned |
+| Exponential decay scoring | Unused memories should fade so recall stays relevant | ✓ Good — recompute-on-read + hourly materialization sweep agree on the math |
 | Make agent-memory its own git repo + `.planning/` | Matches sibling tools 02–09; lets GSD scope to the tool instead of the wrapper milestone | ✓ Good |
+| Decay never deletes — TTL sweep and explicit forget are the only removal paths | Predictable data lifecycle; decay only down-ranks (STORE-03/04) | ✓ Good — locked by kill-tests |
+| v0.0.1 ships gnu-only Linux binaries (no musl) | sqlite-vec.c uses BSD `u_int*_t` typedefs musl lacks; gnu covers Linux | Accepted — upstream fix or CFLAGS shim in v2 |
+| chrono trimmed to `default-features=false, features=["now"]` (UTC-only) | Default clock feature pulls core-foundation-sys, un-linkable by zig darwin cross | ✓ Good — Local time must never be reintroduced |
+| Two-tier error taxonomy at the store seam (InvalidQuery → 400/invalid_params; internal → 500/internal_error) | Bad client input must never read as a server fault, on either transport | ✓ Good — proven live at 4 layers (02-05) |
 
 ## Evolution
 
@@ -88,4 +92,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-24 after initialization*
+*Last updated: 2026-07-12 after Phase 2 (milestone v1.0 complete — v0.0.1 released)*
