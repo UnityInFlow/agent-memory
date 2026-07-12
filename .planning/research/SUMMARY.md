@@ -1,142 +1,153 @@
 # Project Research Summary
 
-**Project:** agent-memory (Tool 10, UnityInFlow ecosystem)
-**Domain:** Local-first Rust daemon — cross-runtime persistent agent memory (MCP server + REST API over embedded SQLite, local Ollama embeddings, decay/TTL lifecycle)
-**Researched:** 2026-06-24
+**Project:** agent-memory — v1.1 "Hardening & Interop" milestone
+**Domain:** Local-first Rust + SQLite + MCP memory daemon (shipped v0.0.1) — hybrid RRF search, memory_update/relations, REST input hardening, Windows/musl binaries, portable export
+**Researched:** 2026-07-12
 **Confidence:** HIGH
 
 ## Executive Summary
 
-agent-memory is a single-binary, zero-cloud, MCP-native memory layer for AI agents — the kind of typed, semantically-searchable memory that Mem0/Letta/Zep offer, but delivered as one `brew install` Rust daemon with no cloud account and no separate database process. Experts in this space converge on a clear shape: an MCP server (the primary interface) plus a thin REST mirror, both backed by embedded SQLite, with semantic recall done locally. The decisive build choices are the **official `rmcp` MCP SDK**, **`rusqlite` (bundled)** + **`sqlite-vec`** for storage and vector search in one file, **`reqwest` direct to a local Ollama** for embeddings, and **`axum`** so the MCP HTTP transport and REST endpoints share one router, one listener, and one `tokio` runtime. This matches the ecosystem's existing Rust conventions (mcp-hub already pins `axum 0.8`, `clap 4`, `tokio 1`, `thiserror 2`) and keeps the tool a self-contained, zero-config binary.
+This milestone adds six features to a shipped, well-seamed codebase — and the research verdict is that almost all of it is **zero new runtime dependencies**. Hybrid search is rank-based RRF (k=60, the universal convention) fused in Rust over the two existing, individually-tested store legs; memory_update and flat id-addressed relations are one appended migration (`0003_links.sql`) plus new methods on the existing `Store` trait; REST hardening is manual bounds checks at the `MemoryService` seam surfaced through the proven two-tier error taxonomy (no validation crate); portable export is versioned JSONL via already-pinned `serde_json`, embeddings excluded by default and re-embedded on import via the existing sweep-backfill machinery. The only additions are build-side: a Windows cross-compile toolchain and a 4-macro CFLAGS shim for musl.
 
-The recommended approach is a strict bottom-up build: domain types + SQLite schema (with WAL, write-serialization, and the decay/TTL/forget distinction baked in from day one) → service layer (CRUD, FTS5 keyword search, decay engine) → MCP server (4 tools over stdio) → Ollama semantic search layered onto the same query path → REST/HTTP transport → GSD import → cross-platform release. The single most important design rule is that **keyword/FTS5 search must ship before and work without semantic search**, so the tool is useful on a fresh machine and degrades gracefully when Ollama is absent. The differentiator is "Mem0-grade typed memory in one local Rust binary over MCP" — explicitly *not* a knowledge graph, *not* LLM-on-write extraction, *not* cloud sync.
+The two distribution facts every researcher independently verified: (1) **cargo-zigbuild cannot build Windows targets** (upstream README: Linux and macOS only), so Windows is a differently-tooled matrix leg — mingw-w64 (`x86_64-pc-windows-gnu`, one apt package on the existing orangepi runner) or cargo-xwin (msvc) — and needs an early toolchain **spike** because the bundled sqlite3.c + sqlite-vec.c must compile for the Windows target; (2) **sqlite-vec PR #199 (musl typedef fix) is still unmerged** and the pinned crate 0.1.9 ships the broken C, so musl builds need target-scoped `CFLAGS_<triple>` typedef defines — zero code change, trivially removable when upstream releases.
 
-The key risks are well-characterized and front-loadable. Four pitfalls must be resolved in the foundation phase or they become expensive retrofits: (1) **stdout pollution corrupts the MCP stdio transport** — all logging must go to stderr; (2) **blocking SQLite/Ollama calls stall the async runtime** — DB work goes through `spawn_blocking` / a single writer, embeddings use async reqwest; (3) **decay must only re-rank, never delete** — decay, TTL, and explicit forget are three orthogonal mechanisms the schema must separate; (4) **`sqlite-vec` static linking + the cross-compile matrix** — static-link via the crate's `cc` build (no runtime `.so`), and prove the C cross-toolchain on all target triples on the `orangepi`/zigbuild path early, given the recurring Hetzner X64 fleet outages. Get these right in Phase 1 and the rest is layered enhancement.
+One important conflict was resolved during research: FEATURES (and the v1.0 decision log, extrapolating from the mcp-hub precedent) rated Windows as a HIGH-cost cfg(unix) refactor. ARCHITECTURE **read the actual code** and found the codebase is already ~Windows-clean — the only platform-conditional code is `config.rs` (with the `cfg(not(unix))` fallback already written); no unix-only deps, no signal handling, portable shutdown. **Resolve in ARCHITECTURE's favor:** DIST-03 is ~90% release-pipeline work, ~10% code (switch to `data_local_dir()` for `%LOCALAPPDATA%`, README notes). The toolchain spike remains the safety check on the residual risk (C-code cross-compile + untestable-at-runtime binary). Key sequencing constraint agreed by three of four files: **relations schema must land before the export format freezes**, so the JSONL v1 contract carries link records from day one.
 
 ## Key Findings
 
 ### Recommended Stack
 
-A single `tokio` runtime hosts everything. The MCP server is the primary surface via the **official `rmcp` SDK** (stdio for editor launch, streamable-HTTP nestable into axum). Storage is **`rusqlite` with the `bundled` feature** (SQLite compiled into the binary — zero system dependency, identical behavior on every target) plus **`sqlite-vec`** for in-database vector KNN (the dependency-free successor to the deprecated `sqlite-vss`). Embeddings come from a **direct `reqwest` call to local Ollama `/api/embed`** (`nomic-embed-text`, 768-dim) — one call, no wrapper. **`axum`** serves the REST mirror and hosts rmcp's `StreamableHttpService` in the same router. Release tooling is **`cargo-dist`** (generates binaries + Homebrew formula) with a mandatory custom-runner override, paired with the ecosystem-proven **`cargo-zigbuild` on `orangepi`** for cross-compilation. Confidence is HIGH — core crate versions were verified against live crates.io and integration nuances against upstream docs/issues. See [STACK.md](./STACK.md).
+No Cargo.toml changes for features 1–3 and export. The standing pin triangle (rusqlite 0.39 / rusqlite_migration 2.5 / r2d2_sqlite 0.34 / libsqlite3-sys 0.37, bundled SQLite 3.51.3) stays untouched — the bundled engine already has window functions, FULL OUTER JOIN, and VACUUM INTO. Do NOT bump to rusqlite 0.40 (links-conflict), do NOT use sqlite-vec 0.1.10-alpha, do NOT reintroduce chrono default features (breaks the zig darwin cross-link).
 
 **Core technologies:**
-- **`rmcp` 1.8** (`server, transport-io, transport-streamable-http-server, macros`): the MCP server — official SDK, stdio + HTTP transports, `#[tool]` macros remove JSON-RPC plumbing
-- **`rusqlite` 0.40 (`bundled`) + `sqlite-vec` 0.1.9**: embedded store + in-DB vector search in one self-contained binary — no cloud, no separate vector DB
-- **`axum` 0.8 + `tokio` 1**: rmcp's HTTP service nests into the same axum router — MCP-over-HTTP and REST share one runtime, one listener
-- **`reqwest` 0.12 (pin, rustls-tls)**: direct Ollama embedding client — avoids a system OpenSSL dependency in prebuilt binaries
-- **`rusqlite_migration` 2, `clap` 4, `serde`, `thiserror` 2 / `anyhow`, `tracing`, `chrono`, `dirs`, `zerocopy`, `uuid`**: ecosystem-standard supporting cast
+- RRF fusion: pure Rust/SQL on existing engine — zero new deps; k=60, weights 1.0/1.0
+- `rusqlite_migration 2.5`: migration 0003 for `memory_links` — append-only, shipped migrations frozen
+- **New (build-side only):** cargo-xwin 0.23 or mingw-w64 for Windows; `CFLAGS_x86_64/aarch64_unknown_linux_musl="-Du_int8_t=uint8_t …"` shim for musl
+- Explicitly NOT added: validation crate (garde/validator), export framework, base64 (defer with `--include-embeddings`)
+
+Details: [STACK.md](./STACK.md)
 
 ### Expected Features
 
-agent-memory fills a real gap: none of Mem0, Letta, Zep, or the MCP reference memory server is a *single-binary, zero-cloud, MCP-native* memory shared across runtimes with dev-workflow typing. The MVP must match the reference server + Mem0 on the basics while winning on locality and graceful degradation. See [FEATURES.md](./FEATURES.md).
-
 **Must have (table stakes):**
-- MCP server with **`memory_store` / `memory_search` / `memory_list` / `memory_forget`** — the product's reason to exist (spec-mandated 4 tools)
-- **Persistence across sessions** (SQLite file in a stable location) — the core problem statement
-- **Memory typing** (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT) + metadata (tags, source, scope/project, timestamps) — what makes it a *dev* memory; scope prevents project-A leaking into project-B
-- **FTS5 keyword search baseline** — works before/without Ollama; the resilience cornerstone
-- **README with copy-paste MCP config** — MCP servers live or die on a 30-second install
+- Hybrid RRF (k=60, rank-based, over-fetch 2–4× per leg, dedup-by-summing, degrades to keyword-only without Ollama, mode reported honestly in `SearchOutcome`)
+- `memory_update(id, partial_patch)` with re-embed on content change (mem0/Letta-proven shape)
+- `memory_link/unlink` flat id-addressed relations + 1-hop `related` in results + `ON DELETE CASCADE` cleanup on forget AND TTL sweep
+- REST boundary hardening: 400-reject out-of-range limit/ttl (never clamp silently), exact tag match via `json_each` (behavioral change — release notes)
+- JSONL export with version header + idempotent round-trip import with re-embed
+- musl + Windows binaries with checksums
 
-**Should have (competitive differentiators):**
-- **Single static Rust binary, zero cloud, zero account** — *the* wedge vs Mem0/Zep/Letta
-- **Local Ollama semantic search** with **graceful FTS5 fallback** — Mem0-grade recall, privacy by architecture
-- **Decay scoring (down-rank only) + TTL (delete)** with relevance surfaced in results — no comparable local server forgets
-- **GSD STATE.md import** — instant seed data + concrete cross-tool interop proof
-- **REST API mirroring the MCP tools** — cross-runtime reach for non-MCP clients
+**Should have (differentiators):**
+- Decay multiplier on fused score — competitors lack recency in hybrid ranking and users request it (qmd #331)
+- Embeddings-optional export with re-embed-on-import — genuinely portable across model versions
+- Fully-local hybrid search in one static binary — the milestone's headline positioning
 
-**Defer (v1.x / v2+):**
-- Hybrid RRF fusion tuning, per-type decay rates, `memory_update`, `memory_stats` (v1.x — add when validated)
-- Lightweight relations, local-LLM summarization, encrypted self-sync, ANN index (v2+)
-- **Explicit anti-features:** full knowledge graph, cloud/hosted backend, LLM-on-write extraction, implicit "dreaming" capture, web UI, multi-tenant auth — all break the local-first/zero-cloud thesis
+**Defer (v1.x/v2+):**
+- Configurable k/weights, `--include-embeddings`, cross-encoder reranking, multi-hop graph queries (anti-feature until proven), entity/observation knowledge graph (rejected — 9-tool surface confuses agents), LLM write-arbitration (violates zero-cloud)
+
+Details: [FEATURES.md](./FEATURES.md)
 
 ### Architecture Approach
 
-A Cargo **workspace** with a `-core` library (`thiserror`, no `anyhow`) and a `-bin` binary (`anyhow` at the edges) — honoring the ecosystem error convention and keeping transports thin. Interfaces (MCP stdio, MCP-over-HTTP, REST, CLI) are thin adapters over a shared service layer; services reach adapters through `Store` and `Embedder` traits so the DB and Ollama can be faked in tests. One `Arc<AppState>` (connection pool + Ollama client + config) is shared across both transports on one `tokio` runtime. Vectors live in a `sqlite-vec` `vec0` sidecar table joined by rowid to the authoritative `memories` table; decay is hybrid (computed-on-read for correctness, materialized by a background sweep for cheap `ORDER BY`). Confidence HIGH. See [ARCHITECTURE.md](./ARCHITECTURE.md).
+Everything plugs into verified existing seams: fusion, update orchestration, and validation live in `MemoryService` (never in transports); new store methods on the `Store` trait; migration appended to the ordered list; JSONL import dispatched through the existing `--from` + idempotent `service.import` path. ARCHITECTURE explicitly recommends **service-level RRF fusion in Rust over the two existing store methods** — NOT the sqlite-vec blog's single-statement CTE (it would duplicate filter predicates and entangle the FTS5-error and degrade seams). `SearchMode::Hybrid` is an additive enum variant; envelope shape unchanged on both transports.
 
-**Major components:**
-1. **Interface layer (bin):** MCP stdio + MCP-HTTP (rmcp) + REST (axum) + CLI (clap) — thin adapters, no business logic
-2. **Service layer (core lib):** `MemoryService` (CRUD), `SearchService` (semantic + keyword fallback, rank by similarity × decay), `DecayEngine` (score + TTL sweep on a tokio interval), `ImportService` (STATE.md parser)
-3. **Adapters (core lib):** `SqliteStore` (rusqlite bundled + WAL + single-writer + vec0/FTS5), `OllamaClient` (reqwest, health-check + degrade)
+**Major components (new/modified):**
+1. `service.rs` — RRF fusion fn + `SearchMode::Hybrid` + validation helpers + update/link orchestration
+2. `sql/0003_links.sql` + `LinkKind` enum + 4 Store methods/tools/routes — relations
+3. `export.rs` + `import/jsonl.rs` + `Store::export_rows` + timestamp-preserving `NewMemory` extension
+4. `release.yml` — mingw Windows leg (zip, presence-only smoke, continue-on-error initially) + musl CFLAGS shim legs
+
+Details: [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ### Critical Pitfalls
 
-1. **Logging to stdout corrupts the MCP stdio transport** — route ALL logs to stderr, install a stderr panic hook, audit deps for stray prints, and add a CI test that pipes `initialize` and asserts every stdout line is valid JSON-RPC. (Phase 1, hard gate.)
-2. **Blocking the async event loop with SQLite/Ollama** — `rusqlite` is synchronous; wrap all DB work in `spawn_blocking` / a single writer lane, use async reqwest for Ollama, keep decay off the request path. (Phase 1, architectural rule from the first handler.)
-3. **Decay that deletes useful memories / conflated decay–TTL–forget** — decay only re-ranks (never deletes); TTL and `memory_forget` are the only deletion paths; per-type policy + a pin flag protect CONSTRAINT/ARCHITECTURE/DECISION. The schema must separate `decay_score`, `expires_at`, and `last_accessed` from day one. (Phase 1 schema.)
-4. **`sqlite-vec` portability + cross-compile matrix** — static-link via the `sqlite-vec` crate's `cc` build (no runtime `.so` per arch); `bundled` rusqlite + sqlite-vec compile C, so prove the zig C cross-toolchain on ALL target triples early. Decide the Windows story up front (support-and-gate, or formally defer like mcp-hub). (Phase 1 decision + Release verification.)
-5. **Silent embedding failure + dimension/model drift** — never store a fake/zero vector when Ollama is down; fail loud with an actionable message (`ollama pull nomic-embed-text`); store `embedding_model`/`embedding_dim` and assert dimension at startup; provide a `reindex` path. Also normalize vectors consistently (cosine on un-normalized vectors silently mis-ranks). (Phase 2.)
+1. **Score-fusion instead of rank-fusion** — the two legs' score scales are incomparable; fuse on rank positions only, decide ONCE where decay applies (post-fusion multiplier OR per-leg, never both), golden-query fixture test.
+2. **`memory_update` leaving a stale vector** — FTS trigger updates itself but vec0 ignores triggers; explicit DELETE + status-reset in the same writer tx; kill-test that the OLD meaning no longer matches semantically. Never implement update as DELETE+INSERT (rowid churn corrupts relations).
+3. **Editing shipped migrations / no pre-migration backup** — rusqlite_migration has no checksums; freeze 0001/0002 forever, add a v0.0.1-fixture schema-divergence test, back up the DB before applying 0003+, friendly too-new-DB error.
+4. **Windows-as-a-zigbuild-target assumption** — fails at first CI run; spike the toolchain first; `data_local_dir()` not roaming `data_dir()` (WAL corruption on roaming profiles).
+5. **Export/import id remap + timestamp policy** — edges must map through an export-key→new-rowid table (naive id preservation silently corrupts graphs in non-empty DBs); decide expired-row and last_accessed policy explicitly (refresh recommended) or import "eats" memories.
+
+Details: [PITFALLS.md](./PITFALLS.md) (19 pitfalls, phase-mapped)
 
 ## Implications for Roadmap
 
-Dependencies flow strictly upward (**domain → store → service → transport → release**), which yields a natural phasing. The cleanest split for this project is a **two-phase milestone** (matching the spec's own discuss/plan/execute ×2 workflow), with the foundation phase carrying the heavy, hard-to-retrofit pitfalls and the second phase layering semantic search + interop + release. A finer-grained 4-phase breakdown is also viable if the roadmapper prefers smaller units.
+Based on research, suggested phase structure:
 
-### Phase 1: Core Memory Foundation (storage, CRUD, decay, MCP)
-**Rationale:** Everything depends on the schema and the concurrency/error/logging conventions; these are the pitfalls that are expensive to retrofit. Keyword search must exist before semantic so the MCP `search` tool works without Ollama.
-**Delivers:** Cargo workspace (`-core` lib / `-bin`); SQLite schema with WAL + single-writer + `decay_score`/`expires_at`/`last_accessed` separated; `MemoryService` (store/list/forget); FTS5 keyword search; `DecayEngine` (lazy compute + background sweep + TTL, injectable `Clock`, UTC timestamps); MCP server with the 4 tools over stdio.
-**Addresses:** MCP 4-tool surface, memory typing + metadata, FTS5 baseline, persistence, decay/TTL (all P1 table stakes).
-**Avoids:** Pitfalls 1 (stdout→stderr), 2 (blocking loop), 3/7 (decay≠delete, schema separation), 8 (Clock trait + UTC + lazy decay), 11 (WAL + write serialization); and the Pitfall 3/10 *decision* (static-link sqlite-vec, Windows support-vs-defer, dep gating).
+### Phase 1: API Hardening & Validation Seam
+**Rationale:** Foundation — update/link/export all route new inputs through this seam; adding `MemoryError::InvalidArgument` early means every later mapper arm is written once. Small, high-certainty. Also pull the **Windows/musl toolchain spikes forward into this phase** (spike-cross-compile.yml) — the only unresolved feasibility question in the milestone should be answered in week 1.
+**Delivers:** limit/ttl bounds → 400, exact tag-match (`json_each`, behavioral change), `deny_unknown_fields`, boundary test suite; spike results for mingw/xwin and musl CFLAGS.
+**Addresses:** WR-01/02/07.
+**Avoids:** per-transport validation drift (Anti-Pattern 3), late toolchain surprise (Pitfall 13).
 
-### Phase 2: Semantic Search, Interop & Release
-**Rationale:** Semantic search is the latest-arriving feature and must not block the MCP surface; it's a strict enhancement on the same query path. Import, REST, and release naturally follow once the core is proven.
-**Delivers:** `Embedder` trait + `OllamaClient` (health probe, graceful degrade); `vec0` table + KNN; hybrid re-rank (semantic + decay, FTS5 fallback); REST API + MCP-over-HTTP on the shared axum router; GSD STATE.md import (idempotent); prebuilt binaries (self-hosted runners) + Homebrew; README/CONTRIBUTING/LICENSE/CI; >80% core coverage.
-**Uses:** `rmcp` HTTP transport, `axum`, `reqwest`→Ollama, `sqlite-vec`, `cargo-dist`/`cargo-zigbuild`.
-**Implements:** `SearchService` semantic path, `ImportService`, the REST/HTTP transport, the release matrix.
-**Avoids:** Pitfalls 4 (Ollama-down → loud, recoverable), 5 (dim/model metadata + reindex), 6 (normalized cosine + golden-set test), 9 (hybrid FTS5+vector recall), 10 (cross-compile verification on all triples).
+### Phase 2: memory_update + Relations (parallel track: Hybrid RRF)
+**Rationale:** Relations MUST precede export (format freeze); hybrid search touches only `service.rs` and shares no files with relations beyond domain.rs (error variants landed in Phase 1), so the two can run as parallel tracks.
+**Delivers:** migration 0003 (+ migration-hygiene tests: fixture divergence, too-new error, pre-migration backup), `LinkKind`, update with re-embed-in-one-tx, cascade on forget AND sweep; RRF fusion (k=60, dedup-by-summing, symmetric over-fetch, bump only returned ids, mode honesty, InvalidQuery propagates 400 in all modes).
+**Avoids:** Pitfalls 1–12.
+
+### Phase 3: Export/Import (JSONL)
+**Rationale:** Last core feature — exports the final v1.1 schema including link records.
+**Delivers:** versioned JSONL export (no embeddings), `import --from jsonl` through the existing idempotent path with key→id remap for edges, timestamp policy (preserve created_at, skip-and-report expired, refresh last_accessed), rich import report.
+**Avoids:** Pitfalls 17–19.
+
+### Phase 4: Distribution & Release (Windows + musl + tag)
+**Rationale:** Shipped binary must contain everything; spikes from Phase 1 de-risked the tooling.
+**Delivers:** musl legs with CFLAGS shim (promote to required on green), mingw Windows leg (zip, `.exe`, presence smoke, `continue-on-error` first release, `%LOCALAPPDATA%` config branch, README Windows/musl sections), SHA256SUMS glob widened, release notes covering behavioral changes (tag exact-match, 400s, `"hybrid"` mode string).
+**Avoids:** Pitfalls 13–16.
 
 ### Phase Ordering Rationale
-- **Strict upward dependency** (domain → store → service → transport → release) means the schema and concurrency model cannot be deferred — they shape every later layer.
-- **Keyword-before-semantic** is the load-bearing rule: the MCP `search` tool ships functional in Phase 1 and Ollama is a pure enhancement, preserving "zero cloud, just works."
-- **Foundation phase front-loads the irreversible pitfalls** (stdout purity, blocking boundary, WAL/writer, decay≠delete, Clock/UTC, static-link decision) because each is a migration or data-loss event if discovered late.
-- **Release is last** because it depends on the full target matrix building — and the recurring Hetzner-fleet/orangepi cross-compile risk wants the C-toolchain link proven before committing to the release path.
+
+- Validation seam first: everything downstream reuses it; error-variant additions in one place avoid domain.rs merge conflicts across parallel tracks.
+- Relations before export: the JSONL v1 contract must carry links or format v2 arrives one phase later (FEATURES, ARCHITECTURE, and PITFALLS all independently require this).
+- Distribution last but **spiked first**: build feasibility answered in Phase 1, release wiring in Phase 4.
+- Hybrid RRF is dependency-free (no schema, no store changes) — the natural parallel track.
 
 ### Research Flags
 
 Phases likely needing deeper research during planning:
-- **Phase 2 (semantic search internals):** `--research-phase` recommended for the exact `sqlite-vec` + `rusqlite 0.40` registration path (the API changed at rusqlite 0.34 — `RawAutoExtension`, not `transmute`), the cosine-normalization convention, and the hybrid FTS5+vec0 fusion query. These are HIGH-confidence-but-fiddly integration details where copying stale snippets will break the build.
-- **Phase 2 (release/cross-compile):** lightweight research on proving `cc`-compiled `sqlite-vec` cross-builds for every target triple via zigbuild on `orangepi`, and confirming the cargo-dist custom-runner override (default `ubuntu-latest`/`macos-latest` is org-banned). This is the single biggest release risk.
+- **Phase 4 (Windows):** toolchain choice mingw-w64 (gnu) vs cargo-xwin (msvc) is unproven for this workspace's C code on the ARM64 runner — the spike is the decision input. STACK leans xwin/msvc, ARCHITECTURE leans mingw/gnu (self-contained, no MSVC EULA); let the spike settle it, ship gnu rather than slip the milestone.
+- **Phase 2 (update semantics):** patch-clear semantics (`Option<Option<T>>` vs explicit clear flags) and `last_accessed` vs `updated_at` decay policy — settle in discuss-phase, not research.
 
 Phases with standard patterns (skip research-phase):
-- **Phase 1 (schema, CRUD, MCP stdio, decay):** well-documented, ecosystem precedent exists (mcp-hub Cargo.toml, rmcp official examples). Pitfalls already enumerated; patterns are established. Standard execution.
+- **Phase 1 (hardening):** extends the proven 02-05 taxonomy; three bounds checks.
+- **Phase 2 (RRF):** the exact SQL/Rust pattern is documented by the sqlite-vec author; math is 30 lines.
+- **Phase 3 (export):** JSONL + existing import machinery; design decisions are enumerated, not open.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | Core crate versions verified against live crates.io; integration nuances against upstream docs/issues; strong in-repo precedent (mcp-hub, injection-scanner) |
-| Features | HIGH | Grounded in named comparables (Mem0, Letta/MemGPT, Zep/Graphiti, OpenAI Memory, MCP reference server) with documented sources |
-| Architecture | HIGH | All stack pieces current and verified; one MEDIUM area (exact rmcp HTTP-into-axum nesting, sourced from a vendor blog rather than official docs) |
-| Pitfalls | HIGH | MCP stdio + sqlite-vec findings verified against upstream issues; ecosystem CI pitfalls confirmed from CLAUDE.md Decisions Log |
+| Stack | HIGH | "No new crates" verified against pinned graph + official docs; MEDIUM only on cross-compile toolchain (unspiked) |
+| Features | MEDIUM | RRF/tool-shape findings cross-verified (LanceDB, sqlite-vec canonical, mem0/Letta/MCP reference); export format is convergent practice, not standard |
+| Architecture | HIGH | Every integration point verified against the actual v1.0 source |
+| Pitfalls | HIGH | Grounded in the shipped codebase + verified upstream state (PR #199, zigbuild targets, rusqlite_migration behavior); MEDIUM on Windows ACL specifics |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
-- **rmcp version churn:** rmcp had breaking changes across 0.7→0.8→1.x. Pin a specific `1.x` and read release notes before any bump; verify the `StreamableHttpService`-into-axum nesting against the actual pinned version during Phase 2 planning (the nesting pattern is sourced from a MEDIUM-confidence vendor blog).
-- **`sqlite-vec` cross-compile (C toolchain):** the static-link + zigbuild path is plausible (injection-scanner shipped apple-darwin this way) but unproven for `sqlite-vec`'s bundled C across all triples. Validate on `orangepi` on day one of the release work, not at release time. Documented Plan B: BLOB + in-Rust cosine for any target that fails.
-- **Windows support decision:** unresolved support-vs-defer. mcp-hub precedent (defer to v2, gate `cfg(unix)` deps properly) is the safe default; decide in Phase 1 so `dirs`/path deps are gated consistently throughout.
-- **Hetzner X64 fleet availability:** recurring ecosystem blocker — plan the release matrix for orangepi-only serial builds with host-arch-aware smoke tests as the working assumption.
+
+- **Windows C-code cross-compile is unproven for this workspace** (all four files agree): spike `spike-cross-compile.yml` with mingw-w64 (and optionally cargo-xwin) in Phase 1. Fallback ladder: gnu → msvc → document-and-defer (mcp-hub HUB-V2 pattern, last resort).
+- **Windows runtime is untestable in CI** (no Windows runner; cross-built .exe can't run on the Linux host): presence-only smoke + `continue-on-error` + "community-validated" release-note label; optional wine smoke, never gating.
+- **sqlite-vec upstream fix timing:** if a fixed stable crate releases mid-milestone, bump the pin and delete the CFLAGS shim in the same commit; otherwise document the shim in README for `cargo install --target musl` source users.
+- **Resolved conflict (recorded):** Windows cfg(unix) refactor cost — FEATURES/v1.0 decision log assumed HIGH per the mcp-hub precedent; ARCHITECTURE's code audit shows the risk was designed out in v1.0 (single seam in config.rs, fallback already written). Roadmap should budget Windows as pipeline work with a small code delta, with the spike as the safety check.
+- **Decay placement in fusion** (Pitfall 1): per-leg decay-blended ranks vs post-fusion multiplier — FEATURES recommends post-fusion, PITFALLS warns against double-counting. Decide once in Phase 2 discuss-phase and document in the fusion function.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- crates.io live API — verified `rmcp 1.8`, `rusqlite 0.40`, `sqlite-vec 0.1.9`, `axum 0.8.9`, `reqwest`, `sqlx 0.9`, `libsql 0.9.30`
-- modelcontextprotocol/rust-sdk (rmcp) README + docs.rs/rmcp — official SDK, feature flags, stdio + streamable-HTTP transports, axum integration
-- asg017/sqlite-vec + "Using sqlite-vec in Rust" (Alex Garcia) — vec0 virtual table, brute-force exact KNN, sqlite3_auto_extension registration, zerocopy Vec<f32>
-- sqlite-vec issue #206 — rusqlite 0.34 RawAutoExtension registration change
-- ollama.com/library/nomic-embed-text — 768-dim, 8192 ctx, /api/embed input format
-- axodotdev/cargo-dist releases/CHANGELOG — v0.32.0, Homebrew formula generation, custom runners
-- MCP reference knowledge-graph memory server; Mem0 docs/repo; Letta/MemGPT memory blog; Zep/Graphiti (arXiv 2501.13956); OpenAI ChatGPT memory FAQ — feature comparables
-- SQLite hybrid search (FTS5 BM25 + sqlite-vec + RRF) — Alex Garcia blog, Simon Willison
-- MCP stdio stdout-corruption issues (dirmacs/daedra #4, ruvnet/claude-flow #835); rusqlite README (bundled + WAL)
-- UnityInFlow CLAUDE.md Decisions Log — mcp-hub Windows cfg(unix) failure, cargo-zigbuild on orangepi, Hetzner fleet offline; in-repo Cargo.toml precedents
+- v1.0 codebase read directly 2026-07-12: `service.rs`, `sqlite.rs`, `migrations.rs`, `config.rs`, `mcp.rs`, REST handlers, SQL migrations, `Cargo.toml` pins, `release.yml`
+- docs.rs libsqlite3-sys 0.37 (bundled SQLite 3.51.3); rusqlite README; rusqlite_migration docs (user_version-only tracking, too-new error)
+- cargo-zigbuild README — Linux/macOS targets only (no Windows)
+- sqlite-vec PR #199 — verified still open/unmerged 2026-07-12; crates.io registry (0.1.9 max stable)
 
 ### Secondary (MEDIUM confidence)
-- Shuttle blogs — stdio MCP server + Streamable HTTP MCP server in Rust (axum-nesting pattern for rmcp)
-- ChatForest MCP Debugging Guide; MCPcat "Build MCP Servers in Rust"
-- FadeMem (arXiv 2601.18642) + co-r-e.com — decay/forgetting & recency·frequency·similarity scoring
+- Alex Garcia (sqlite-vec author) hybrid-search pattern; Context7 LanceDB RRFReranker (k=60 default); Cormack & Clarke SIGIR 2009
+- mem0 / Letta / official MCP memory server / Zep-Graphiti tool-shape analysis (cross-verified)
+- cargo-xwin 0.23 (crates.io + upstream README); rusqlite windows-gnu community reports
+- Ecosystem precedents: mcp-hub Windows failure (03-04), OPS-01/OPS-02 runner policy, 02-05 error taxonomy
 
 ### Tertiary (LOW confidence)
-- (none — all findings backed by at least one verified or community-consensus source)
+- Export-format practice (ChromaDB Data Pipes, VACUUM-INTO-as-backup writeups) — convergent but no standard; needs no further validation beyond shipping the versioned header
 
 ---
-*Research completed: 2026-06-24*
+*Research completed: 2026-07-12*
 *Ready for roadmap: yes*
