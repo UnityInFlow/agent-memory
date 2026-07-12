@@ -115,6 +115,9 @@ impl MemoryService {
     /// the row lands with `embedding_status = 0` and exactly one loud warning is
     /// emitted (Pitfall 4 — loud, not silent; SEARCH-03).
     pub async fn store(&self, new: NewMemory) -> Result<i64, MemoryError> {
+        // API-02 / D-02: reject a bad TTL FIRST — before the embed call, so a
+        // bad request never costs an Ollama round-trip (D-06 seam).
+        crate::domain::validate_ttl(new.ttl_secs)?;
         let now = self.clock.now();
         let inputs = [new.content.clone()];
         let embedding = match self.embedder.embed(&inputs).await {
@@ -138,6 +141,9 @@ impl MemoryService {
 
     /// List stored memories newest-first with optional filters (MCP-03 / D-06).
     pub async fn list(&self, args: ListArgs) -> Result<Vec<MemoryView>, MemoryError> {
+        // API-02 / D-01: a present limit must be 1..=200; omitted stays
+        // unlimited (v1.0 behavior, RESEARCH Pitfall 6).
+        crate::domain::validate_limit(args.limit)?;
         let store = self.store.clone();
         let now = self.clock.now();
         tokio::task::spawn_blocking(move || store.list(args, now))
@@ -162,10 +168,14 @@ impl MemoryService {
     ///
     /// Both paths fire the fire-and-forget recency bump on returned ids.
     pub async fn search(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
+        // API-02 / D-01: validate before any embed hop — an out-of-bounds
+        // limit rejects with MemoryError::InvalidArgument; the old silent
+        // zero-clamp is gone, so bad input never truncates quietly.
+        crate::domain::validate_limit(args.limit)?;
         let now = self.clock.now();
         let cfg = self.decay_cfg;
         let weights = RankWeights::default();
-        let limit = args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(0) as usize;
+        let limit = args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT) as usize;
 
         let query_input = [args.query.clone()];
         match self.embedder.embed(&query_input).await {
@@ -256,6 +266,13 @@ impl MemoryService {
     /// 3. **Insert** — new drafts land via the standard [`Store::insert`]
     ///    path, all stamped with one clock reading.
     pub async fn import(&self, drafts: Vec<NewMemory>) -> Result<ImportReport, MemoryError> {
+        // API-02 / D-02 + RESEARCH Pitfall 3: import() builds rows via
+        // store.insert, bypassing store() — validate every draft through the
+        // SAME shared helper here, before the dedup hop, so future import
+        // surfaces (Phase 5 JSONL) inherit the seam structurally.
+        for draft in &drafts {
+            crate::domain::validate_ttl(draft.ttl_secs)?;
+        }
         let now = self.clock.now();
 
         // (1) Partition new vs duplicate in one blocking hop (read pool).

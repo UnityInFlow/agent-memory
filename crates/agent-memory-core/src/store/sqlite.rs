@@ -23,13 +23,16 @@ use crate::service::{ListArgs, SearchArgs};
 use crate::store::{migrations::migrations, Store};
 
 /// Default cap on returned search rows when the caller omits `limit` (T-02-04).
-/// `pub(crate)` so the service shares the same cap when truncating the
-/// semantic candidate set.
-pub(crate) const DEFAULT_SEARCH_LIMIT: i64 = 50;
+/// `pub` because it is part of the documented API contract (D-03: the README
+/// bounds tables cite it) and the service shares the same cap when truncating
+/// the semantic candidate set.
+pub const DEFAULT_SEARCH_LIMIT: i64 = 50;
 
 /// Hard cap on the KNN oversample size `k` (T-02-03: a huge `limit` must not
-/// turn into an unbounded vector scan).
-const MAX_KNN_K: i64 = 200;
+/// turn into an unbounded vector scan). Defined via the D-01 validation bound
+/// so a valid limit can never exceed what the KNN leg honors (D-03, single
+/// source of truth).
+const MAX_KNN_K: i64 = crate::domain::MAX_LIMIT;
 
 /// Register the sqlite-vec `vec0` extension process-globally. Idempotent: a
 /// `OnceLock` captures the FIRST result (success or error) so repeated calls
