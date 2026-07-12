@@ -469,10 +469,10 @@ assert_eq!(
 
 All A1-A3 are self-verifying inside the spike run itself; none blocks planning. Everything else in this document is `[VERIFIED]` (code read / empirical sqlite3 run / registry seam) or `[CITED]` (upstream README).
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Does the msvc leg build green?** — What we know: cc/clang-cl is cargo-xwin's core path, rusqlite recommends `bundled` on Windows, sqlite-vec ships official Windows artifacts (so the C is MSVC-clean upstream). What's unclear: this exact workspace has never been compiled for Windows. Recommendation: this is the spike's purpose — plan the verdict-recording task to handle any of {msvc green, gnu-only green, both red → document-and-defer per the pre-approved ladder}.
-2. **`deny_unknown_fields` on REST DTOs (discretion)** — Cheap on the three body/query DTOs (one attribute each + one 400 test), but it is a third behavioral change (currently-ignored unknown fields start rejecting). Recommendation: include it only if the planner wants the extra strictness now; it is NOT a success criterion, and skipping keeps the release-notes delta to exactly the two decided changes.
+1. **Does the msvc leg build green?** — RESOLVED by design: answering this IS the spike's deliverable. Plan 03-02 T3 records the verdict and handles every outcome via the pre-approved ladder {msvc green → adopt msvc; gnu-only green → adopt gnu; both red → document-and-defer}. (What we knew: cc/clang-cl is cargo-xwin's core path, rusqlite recommends `bundled` on Windows, sqlite-vec ships official Windows artifacts — but this workspace had never been compiled for Windows.)
+2. **`deny_unknown_fields` on REST DTOs (discretion)** — RESOLVED: NOT added (plan 03-01 objective, discretion exercised). It would be a third behavioral change (currently-ignored unknown fields start rejecting); skipping keeps the release-notes delta to exactly the two decided changes.
 
 ## Environment Availability
 
