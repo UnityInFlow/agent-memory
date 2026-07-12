@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
-status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-07-12T14:04:33.910Z"
+status: verifying
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-07-12T14:37:16.903Z"
 last_activity: 2026-07-12 -- Phase 03 execution started
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
-  percent: 0
+  completed_plans: 2
+  percent: 25
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 
 Phase: 03 (api-hardening-toolchain-spikes) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-12 -- Phase 03 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 02 P04 | 1h 46m | 3 tasks | 7 files |
 | Phase 02 P05 | 8 min | 2 tasks | 6 files |
 | Phase 03 P01 | 12 min | 3 tasks | 11 files |
+| Phase 03 P02 | 30 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,8 @@ Recent decisions affecting current work:
 - [03-01]: Bounds consts live in domain.rs beside MemoryError; MAX_KNN_K re-defined as crate::domain::MAX_LIMIT (single source of truth, D-03)
 - [03-01]: deny_unknown_fields NOT added (discretion resolved) — keeps the v0.1.0 release-notes delta to exactly the two decided behavioral changes
 - [03-01]: import() validates ttl per draft through the shared helper — the store() bypass is closed structurally for Phase 5 JSONL import
+- [03-02]: Phase 6 toolchain verdict (D-11): all 4 spike legs GREEN in one dispatch — Windows = cargo-xwin 0.23.0 / x86_64-pc-windows-msvc (gnu mingw-w64 proven fallback); musl = zigbuild 0.23.0 + target-suffixed CFLAGS -Du_int*_t shim (both legs green, no DIST-05 blocker)
+- [03-02]: CI revived on GitHub-hosted ubuntu-latest, secretless contents: read (D-12/D-10, ecosystem D-02 exception) — supersedes inner CLAUDE.md 'never ubuntu-latest' for this public repo; release.yml runner decision stays with Phase 6
 
 ### Pending Todos
 
@@ -114,9 +117,9 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-12T14:04:33.906Z
-Stopped at: Completed 03-01-PLAN.md
-Resume file: .planning/phases/03-api-hardening-toolchain-spikes/03-CONTEXT.md
+Last session: 2026-07-12T14:37:07.152Z
+Stopped at: Completed 03-02-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
