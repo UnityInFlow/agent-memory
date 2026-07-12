@@ -1,8 +1,15 @@
 ---
 phase: 02-semantic-search-interop-release
 verified: 2026-07-03T12:10:04Z
-status: human_needed
+status: passed
 score: 15/15 must-haves verified
+human_signoff:
+  date: 2026-07-12
+  gaps_confirmed:
+    - "Gap 1 (CR-01) closure confirmed by user — tag-filter bind in keyword fallback, proven by live regression test (fallback 4/4)"
+    - "Gap 2 (WR-05 + WR-04) closure confirmed by user — two-tier error taxonomy proven live at core/handler/MCP/HTTP layers"
+  waived:
+    - "Second-machine cross-arch install check — explicitly optional per plan 02-04; SC5 VERIFIED under its own definition; no Linux/Intel-Mac machine available (recorded as skipped-with-reason in 02-UAT.md)"
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
@@ -22,7 +29,7 @@ human_verification:
 
 **Phase Goal:** The same memory store gains local semantic recall that gracefully falls back to keyword when Ollama is absent, a REST mirror for non-MCP clients, one-command import of GSD STATE.md, and an installable cross-platform release.
 **Verified:** 2026-07-03T12:10:04Z
-**Status:** human_needed (all 15 must-haves verified; one optional cross-arch install check remains human-only)
+**Status:** passed (all 15 must-haves verified; human sign-off recorded 2026-07-12 — both gap closures confirmed, optional cross-arch install check waived with reason, see frontmatter `human_signoff`)
 **Re-verification:** Yes — after gap-closure plan 02-05 (commits 39be828, e491443)
 **Mode:** mvp (User Story goal carried by all five plans; validated against the `As a …, I want to …, so that …` shape manually — gsd-tools not installed on this machine)
 
