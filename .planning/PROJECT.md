@@ -1,5 +1,17 @@
 # agent-memory
 
+## Current Milestone: v1.1 Hardening & Interop
+
+**Goal:** Close the deferred v2 backlog — better recall quality (hybrid search), a richer MCP surface (update/relations), hardened REST input validation, and wider distribution (Windows, musl, portable export) — shipping as product release v0.1.0.
+
+**Target features:**
+- SEARCH-04: Hybrid search — reciprocal-rank fusion of keyword + semantic results
+- MCP-06: `memory_update` and relation/link tools
+- API hardening: validate limit/ttl_secs extremes, exact tag-match semantics (02-REVIEW WR-01/WR-02/WR-07)
+- DIST-03: Pre-built Windows binaries (cfg(unix) refactor per mcp-hub precedent)
+- DIST-04: Export memories to a portable file
+- musl Linux binaries: sqlite-vec.c BSD-typedef fix (upstream or CFLAGS shim)
+
 ## What This Is
 
 A persistent, structured memory layer for AI agents, exposed over a standard MCP server interface. Agents store and recall typed memories (decisions, patterns, errors, todos, architecture, constraints) that survive session boundaries and work across runtimes (Claude Code, Cursor, etc.). Everything runs locally — embedded SQLite, local Ollama embeddings — with zero cloud dependency and zero account required.
