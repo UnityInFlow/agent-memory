@@ -114,6 +114,22 @@ pub struct MemoryView {
     pub last_accessed: i64,
 }
 
+/// Smallest accepted `limit` on search/list (D-01/D-03).
+pub const MIN_LIMIT: i64 = 1;
+
+/// Largest accepted `limit` on search/list (D-01/D-03). Aligned with the KNN
+/// oversample cap so a valid limit never exceeds what the KNN leg honors.
+pub const MAX_LIMIT: i64 = 200;
+
+/// Smallest accepted `ttl_secs` on store/import (D-02/D-03) — a zero or
+/// negative TTL would create an already-expired row.
+pub const MIN_TTL_SECS: i64 = 1;
+
+/// Largest accepted `ttl_secs` on store/import (D-02/D-03): ~100 years.
+/// Keeps `now + ttl_secs` far below `i64::MAX`, so the `expires_at`
+/// arithmetic can never overflow (RESEARCH Pitfall 1).
+pub const MAX_TTL_SECS: i64 = 3_155_760_000;
+
 /// The library's typed error. `thiserror` per the ecosystem rule (libraries use
 /// `thiserror`; the binary uses `anyhow` at its edges).
 #[derive(Debug, Error)]
@@ -123,6 +139,9 @@ pub enum MemoryError {
 
     #[error("invalid search query {0:?}: not a valid FTS5 match expression")]
     InvalidQuery(String),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -138,6 +157,34 @@ pub enum MemoryError {
 
     #[error("memory not found")]
     NotFound,
+}
+
+/// Validate an optional `limit` against the D-01 bounds. `None` always passes
+/// (omitted keeps the v1.0 defaults: search 50, list unlimited). The shared
+/// seam helper — every service method that accepts a limit calls this (D-06).
+pub(crate) fn validate_limit(limit: Option<i64>) -> Result<(), MemoryError> {
+    if let Some(l) = limit {
+        if !(MIN_LIMIT..=MAX_LIMIT).contains(&l) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "limit must be between {MIN_LIMIT} and {MAX_LIMIT} (got {l})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an optional `ttl_secs` against the D-02 bounds. `None` always
+/// passes (omitted means no expiry). Called by `store()` AND per-draft by
+/// `import()` so every insert path shares the one seam (RESEARCH Pitfall 3).
+pub(crate) fn validate_ttl(ttl_secs: Option<i64>) -> Result<(), MemoryError> {
+    if let Some(t) = ttl_secs {
+        if !(MIN_TTL_SECS..=MAX_TTL_SECS).contains(&t) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "ttl_secs must be between {MIN_TTL_SECS} and {MAX_TTL_SECS} (got {t})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

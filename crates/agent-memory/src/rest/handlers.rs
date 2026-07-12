@@ -81,14 +81,14 @@ pub struct ListQuery {
 }
 
 /// Two-tier [`MemoryError`] → HTTP mapping, mirroring `mcp.rs`'s
-/// `invalid_params` / `internal_error` split: `InvalidType` and `InvalidQuery`
-/// are client input (400), `NotFound` is a missing resource (404), everything
-/// else is 500.
+/// `invalid_params` / `internal_error` split: `InvalidType`, `InvalidQuery`,
+/// and `InvalidArgument` are client input (400), `NotFound` is a missing
+/// resource (404), everything else is 500.
 fn map_memory_error(e: MemoryError) -> ApiError {
     match &e {
-        MemoryError::InvalidType(_) | MemoryError::InvalidQuery(_) => {
-            ApiError::BadRequest(e.to_string())
-        }
+        MemoryError::InvalidType(_)
+        | MemoryError::InvalidQuery(_)
+        | MemoryError::InvalidArgument(_) => ApiError::BadRequest(e.to_string()),
         MemoryError::NotFound => ApiError::NotFound,
         MemoryError::Sqlite(_)
         | MemoryError::Pool(_)
@@ -437,6 +437,93 @@ mod tests {
                 .expect("400 body carries a string error field")
                 .is_empty(),
             "the error message must be non-empty, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_with_zero_limit_returns_400_never_500() {
+        // API-02 / D-01: an out-of-bounds limit is CLIENT input — 400 with the
+        // range in the body, never a 500 and never a silent clamp.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let err = search_handler(
+            State(state),
+            Json(SearchRequest {
+                query: "anything".to_string(),
+                r#type: None,
+                tag: None,
+                scope: None,
+                limit: Some(0),
+            }),
+        )
+        .await
+        .expect_err("limit=0 is rejected");
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("400 body carries a string error field")
+                .contains("limit must be between"),
+            "the error must carry the valid range, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_with_out_of_bounds_ttl_returns_400_never_500() {
+        // API-02 / D-02: a negative TTL must reject before any row lands.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let mut req = store_request("never lands", "TODO");
+        req.ttl_secs = Some(-1);
+        let err = store_handler(State(state), Json(req))
+            .await
+            .expect_err("ttl_secs=-1 is rejected");
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("400 body carries a string error field")
+                .contains("ttl_secs must be between"),
+            "the error must carry the valid range, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_negative_limit_returns_400_never_500() {
+        // API-02 / D-01: negative list limit previously bound as SQL LIMIT -5
+        // (= unlimited) — it must now reject as client input.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let err = list_handler(
+            State(state),
+            Query(ListQuery {
+                r#type: None,
+                tag: None,
+                scope: None,
+                limit: Some(-5),
+            }),
+        )
+        .await
+        .expect_err("limit=-5 is rejected");
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("400 body carries a string error field")
+                .contains("limit must be between"),
+            "the error must carry the valid range, got: {body}"
         );
     }
 

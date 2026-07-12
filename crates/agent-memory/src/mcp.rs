@@ -20,7 +20,8 @@ use agent_memory_core::service::{
 
 /// Shared two-tier [`MemoryError`] → [`McpError`] mapping for all four tool
 /// service calls — the mirror of `rest/handlers.rs`'s `map_memory_error`
-/// (closes review WR-04): client input (`InvalidType`, `InvalidQuery`) reports
+/// (closes review WR-04): client input (`InvalidType`, `InvalidQuery`,
+/// `InvalidArgument`) reports
 /// as `invalid_params`; internal failures (`Sqlite`, `Pool`, `Join`,
 /// `Migration`, `NotFound`) report as `internal_error`, so agents never enter
 /// argument-repair loops over a DB fault (T-02G-03).
@@ -30,9 +31,9 @@ use agent_memory_core::service::{
 /// result, unchanged.
 fn map_mcp_error(e: MemoryError) -> McpError {
     match &e {
-        MemoryError::InvalidType(_) | MemoryError::InvalidQuery(_) => {
-            McpError::invalid_params(e.to_string(), None)
-        }
+        MemoryError::InvalidType(_)
+        | MemoryError::InvalidQuery(_)
+        | MemoryError::InvalidArgument(_) => McpError::invalid_params(e.to_string(), None),
         MemoryError::Sqlite(_)
         | MemoryError::Pool(_)
         | MemoryError::Join(_)
@@ -286,6 +287,14 @@ mod tests {
             map_mcp_error(MemoryError::InvalidType("BOGUS".into())).code,
             invalid_params_code,
             "an unknown memory type is client input → invalid_params"
+        );
+        assert_eq!(
+            map_mcp_error(MemoryError::InvalidArgument(
+                "limit must be between 1 and 200 (got 0)".into()
+            ))
+            .code,
+            invalid_params_code,
+            "an out-of-bounds argument is client input → invalid_params"
         );
         assert_eq!(
             map_mcp_error(MemoryError::NotFound).code,
