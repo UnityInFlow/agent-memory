@@ -67,7 +67,14 @@ Plans:
   4. Hybrid ranking stays decay-aware — a fresh memory outranks a stale one at equal fused rank — and access bumps apply only to post-truncation returned ids.
   5. Upgrading a real v0.0.1 database applies migration 0003 only after a pre-migration backup; shipped 0001/0002 SQL is provably unchanged (fixture divergence test against a v0.0.1 database), and a newer-schema DB met by an older binary yields a friendly error, not a crash.
 
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+
+- [ ] 04-01-PLAN.md — Error foundation (Internal tier, NotFound removal, CR-01 dedup, MAX_KNN_K decouple) + migration 0003 with backup/fixture-freeze/too-new hygiene (STORE-05)
+- [ ] 04-02-PLAN.md — memory_update end-to-end: merge-patch semantics, same-tx FTS+vector re-embed, PATCH /api/memories/{id} (MCP-06)
+- [ ] 04-03-PLAN.md — memory_link/memory_unlink with cascade + opt-in 1-hop expansion on search/list (MCP-07)
+- [ ] 04-04-PLAN.md — Decay-aware hybrid RRF fusion with keyword degrade, error taxonomy, and wire/docs (SEARCH-04, SEARCH-05)
 
 ### Phase 5: Portable Export & Import
 
