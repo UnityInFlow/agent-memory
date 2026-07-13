@@ -497,17 +497,23 @@ let v: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 | A3 | `chrono` with `default-features=false, features=["now"]` supports date formatting for the backup filename (the `now`→`std`→`alloc` feature chain) | Pattern 6 | Trivial fallback: derive YYYYMMDD from epoch seconds with integer math — no new feature flags |
 | A4 | `Backup::new(&src, &mut dst)` works with the writer connection as source while the writer mutex is held during open (single-threaded at open time) | Pattern 6 | Fallback: open a dedicated source connection for the backup; open() is pre-serving so no concurrency exists yet |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All four questions were resolved during phase planning (2026-07-13); each resolution is binding and recorded in the owning plan listed below.
 
 1. **D-10 response shape vs `MemoryView` (needs planner decision — contract-level)**
    - What we know: `MemoryView` (domain.rs:104-115) has NO `embedding_status` field; D-10 says the update response includes it "same shape as memory_store" — but `memory_store` returns only an id.
    - What's unclear: whether D-10 intends (a) a dedicated update-response struct (MemoryView fields + `embedding_status`), or (b) adding `embedding_status` to `MemoryView` globally (additive JSON field on every search/list result — a v1.0 wire change D-04's byte-identical promise argues against).
    - Recommendation: **(a)** — a small `UpdatedMemory` serialize-only struct (`#[serde(flatten)]` over the view + `embedding_status`); keeps every existing envelope untouched.
+   - **RESOLVED (plan 04-02, Task 1):** option (a) adopted — dedicated `UpdatedMemory` serialize-only struct in domain.rs (`#[serde(flatten)] view: MemoryView` + `embedding_status: i64`); `MemoryView` itself untouched, so every existing envelope stays byte-identical.
 2. **Where the `related` field lives**
    - What we know: D-04 promises byte-identical envelopes when the flag is absent; `MemoryView` derives `PartialEq` and is struct-literal-constructed across the test suite.
    - Recommendation: `Option<Vec<RelatedLink>>` with `skip_serializing_if` directly on `MemoryView` is simplest and wire-safe; accept the mechanical test-literal churn (compiler-guided). A wrapper type doubles the serialization surfaces on both transports for little gain.
+   - **RESOLVED (plan 04-03, Task 2):** recommendation adopted — `related: Option<Vec<RelatedLink>>` with `#[serde(skip_serializing_if = "Option::is_none")]` directly on `MemoryView`; compiler-guided struct-literal churn accepted; flag-absent byte-compat locked by a golden envelope test.
 3. **Backup failure handling** — CONTEXT leans abort-with-message (a user whose disk can't hold a backup probably shouldn't run an unattended migration either). Confirm in planning; test both branches of whatever is chosen.
+   - **RESOLVED (plan 04-01, Task 2):** abort — a backup failure aborts `SqliteStore::open` with the error before any migration runs; behavior test-covered in `tests/migration_hygiene.rs`.
 4. **`WITHOUT ROWID` for memory_links** — composite-PK table would benefit marginally; plain table is equally correct. Planner discretion (D-02 only requires the UNIQUE constraint).
+   - **RESOLVED (plan 04-01, Task 2):** yes — `memory_links` is declared `WITHOUT ROWID` (composite-PK link-table idiom); `PRIMARY KEY (from_id, to_id, kind)` satisfies the D-02 UNIQUE requirement.
 
 ## Environment Availability
 
