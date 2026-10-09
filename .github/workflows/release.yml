@@ -1,20 +1,46 @@
 name: Release
 
-# Trigger: push a v* tag (e.g., git tag v0.0.1 && git push origin v0.0.1).
+# Trigger: push an exact semver tag (e.g., git tag v0.1.0 && git push origin v0.1.0).
+#
+# The filter accepts ONLY vX.Y.Z. GSD milestone tags (v1.0-milestone) also start
+# with "v", and under the old any-v glob such a tag started this workflow: run
+# 29185695331 queued 24 h and was cancelled only because no runner could take
+# it. On a hosted runner it would have published that tag as a real GitHub
+# Release. In GitHub's filter syntax `+` means one-or-more, `.` is literal and
+# the whole tag must match, so milestone tags and pre-release suffixes
+# (v0.1.0-rc.1) do not trigger. Widen deliberately in Phase 6 if a pre-release
+# dry run needs it.
 #
 # This pipeline is the twice-proven injection-scanner/mcp-hub cargo-zigbuild
-# template adapted to tar.gz packaging: ONE self-hosted Linux host
+# template adapted to tar.gz packaging: one GitHub-hosted Linux host
 # cross-compiles ALL targets via cargo-zigbuild (zig is host-arch-independent,
-# so no per-arch runner, no Docker/cross, no macOS runner). Every job runs on
-# UnityInFlow org self-hosted runners ONLY — ZERO GitHub-hosted runners
-# (never any GitHub-hosted ubuntu/macos image anywhere, per CLAUDE.md).
+# so no per-arch runner, no Docker/cross, no macOS runner).
 #
-# ── RUNNER DISPOSITION ─────────────────────────────────────────────────────────
-# All jobs run serially on the single ARM64 orangepi runner: the Hetzner X64
-# fleet (arc-runner-unityinflow) is intermittently offline (recurring ecosystem
-# blocker, STATE.md carry-forward). cargo-zigbuild is host-arch-independent, so
-# one board builds every triple. When the X64 fleet returns, `runs-on` can flip
-# back to [arc-runner-unityinflow].
+# ── RUNNER POLICY (issue #1, option 2 — injection-scanner #45 precedent) ───────
+# This workflow runs on GitHub-hosted runners, an exception to the org default
+# of self-hosted runners, for two reasons:
+#
+#   1. It uses NO org secrets — only the built-in GITHUB_TOKEN, which
+#      softprops/action-gh-release uses implicitly. There is no signing key, no
+#      Sonatype or npm token, no crates.io token. The Homebrew formula in
+#      UnityInFlow/homebrew-tap is updated by hand, outside this workflow. The
+#      self-hosted policy exists to protect secrets this pipeline does not hold.
+#   2. This repo is public and the org runner group enforces
+#      allows_public_repositories: false (OPS-02, enforced 2026-07-09), so a
+#      self-hosted job cannot be scheduled here at all — the previous
+#      self-hosted ARM64 runner label would queue until cancelled. v0.0.1
+#      shipped only because it was built while the repo was still private.
+#
+# Provenance: an ephemeral hosted runner is better provenance than a persistent
+# self-hosted box that carries state between jobs, and this pipeline now emits
+# a signed SLSA build-provenance attestation the old path could not produce.
+#
+# Safety: the workflow is tag-push triggered only, which a fork cannot fire.
+# That is what makes the release job's `contents: write` / `id-token: write`
+# acceptable. Adding any org secret to this file voids this exception.
+#
+# This resolves early the release-side runner decision Phase 3 D-12 deferred to
+# Phase 6; ci.yml has used the same hosted D-02 split since Phase 3 D-12.
 #
 # ── ASSET CONTRACT ─────────────────────────────────────────────────────────────
 # Assets are tarballs (agent-memory-<triple>.tar.gz) with the single
@@ -26,14 +52,22 @@ name: Release
 # The two apple-darwin legs are HARD-required: DIST-01 mandates macOS
 # arm64/x86_64 binaries, so a darwin failure fails the release (a deliberate
 # divergence from the analog's experimental darwin legs). The darwin bundled-C
-# cross-compile (sqlite3.c + sqlite-vec.c) is de-risked by the mandatory
-# spike-cross-compile.yml gate, which MUST be green before any tag is pushed
-# (RESEARCH Pitfall 1). Only the two musl legs are best-effort
-# (continue-on-error) — gnu covers Linux if musl fails (RESEARCH Open Q2).
+# zigbuild cross-link (sqlite3.c + sqlite-vec.c) was proven by the v0.0.1
+# release run 28644256471, built on the old ARM64 host after the chrono
+# features=[now] trim (Phase 02-04). It has not yet run from an x86_64 hosted
+# host; the first tag run after this change (the Phase 6 release dry run) is
+# that proof. spike-cross-compile.yml is a Windows + musl feasibility spike
+# (Phase 3, bd45b87), not a release gate. Only the two musl legs are
+# best-effort (continue-on-error) — gnu covers Linux if musl fails
+# (RESEARCH Open Q2).
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Read-only by default; only the release job is elevated.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -51,14 +85,15 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   test:
     name: Test gate (fmt + clippy + test + coverage)
-    runs-on: [orangepi]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: cargo fmt check
@@ -78,8 +113,8 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────────
   # JOB 2: build-binaries
-  # ONE self-hosted Linux runner cross-compiles ALL 6 targets via
-  # cargo-zigbuild, serially (single orangepi board).
+  # Each matrix leg gets its own fresh GitHub-hosted x86_64 runner and the six
+  # legs run in parallel; each cross-compiles its target via cargo-zigbuild.
   #
   # The four DIST-01 targets (both apple-darwin + both linux-gnu) are
   # HARD-required. Only the two musl legs may fail without failing the
@@ -88,7 +123,7 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: test
-    runs-on: [orangepi]
+    runs-on: ubuntu-latest
     # Only the musl legs are non-blocking; darwin + gnu legs hard-fail (DIST-01).
     continue-on-error: ${{ matrix['continue-on-error'] }}
     strategy:
@@ -115,19 +150,20 @@ jobs:
             continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust stable + target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install pinned zig + cargo-zigbuild
         run: |
           # Pinned versions (RESEARCH Pitfall 3): zig 0.14.1, cargo-zigbuild 0.23.0.
-          # Install zig from the official tarball matched to the HOST arch (the
-          # self-hosted runners have no pip3 -- orangepi is ARM64; a Hetzner X64
-          # runner would be x86_64). zig itself cross-compiles to all targets, so
+          # Install zig from the official tarball matched to the HOST arch. Kept
+          # arch-dynamic on purpose: it costs nothing and keeps the job portable.
+          # ubuntu-latest is x86_64; zig itself cross-compiles to all targets, so
           # only the host arch matters here. Pin BOTH versions -- never `latest`.
           set -euo pipefail
           case "$(uname -m)" in
@@ -161,6 +197,8 @@ jobs:
               # Execute only when the target arch equals the runner arch —
               # `Exec format error` otherwise (RESEARCH Pitfall 7, mcp-hub
               # 03-04 precedent). Decide at runtime, never hardcode a triple.
+              # On the x86_64 hosted runner the x86_64 Linux binaries now run
+              # --version natively; aarch64 and darwin are presence-only.
               TARGET_ARCH="${TARGET%%-*}"            # x86_64 | aarch64
               HOST_ARCH="$(uname -m)"; [ "$HOST_ARCH" = "arm64" ] && HOST_ARCH=aarch64
               if [ "$TARGET_ARCH" = "$HOST_ARCH" ]; then
@@ -185,8 +223,10 @@ jobs:
           echo "Packaged: $OUT"
           tar -tzf "$OUT"
 
+      # upload-artifact v7 and download-artifact v8 are the matched pair proven
+      # in injection-scanner's releases; they must move together.
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.target }}
           path: agent-memory-${{ matrix.target }}.tar.gz
@@ -201,12 +241,15 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-binaries]
-    runs-on: [orangepi]
+    runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write      # create the Release and upload assets
+      id-token: write      # sign the build-provenance attestation
+      attestations: write  # record it
     steps:
+      # Matched pair with upload-artifact v7 above; they must move together.
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           merge-multiple: true
           path: artifacts/
@@ -253,8 +296,19 @@ jobs:
           echo "Generated SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 
+      # OIDC-signed SLSA build provenance over every published file, possible
+      # only on a hosted runner. Created BEFORE the Release so nothing ships
+      # unattested. Consumers verify with:
+      #   gh attestation verify agent-memory-<triple>.tar.gz --repo UnityInFlow/agent-memory
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/agent-memory-*.tar.gz
+            artifacts/SHA256SUMS.txt
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             artifacts/agent-memory-*.tar.gz
@@ -263,9 +317,9 @@ jobs:
           body: |
             ## agent-memory release
 
-            Tarballs built entirely on UnityInFlow org self-hosted Linux runners
-            via `cargo zigbuild` (no GitHub-hosted runners). Each tarball holds
-            the single `agent-memory` binary at its root.
+            Tarballs cross-compiled from a GitHub-hosted Linux runner via
+            `cargo zigbuild`. Each tarball holds the single `agent-memory`
+            binary at its root.
 
             ### Install via Homebrew (macOS + Linux)
 
@@ -290,6 +344,15 @@ jobs:
             shasum -a 256 -c SHA256SUMS.txt --ignore-missing
             tar -xzf agent-memory-<triple>.tar.gz
             ./agent-memory --version
+            ```
+
+            ### Verify provenance
+
+            Every tarball and `SHA256SUMS.txt` carries a signed SLSA
+            build-provenance attestation:
+
+            ```
+            gh attestation verify agent-memory-<triple>.tar.gz --repo UnityInFlow/agent-memory
             ```
 
             ## Checksums
