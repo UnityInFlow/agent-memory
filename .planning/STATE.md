@@ -5,7 +5,7 @@ milestone_name: Hardening & Interop
 status: executing
 stopped_at: Phase 4 context gathered
 last_updated: "2026-07-13T13:42:43.486Z"
-last_activity: 2026-07-13 -- Phase 04 planning complete
+last_activity: 2026-10-09 -- Completed quick task 261009-hc1 (hosted release pipeline, closes #1)
 progress:
   total_phases: 4
   completed_phases: 1
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 Phase: 4
 Plan: Not started
 Status: Ready to execute
-Last activity: 2026-07-13 -- Phase 04 planning complete
+Last activity: 2026-10-09 - Completed quick task 261009-hc1: hosted release pipeline with SLSA provenance (closes #1)
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -102,6 +102,12 @@ Watch items:
 
 - Windows C-code cross-compile unproven for this workspace (sqlite3.c + sqlite-vec.c) — Phase 3 spike is the decision input; Windows runtime untestable in CI (presence smoke + best-effort label only).
 - If a fixed sqlite-vec stable release (PR #199) ships mid-milestone: bump the pin and delete the CFLAGS shim in the same commit.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261009-hc1 | Release pipeline on GitHub-hosted runners with SLSA provenance, semver-only trigger, all actions SHA-pinned (closes #1); resolves the release-runner decision Phase 3 D-12 deferred to Phase 6 | 2026-10-09 | 9810e31 | [261009-hc1-move-release-yml-to-github-hosted-runner](./quick/261009-hc1-move-release-yml-to-github-hosted-runner/) |
 
 ## Deferred Items
 
