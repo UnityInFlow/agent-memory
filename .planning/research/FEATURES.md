@@ -1,181 +1,230 @@
 # Feature Research
 
-**Domain:** Cross-runtime persistent agent memory (local-first MCP memory server)
-**Researched:** 2026-06-24
-**Confidence:** HIGH (grounded in named comparables: Mem0, Letta/MemGPT, Zep/Graphiti, OpenAI Memory, MCP reference knowledge-graph server, sqlite-vec hybrid search)
+**Domain:** Local-first agent memory (Rust + SQLite + MCP) — v1.1 Hardening & Interop milestone
+**Researched:** 2026-07-12
+**Confidence:** MEDIUM (hybrid-RRF and MCP tool-shape findings cross-verified across official docs, LanceDB API docs via Context7, and the canonical sqlite-vec hybrid-search reference; export-format and REST-validation findings are convergent community practice, LOW-MEDIUM)
 
-## Orientation: the comparables
+**Scope note:** This covers ONLY the new v1.1 features (SEARCH-04 hybrid RRF, MCP-06 update/relations, REST input hardening, DIST-03 Windows, musl, DIST-04 portable export). Shipped v0.0.1 features (store/search/list/forget, types, decay, TTL, FTS5, Ollama semantic + fallback, GSD import) are treated as existing substrate and not re-researched. The prior (2026-06-24) v1.0 feature research already flagged "add a lightweight relate only if v1 validates demand" and "export pairs with import" — this milestone is that follow-through.
 
-| Product | Storage model | Retrieval | Forgetting | Surface | Local? |
-|---------|---------------|-----------|------------|---------|--------|
-| **MCP reference memory server** | Knowledge graph (entities/relations/observations) in a `memory.jsonl` file | `search_nodes` over names/types/observation text (substring) | None — manual delete only | MCP tools: `create_entities`, `create_relations`, `add_observations`, `delete_*`, `read_graph`, `search_nodes`, `open_nodes` | Yes (JSONL file) |
-| **Mem0** | Managed vector store + extracted facts | Hybrid: semantic + BM25 + entity matching, fused; rich `filters` (AND/OR/NOT, `in/gte/lte/icontains`) | "Latest truth wins" dedup/contradiction resolution on `add`; no time decay | SDK `add`/`search`/`get_all`/`delete`; scope via `user_id`/`agent_id`/`run_id`; `metadata` + custom `categories` | Self-host possible, cloud-default |
-| **Letta / MemGPT** | 3 tiers: core (in-context blocks), recall (message history), archival (vector store) | `archival_memory_search` (semantic); recall is searchable history | Agent self-edits blocks (`core_memory_append/replace`); no auto-decay | Agent-callable memory functions | Self-host (server) |
-| **Zep / Graphiti** | Bi-temporal knowledge graph; facts have valid-time + ingestion-time | Graph + semantic; sub-200ms | Facts **invalidated, not deleted** when contradicted (history preserved) | API + Graphiti OSS | Self-host (Neo4j/FalkorDB) |
-| **OpenAI / ChatGPT Memory** | "Saved memories" (explicit, auditable) + "chat history" (implicit, "dreaming") | Opaque relevance injection | User delete; implicit memories auto-curated | UI toggles, no dev API for the store | No |
+## How Comparable Tools Do It (Question-by-Question)
 
-**The gap agent-memory fills:** none of these is a *single-binary, zero-cloud, MCP-native* memory shared across runtimes (Claude Code, Cursor, etc.) with GSD/dev-workflow typing. The MCP reference server is local but has no decay, no embeddings, and a graph model that is awkward for "remember this decision." Mem0/Letta/Zep have the smart features but pull in a cloud or a heavy DB. **The differentiator is "Mem0-grade typed memory in one local Rust binary over MCP."**
+### 1. Hybrid keyword+vector search with RRF
+
+**Expected behavior — this is a solved, converged pattern:**
+
+- **Formula:** `score(d) = w_fts * 1/(k + rank_fts) + w_vec * 1/(k + rank_vec)`. Ranks only — RRF exists specifically to sidestep the BM25-vs-cosine score-scale mismatch. Never fuse raw scores.
+- **k constant:** **60 is the industry standard** (original Cormack/Clarke paper; LanceDB `RRFReranker.create(k)` defaults to 60; every SQLite implementation surveyed uses 60). The optimum is flat anywhere in k ∈ [20, 100], so expose it as config but do not agonize — ship 60.
+- **Weighting:** per-list multipliers (`w_fts`, `w_vec`), both defaulting to 1.0. qmd double-weights results from the original (un-expanded) query; that only matters if you do query expansion (we don't).
+- **Dedup:** union of unique memory IDs across both lists. A memory appearing in both lists gets *both* reciprocal-rank contributions — that consensus boost **is** the fusion; do not "dedup by keeping one score" (qmd issue #331 flags naive dedup as a bug source). In SQL this is the canonical sqlite-vec pattern: two CTEs with `row_number()` ranks, `FULL OUTER JOIN` on id, `coalesce(1.0/(k+rank), 0.0)` for rows present in only one list.
+- **Fallback interaction (critical for us):** hybrid must degrade exactly like semantic search does today. Ollama absent/unreachable → the vector CTE is empty → RRF over one list is mathematically just keyword rank order. The clean design: hybrid is a *fusion layer over the two existing retrievers*, and the existing SC2 keyword-fallback envelope (`SearchOutcome`) reports which legs actually ran. LanceDB, sqlite-rag, and llama-stack all implement hybrid as exactly this composition.
+- **Candidate depth:** fetch top-N from each leg with N larger than the requested limit (2–4× is common; qmd fuses then reranks top 30) so fusion has material to work with, then truncate to `limit` after fusion.
+
+**Where decay fits:** comparable tools *lack* recency/decay in hybrid ranking and users ask for it (qmd issue #331 requests temporal decay with configurable half-life as a missing feature). agent-memory already has exponential decay — applying the existing decay multiplier to the fused RRF score (down-rank only, never delete, per STORE-03/04) is a genuine differentiator, not scope creep. It must remain a post-fusion multiplier so the RRF math stays pure ranks.
+
+### 2. memory_update and relation/link tools over MCP
+
+**What agents actually use well — flat, id-addressed, string-level operations:**
+
+- **mem0:** the agent/client-facing shape is `update(memory_id, new_content)` (single or batch). The clever ADD/UPDATE/DELETE/NOOP ("AUDN") arbitration is *server-side LLM inference* — it is not part of the tool schema agents call. Lesson: keep the tool dumb and deterministic; don't put "decide whether to update" inside the server.
+- **Letta/MemGPT:** `core_memory_replace(label, old_text, new_text)` and `core_memory_append` — the most battle-tested memory-editing shape in the field. Agents reliably target a known memory and supply replacement text. The design principle: *update rather than accumulate* when a fact changes.
+- **Official MCP memory server** (`@modelcontextprotocol/server-memory`): full knowledge graph — entities, directed relations (active-voice strings), observations, across a 9-tool surface (`create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, `open_nodes`). Relations are flat triples `{from, to, relationType}` keyed on *entity names as strings*. Known failure modes: entity-name drift (agent creates "Jiri", "Jiří", "the user" as three nodes), tool-choice confusion across 9 tools, and agents dumping everything into observations while ignoring relations. The *triple shape itself* is fine — the entity/observation ceremony around it is what confuses agents.
+- **Zep/Graphiti:** bi-temporal edges (`valid_at`/`invalid_at` + system timestamps), LLM-driven fact invalidation. State of the art for enterprise memory, but requires an LLM extraction pipeline and a graph DB — everything interesting happens server-side, invisible to the agent. Directly conflicts with our zero-cloud, no-LLM-in-daemon constraint.
+
+**Verdict on the quality-gate question — can relations stay flat? Yes, and they should.** The winning shape for us: `memory_link(from_id, to_id, relation)` producing flat typed edges *between existing memory IDs* (stable ids, not name strings — this kills the entity-name-drift failure mode outright). Retrieval surfaces links as a `related` field on search/get results (1 hop). No entities, no observations, no traversal query language, no multi-hop. This is the official MCP server's proven triple shape minus everything that confuses agents — consistent with the v1.0 decision to reject full knowledge-graph modeling.
+
+**Update semantics that matter:**
+- Partial update by id: `memory_update(id, {content?, memory_type?, tags?, ttl_secs?})` — reject empty patch with invalid_params.
+- **Content change ⇒ re-embed** (and refresh the FTS row). If Ollama is down, follow the existing store-path behavior for missing embeddings (keyword-searchable immediately, embedding absent per SC2) — never fail the update because embedding failed.
+- Updating should touch `last_accessed`/decay inputs consistently with store semantics (an updated memory is "fresh").
+- Deletion cascade: `memory_forget` and the TTL sweep must delete edges referencing the removed memory (foreign keys with `ON DELETE CASCADE` — cheap in SQLite, mandatory for integrity).
+
+### 3. Portable export/import formats
+
+**Convergent practice (no universal standard exists):**
+
+- **JSONL, one memory per line**, is the de-facto interchange shape (ChromaDB Data Pipes exports collections to `.jsonl`; the MCP reference server persists its whole graph as JSONL). Raw DB copy (`VACUUM INTO`) is a *backup*, not a portable export — it pins schema version, drags FTS/vec shadow tables along, and is useless to other tools. `.dump` SQL is migration plumbing. JSONL is diffable, greppable, streamable, and survives schema evolution.
+- **Header/metadata line first:** format version, tool version, embedding model + dimension, export timestamp. Versioning the format from day one (`"format": "agent-memory/1"`) is the cheapest insurance in the whole milestone.
+- **Embeddings: exclude by default, offer `--include-embeddings`.** Embeddings are model-specific (nomic-embed-text, 768-dim); an export consumed by any other tool or a future model version needs re-embedding anyway. ChromaDB Data Pipes supports both include-embeddings export and re-embed-on-import; the re-embed path is the one that actually makes exports portable. Default-exclude also keeps files small and human-readable.
+- **Round-trip import is what makes export meaningful.** Import must be idempotent (same contract as the existing GSD STATE.md import — deterministic by-id skip/overwrite) and must re-embed via local Ollama when embeddings are absent or the model tag mismatches, with the same graceful degradation (no Ollama → import succeeds, keyword-searchable, embeddings absent).
+- **Everything semantic goes in:** id, type, content, tags, created/last-accessed timestamps, TTL/expiry, decay-relevant fields, and — once MCP-06 lands — relations (inline per record or a second record kind `{"kind":"link",...}`). Losing timestamps silently resets decay; that's data corruption from the user's perspective.
+
+### 4. REST input-validation table stakes (local single-user daemon)
+
+- **Bad input is 400, never 500** — already our locked two-tier taxonomy (InvalidQuery → 400/invalid_params). The hardening work is extending coverage to boundary values: negative/zero/overflow `limit`, absurd `ttl_secs` (0, negative, > ~100 years, i64 overflow), non-numeric strings, oversized bodies.
+- **`limit`: default + hard max, one documented policy.** Industry accepts either silent-clamp or 400-reject; the requirement is *consistency and documentation*. Given the existing taxonomy already makes invalid input loudly visible, **reject-with-400 above the max** is the more self-consistent choice for agent clients (silent clamping hides bugs in agent code); clamping is defensible only if documented. Pick one, test both edges.
+- **Exact tag-match semantics (WR-07):** tag filters must be exact-match (no substring surprise); an unknown tag yields an empty result, not an error.
+- **Implementation shape:** for ~6 endpoints, manual validation via bounded serde newtypes / a small custom extractor is idiomatic (the axum repo's own validator example is a manual extractor); `validator`/`garde`/`axum-valid` only pay off with many DTOs. No new dependency needed.
+- Loopback guard already exists; auth/rate-limiting remain out of scope for a single-user localhost daemon (adding them would be ceremony, not security — STRIDE already closed 25/25).
 
 ## Feature Landscape
 
 ### Table Stakes (Users Expect These)
 
-Missing these = the product feels broken or untrustworthy versus the MCP reference server and Mem0.
-
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| **MCP server with store/search/list/forget tools** | This is the product's entire reason to exist; every MCP memory server exposes a mutation+query surface | MEDIUM | Use a maintained Rust MCP SDK (rmcp / official). Tool naming below. |
-| **`memory_store`** — write a memory | Without write there is no memory | LOW | Args: `content` (req), `type` (enum), `tags[]`, `source`, `scope`/`project`, `ttl`, optional `id` for upsert. Return the stored record + `id`. |
-| **`memory_search`** — relevance query | The single most-called tool; agents inject results into context | MEDIUM | Args: `query` (req), `type?`, `scope?`, `tags?`, `limit` (default ~5–10), `min_score?`. Return ranked records with score. |
-| **`memory_list`** — browse/filter without a query | Auditability; users must be able to see what's stored (OpenAI's lesson: only auditable memory is trusted) | LOW | Args: `type?`, `scope?`, `tags?`, `limit`, `offset`, `sort` (recency/score). Deterministic, no embedding call. |
-| **`memory_forget`** — delete by id or filter | Trust + GDPR-style control; OpenAI/Mem0 both expose delete | LOW | Args: `id` OR a filter (`type`/`scope`/`tags`). Confirm count deleted. Hard delete for v0.0.1. |
-| **Keyword/substring search baseline** | The reference server ships substring search; semantic must not be the *only* path (works before Ollama is up) | LOW | SQLite FTS5 (BM25). Also the fallback when embeddings unavailable. |
-| **Persistence across sessions** | "Survives session boundaries" is the core problem statement | LOW | SQLite file in a stable location (e.g. `~/.agent-memory/memory.db`). |
-| **Memory typing** (DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT) | Mem0 has categories, Letta has labeled blocks; typing is what makes a *dev* memory useful vs a chat blob | LOW | Stored enum column; filterable in search/list. Already in the spec. |
-| **Metadata: tags, source, scope/project, timestamps** | Mem0 scopes by `user_id`/`agent_id`/`run_id`; without scope, memories from project A leak into project B | LOW–MEDIUM | `created_at`, `updated_at`, `last_accessed_at`, `access_count`, `source`, `scope`/`project`, `tags[]`. `scope` is the cross-runtime-but-per-project key. |
-| **Stable JSON record shape** | Agents and the REST API both parse it; breaking shape breaks every consumer | LOW | One canonical serde struct used by MCP, REST, and CLI. |
-| **README with copy-paste MCP config** | MCP servers live or die on a 30-second install; reference server and every popular server lead with the JSON snippet | LOW | Claude Code / Cursor `mcpServers` block + Homebrew one-liner. |
+| RRF fusion with k=60 default | Every hybrid implementation surveyed (LanceDB, sqlite-vec canonical, sqlite-rag, llama-stack, qmd) uses rank-based RRF, k=60 | MEDIUM | Single SQL: two ranked CTEs + FULL OUTER JOIN + coalesce. Reuses existing FTS5 + vec legs untouched |
+| Dedup-by-fusion (memory in both lists gets both contributions) | This is the definition of RRF; naive "keep one" dedup is a documented bug (qmd #331) | LOW | Falls out of the JOIN + coalesce pattern automatically |
+| Hybrid degrades to keyword-only without Ollama | Existing SC2 contract; hybrid must not break the zero-dependency promise | MEDIUM | Empty vec leg ⇒ RRF reduces to keyword order; report degraded mode in the existing `SearchOutcome` envelope |
+| Over-fetch candidates then truncate post-fusion | All implementations fetch 2–4× limit per leg before fusing | LOW | Otherwise fusion has nothing to reorder |
+| `memory_update(id, partial_patch)` | mem0 `update(id, data)` and Letta `core_memory_replace` prove this is the shape agents use; "update rather than accumulate" is the field norm | MEDIUM | Content change ⇒ re-embed + FTS refresh; empty patch ⇒ invalid_params; Ollama-down follows store-path degradation |
+| Edge cleanup on forget/TTL | Dangling relations = corrupt reads | LOW | `ON DELETE CASCADE` FK on the links table; covers both removal paths in one place |
+| 400 on all malformed boundary input (limit/ttl extremes, overflow) | REST norm: invalid client input never reads as server fault; extends our locked two-tier taxonomy | LOW | Bounded newtypes/manual checks; no validation crate needed at this surface size |
+| Documented limit max with one consistent policy | API-design consensus: default + hard max + explicit clamp-or-reject choice | LOW | Recommend 400-reject to match the existing loud-error taxonomy |
+| Exact tag-match, unknown tag ⇒ empty result | WR-07; substring matching surprises agents | LOW | |
+| JSONL export, one memory per line, version header | ChromaDB Data Pipes precedent; MCP reference server persists as JSONL; raw DB copy is backup not export | MEDIUM | Header line: format version, tool version, embedding model+dim, timestamp |
+| Export carries timestamps + TTL + type + tags | Dropping timestamps silently resets decay = data corruption | LOW | Include relations once MCP-06 lands (second record kind) |
+| Idempotent round-trip import | Export without import is a dead end; matches the existing GSD-import idempotency contract | MEDIUM | Deterministic by-id skip/overwrite; re-embed when embeddings absent/model-mismatched |
+| Windows + musl binaries checksummed like existing targets | Distribution parity promise from the acceptance criteria | HIGH (Windows) / LOW–MEDIUM (musl) | Windows = cfg(unix) refactor per mcp-hub precedent (known multi-spot slog). musl = sqlite-vec upstream PR #199 (removes BSD typedef block) or CFLAGS/vendored shim if the fix isn't in the pinned release |
 
 ### Differentiators (Competitive Advantage)
 
-Aligned with PROJECT.md Core Value (local-first, observability, governance) and the cross-runtime story.
-
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| **Single static Rust binary, zero cloud, zero account** | Mem0/Zep need a cloud or Neo4j; Letta needs a server. One `brew install` daemon is uniquely frictionless | MEDIUM | This is *the* wedge. SQLite embedded, no DB process. |
-| **Local semantic search via Ollama (`nomic-embed-text`)** | Mem0-grade semantic recall with **no data leaving the machine** — privacy-by-architecture | MEDIUM–HIGH | Cosine similarity over stored embeddings. Must degrade gracefully to FTS5 when Ollama is down (see dependencies). |
-| **Hybrid ranking: semantic + recency-decay + access frequency** | Stanford generative-agents / FadeMem-style scoring `score = α·similarity + β·recency + γ·frequency` — more relevant than pure cosine | MEDIUM | Combine cosine, exponential recency decay, and `access_count`. RRF or weighted sum over FTS5+vector (proven in sqlite-vec hybrid examples). |
-| **Decay / forgetting model with exposed relevance** | No comparable local server forgets; Zep only invalidates. Exposing a `decay_score` makes "old, unused context fades" a feature, not silent loss | MEDIUM | Exponential decay on `last_accessed_at`; background pass updates scores. **Decay should down-rank, not auto-delete** (deletion = TTL's job). Surface `score`/`decay_score` in every result so agents/users see why something ranked. |
-| **TTL / expiry** | Ephemeral memories (a TODO, a transient error) shouldn't linger forever | LOW | `expires_at` column; lazy purge on access + periodic sweep. |
-| **GSD STATE.md import** | Stated requirement; turns the existing GSD ecosystem into instant seed data and is a concrete cross-tool interop proof | MEDIUM | `agent-memory import --from gsd-state .planning/STATE.md`. Parse sections → typed memories (Decisions Log → DECISION, etc.). |
-| **Cross-runtime by being MCP-native + REST** | The whole pitch: same memory in Claude Code, Cursor, and any HTTP client | MEDIUM | REST mirrors the MCP tool surface for non-MCP consumers. |
-| **Export (dump to JSON / portable file)** | Trust + portability; counters lock-in fear and pairs with import | LOW | `agent-memory export --format json`. Cheap once the record shape exists. |
-| **Observability hooks (counts, last-access, decay stats)** | Ecosystem is "observability-first"; a `memory_stats` tool or `--stats` CLI fits the brand and aids debugging | LOW | Counts per type/scope, oldest/newest, embedding coverage. |
+| Decay-aware hybrid ranking | Comparable tools lack recency bias in hybrid search and users explicitly request it (qmd #331 asks for temporal decay); we already have the decay engine | LOW | Apply existing decay multiplier post-fusion; down-rank only, preserves STORE-03/04 kill-test invariants |
+| Flat id-addressed relations (`memory_link(from_id, to_id, relation)`) | The official MCP memory server's triple shape *minus* the entity/observation ceremony that demonstrably confuses agents; stable-id keys kill entity-name drift | MEDIUM | One table, 2–3 tools (`memory_link`, `memory_unlink`, links surfaced in results); no graph query language |
+| `related` memories surfaced inline in search/get results (1 hop) | Agents get graph value without issuing graph queries — zero new retrieval concepts to misuse | LOW | Bounded fan-out (cap the related list) to protect context windows |
+| Exposed `k`, `w_fts`, `w_vec` config with sane defaults | LanceDB exposes k; power users tune, everyone else never touches it | LOW | Config/env only — do NOT add per-call tuning params to the MCP tool schema (schema bloat raises agent error rates) |
+| Embeddings-optional export with re-embed-on-import | ChromaDB Data Pipes is the only comparable with this; makes exports genuinely portable across embedding model versions | LOW | Default exclude; `--include-embeddings` flag tags model+dim |
+| Fully-local hybrid search in a single static binary | mem0/Zep need cloud or LLM pipelines; qmd needs Bun + model downloads; we do BM25+vector+RRF+decay in one brew-installable binary | — | The milestone's headline positioning, not extra work |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| **Full knowledge-graph (entities + relations) à la MCP reference / Zep** | "Graphs are powerful," familiar from the reference server | Doubles the data model + tool surface; `create_relations`/graph traversal is a research rabbit hole; not needed for "remember this decision." Zep needs Neo4j for it | Flat typed records + tags + `scope`. Add a lightweight `relate`/`related_to` only if v1 validates demand. |
-| **Cloud sync / hosted multi-user backend** | "Use my memory on another machine" | Kills the zero-cloud/zero-account differentiator; introduces auth, infra, privacy/compliance burden — exactly what Mem0/Zep carry | Local file + `export`/`import` for portability. Sync is a v2+ opt-in plugin, never core. |
-| **LLM-based fact extraction on write (Mem0's `add` pipeline)** | "Auto-summarize what's worth remembering" | Requires an LLM call per write, adds latency/cost/nondeterminism, and a cloud LLM breaks local-first. Mem0's contradiction-resolution is complex to match | Agent decides what to store (Letta's model); store verbatim `content`. Optional local-LLM summarize is v2+. |
-| **Automatic implicit memory ("dreaming" / passive capture)** | ChatGPT does it; "I don't want to call store manually" | Opaque, untrustworthy (OpenAI's own auditability gap), and impossible to do well without an LLM in the loop | Explicit `memory_store` only. Auditable by design. |
-| **Built-in embedding model in the binary** | "Don't make me run Ollama" | Bloats the binary, pins a model, complicates cross-platform builds; sqlite-lembed/bundled-transformer is fragile in Rust today | Depend on Ollama (already chosen); fall back to FTS5 keyword search when absent so the tool still works. |
-| **ANN / vector index optimization** | "Won't full-scan cosine be slow?" | sqlite-vec itself only does full scans today; premature for a personal/per-project store (thousands, not millions, of rows) | Full-scan cosine is fine at expected scale. Revisit only if a user hits 100k+ memories. |
-| **Web UI / dashboard** | "I want to see my memories" | Backend/CLI must work and be tested first (ecosystem rule: no frontend before backend); a UI is a separate tool's job (token-dashboard pattern) | `memory_list` + `--stats` CLI + `export` to JSON. UI is out of scope. |
-| **Multi-tenant auth / RBAC on the REST API** | "Secure the API" | The product is local-first, single-user; auth is solving a problem that doesn't exist on `localhost` | Bind REST to localhost by default; document not exposing it publicly. |
+| Entity/observation knowledge graph (official MCP memory server shape) | "Real" memory graphs look impressive; the reference server does it | 9-tool surface causes tool-choice confusion; string entity names drift ("Jiri"/"Jiří"/"the user"); agents dump into observations and ignore relations. The project already rejected full KG modeling in v1 — research confirms that call | Flat id-addressed links between existing memories; 2–3 tools max |
+| LLM-driven auto-arbitration on write (mem0 AUDN: LLM decides add/update/delete) | "Smart" dedup and contradiction handling | Requires an LLM inside the daemon — violates zero-cloud/no-runtime-dep constraint; non-deterministic writes are untestable against our kill-test culture | Deterministic `memory_update(id, patch)`; let the *calling agent* (which already has an LLM) decide, like Letta does |
+| Bi-temporal fact invalidation (Zep valid_at/invalid_at edges) | State-of-the-art memory papers showcase it | Needs LLM extraction + contradiction-detection pipeline; massive complexity for a single-user local store | Decay + TTL + explicit update/forget already cover "facts go stale" for our use case |
+| Cross-encoder re-ranking stage (qmd `query` mode) | Measurably better final ordering | Second model dependency beyond the Ollama embed model; latency; qmd needed position-aware blending hacks to make it behave | RRF + decay multiplier; leave reranking as a possible future opt-in behind Ollama |
+| Score-normalization fusion instead of RRF (normalized BM25 + cosine weighted sum) | Feels more "precise" than rank-only | BM25/vector score scales are incompatible; normalization is corpus-dependent and brittle — the exact problem RRF was invented to avoid (and what qmd #331 users trip on) | Rank-only RRF |
+| `VACUUM INTO` / raw DB copy as the export feature | One-line implementation, "it's already SQLite" | Pins schema version, includes FTS/vec shadow tables, useless to any other tool — a backup, not a portable contract | Versioned JSONL export; optionally *also* document `VACUUM INTO` as a backup tip in the README (zero code) |
+| Graph traversal / multi-hop query tools ("find path from A to B") | Comes free with graph framing | Agents misuse open-ended traversal; unbounded result explosion; no demonstrated agent win beyond 1 hop | 1-hop `related` field inline in results |
+| Per-call RRF tuning params in the MCP tool schema (`k`, weights as tool args) | Power-user flexibility | Every extra schema param increases agent tool-call error rate; agents will cargo-cult bad values | Server config/env vars; keep tool schemas minimal |
+| Auth/API-keys/rate limiting on the REST API | "Hardening" sounds like auth | Single-user loopback-guarded localhost daemon; auth adds ceremony without a threat-model change (STRIDE 25/25 closed) | Keep the loopback guard; hardening = input validation only |
+| Silent limit clamping without documentation | "Friendlier" than erroring | Hides bugs in agent client code; inconsistent with the locked loud-error (400/invalid_params) taxonomy | 400-reject above the documented max (or clamp — but documented and tested; do not mix policies) |
 
 ## Feature Dependencies
 
 ```
-SQLite schema (memories table: id, content, type, tags, source, scope,
-   created_at, updated_at, last_accessed_at, access_count, expires_at,
-   embedding, decay_score)
-    ├──requires──> memory_store / memory_list / memory_forget   (CRUD, no embeddings)
-    ├──requires──> FTS5 keyword search  ──requires──> memory_search (baseline path)
-    └──requires──> TTL / expiry sweep
+SEARCH-04 hybrid RRF
+    └──requires──> FTS5 keyword leg (shipped)
+    └──requires──> Ollama vector leg + SC2 fallback (shipped)
+    └──requires──> over-fetch depth per leg (new, trivial)
+[decay multiplier post-fusion] ──enhances──> SEARCH-04 (shipped engine, new wiring)
 
-Ollama embedding client
-    └──enables──> semantic search ──enhances──> memory_search (semantic path)
+MCP-06 memory_update
+    └──requires──> re-embed pipeline on content change (shipped embed path, new trigger)
+    └──requires──> two-tier error taxonomy (shipped) for empty-patch/bad-id
+MCP-06 memory_link / relations
+    └──requires──> stable memory IDs (shipped)
+    └──requires──> cascade delete on forget + TTL sweep (new FK)
 
-memory_search (semantic) + recency decay + access frequency
-    └──compose──> hybrid ranking (RRF / weighted score)
+DIST-04 export/import
+    └──requires──> relations schema settled first (export format must include links)
+    └──requires──> idempotent import machinery (shipped GSD-import pattern, generalize)
+    └──requires──> re-embed-on-import via Ollama + SC2 degradation (shipped pattern)
 
-Decay background pass ──reads/writes──> last_accessed_at, access_count, decay_score
-    └──enhances──> hybrid ranking
-    (TTL purge is SEPARATE from decay — decay down-ranks, TTL deletes)
+REST hardening ── independent ── (extends the shipped 400/invalid_params taxonomy)
 
-Stable JSON record shape
-    ├──requires──> MCP tool surface
-    └──requires──> REST API  (mirror of MCP tools)
+musl binaries ──requires──> sqlite-vec BSD-typedef fix (upstream PR #199 or CFLAGS shim)
+DIST-03 Windows ──requires──> cfg(unix) audit/refactor (mcp-hub precedent)
+[Windows + musl] ──enhance──> DIST-04 (portable export matters more once binaries run everywhere)
 
-GSD STATE.md import parser ──requires──> memory_store + typing
-Export ──requires──> stable JSON record shape
+[Per-call tuning params] ──conflicts──> minimal MCP tool schemas (tuning lives in config)
+[Raw-DB-copy export] ──conflicts──> versioned JSONL contract (backup ≠ export)
 ```
 
 ### Dependency Notes
 
-- **memory_search (semantic) requires the Ollama client, but must NOT hard-require it at runtime:** if Ollama is unreachable, search falls back to FTS5 keyword/BM25. This keeps the binary useful on a fresh machine and is the single most important resilience decision.
-- **Hybrid ranking enhances search but depends on both paths existing:** ship FTS5 first, add semantic, then fuse. Do not build fusion before both inputs work.
-- **Decay and TTL are independent and must not be conflated:** decay changes *ranking* (a quiet memory sinks); TTL changes *existence* (an expired memory is gone). Implementing decay as deletion would silently lose data and break trust.
-- **GSD import and Export both depend only on the stable record shape + store path** — cheap to add once CRUD exists; good early interop proof.
-- **REST API is a thin mirror of the MCP tools over the same service layer** — build the service layer once, expose it twice. Don't write business logic in the MCP handlers.
+- **Hybrid RRF requires both shipped legs unchanged:** it is a fusion layer, not a new retriever. The SC2 fallback contract transfers automatically if the vector leg's emptiness is handled with `coalesce` — and the `SearchOutcome` envelope should report `mode: hybrid | keyword_only` so agents and tests can assert degradation.
+- **Relations must land before the export format freezes:** the JSONL v1 contract should include link records from day one; otherwise format v2 arrives one phase later. Sequence MCP-06 before DIST-04 (or at minimum settle the links schema first).
+- **memory_update reuses the store path's embedding degradation:** update-with-Ollama-down must behave exactly like store-with-Ollama-down (succeed, keyword-searchable, no embedding) — a divergence here would create a new class of inconsistency.
+- **Cascade delete touches both removal paths:** TTL sweep and explicit forget are the only removal paths (locked decision); both must now clean edges. FK `ON DELETE CASCADE` handles both in one place.
+- **musl fix is likely upstream already:** sqlite-vec PR #199 removes the BSD typedef block (confirmed on Alpine musl + Ubuntu glibc); verify whether it's in the pinned release, else vendored patch/CFLAGS shim (both LOW effort). Windows is the expensive one — cfg(unix) audit across daemon paths, per the documented mcp-hub precedent.
 
 ## MVP Definition
 
-### Launch With (v0.0.1)
+### Launch With (v1.1 milestone / product v0.1.0)
 
-- [ ] **SQLite schema + persistence** — the foundation everything else needs; zero-config local file.
-- [ ] **MCP server: `memory_store`, `memory_search`, `memory_list`, `memory_forget`** — the product's reason to exist (spec-mandated 4 tools).
-- [ ] **Memory typing + metadata** (type enum, tags, source, scope, timestamps, access_count) — what makes it a *dev* memory, and filtering depends on it.
-- [ ] **FTS5 keyword search** — works before/without Ollama; baseline `memory_search` path.
-- [ ] **Ollama semantic search** with **graceful fallback to FTS5** — the privacy differentiator; spec-mandated.
-- [ ] **Exponential decay scoring** (down-ranks, background pass) + **TTL expiry** — spec-mandated; the "memories fade" feature with relevance surfaced in results.
-- [ ] **GSD STATE.md import** (`import --from gsd-state`) — spec-mandated, instant seed + interop proof.
-- [ ] **REST API mirroring the MCP tools** — spec-mandated non-MCP path; thin layer over shared service.
-- [ ] **CLI** (`store`/`search`/`list`/`forget`/`import`/`export`/`stats`) + **README MCP config** + **prebuilt binaries + Homebrew** — install/adoption table stakes.
+- [ ] Hybrid RRF search (k=60, w=1.0/1.0, over-fetch, FULL-OUTER-JOIN dedup, decay multiplier post-fusion, keyword-only degradation reported in `SearchOutcome`) — the headline recall-quality feature
+- [ ] `memory_update(id, partial_patch)` with re-embed on content change — completes CRUD; field-proven shape (mem0/Letta)
+- [ ] `memory_link` / `memory_unlink` + `related` in results + cascade delete — flat relations, settled before the export format
+- [ ] REST boundary hardening (limit default+max with 400-reject, ttl bounds, exact tag match, overflow → 400) — closes WR-01/WR-02/WR-07
+- [ ] JSONL export with version header + idempotent import with re-embed — export without import is a dead end
+- [ ] musl binaries (typedef fix) — cheap, unblocks Alpine/containers
+- [ ] Windows binaries (cfg(unix) refactor) — acceptance-criteria parity; the known HIGH-effort item
 
 ### Add After Validation (v1.x)
 
-- [ ] **`memory_update`** (in-place edit by id) — trigger: users asking to revise rather than forget+re-store. (Letta's `core_memory_replace`.)
-- [ ] **Hybrid RRF fusion tuning + per-type decay rates** — trigger: users report semantic-only or keyword-only ranking misses; important types (CONSTRAINT) should decay slower.
-- [ ] **Export/import round-trip + more importers** (Cursor rules, Superpowers context, RTK db) — trigger: cross-runtime adoption requests.
-- [ ] **`memory_stats` MCP tool** — trigger: debugging/observability demand beyond the CLI.
+- [ ] Configurable k / w_fts / w_vec via config file/env — after real usage shows defaults falling short
+- [ ] `--include-embeddings` export flag with model+dim tagging — when a same-model restore use case shows up
+- [ ] Relation-type vocabulary guidance in tool descriptions (suggested set, free string accepted) — after observing what relation strings agents actually write
 
 ### Future Consideration (v2+)
 
-- [ ] **Lightweight relations (`relate` / `related_to` tag)** — defer: only if flat-record model proves insufficient; avoid the full graph.
-- [ ] **Optional local-LLM summarization on store** — defer: nondeterminism + latency; only when a clean local path exists.
-- [ ] **Opt-in encrypted sync between a user's own machines** — defer: must never compromise zero-cloud default; plugin, not core.
-- [ ] **ANN vector index** — defer: only when a real user exceeds full-scan-comfortable scale (100k+ rows).
+- [ ] Optional local re-ranking stage (Ollama-served reranker) — only if RRF+decay recall proves insufficient; second model dependency
+- [ ] Cross-tool import adapters (mem0/Chroma JSONL dialects) — no universal standard exists; wait for demand
+- [ ] Multi-hop relation queries — no evidence agents use them well; revisit only with concrete transcripts showing 1-hop insufficiency
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| SQLite schema + persistence | HIGH | LOW | P1 |
-| MCP store/search/list/forget tools | HIGH | MEDIUM | P1 |
-| Memory typing + metadata (incl. scope) | HIGH | LOW | P1 |
-| FTS5 keyword search (+ fallback) | HIGH | LOW | P1 |
-| Ollama semantic search | HIGH | MEDIUM | P1 |
-| Decay scoring + TTL | MEDIUM | MEDIUM | P1 |
-| GSD STATE.md import | MEDIUM | MEDIUM | P1 |
-| REST API (mirror) | MEDIUM | LOW | P1 |
-| CLI + Homebrew + README config | HIGH | LOW | P1 |
-| Export to JSON | MEDIUM | LOW | P2 |
-| Hybrid RRF ranking | MEDIUM | MEDIUM | P2 |
-| memory_update | MEDIUM | LOW | P2 |
-| memory_stats / observability | MEDIUM | LOW | P2 |
-| Lightweight relations | LOW | MEDIUM | P3 |
-| Local-LLM summarization | LOW | HIGH | P3 |
-| Encrypted self-sync | MEDIUM | HIGH | P3 |
-| Knowledge graph | LOW | HIGH | (anti-feature) |
-| Cloud sync / hosted backend | LOW | HIGH | (anti-feature) |
-
-**Priority key:** P1 must-have for launch · P2 add when possible · P3 future.
+| Hybrid RRF (k=60 + dedup + fallback) | HIGH | MEDIUM | P1 |
+| Decay multiplier on fused score | HIGH | LOW | P1 |
+| memory_update | HIGH | MEDIUM | P1 |
+| Flat memory_link/unlink + related-in-results | MEDIUM | MEDIUM | P1 |
+| Cascade delete of edges | HIGH (integrity) | LOW | P1 |
+| REST boundary hardening | MEDIUM | LOW | P1 |
+| JSONL export + idempotent import | HIGH | MEDIUM | P1 |
+| musl binaries | MEDIUM | LOW–MEDIUM | P1 |
+| Windows binaries | MEDIUM | HIGH | P2 (in-milestone, sequence last; known slog) |
+| Config-exposed k/weights | LOW | LOW | P2 |
+| --include-embeddings export | LOW | LOW | P2 |
+| Local reranker stage | MEDIUM | HIGH | P3 |
+| Multi-hop graph queries | LOW | HIGH | P3 (anti-feature until proven otherwise) |
 
 ## Competitor Feature Analysis
 
-| Feature | MCP reference server | Mem0 | Letta / Zep | Our Approach |
-|---------|----------------------|------|-------------|--------------|
-| Tool surface | Graph mutate + `search_nodes` (substring) | SDK `add`/`search`/`get_all`/`delete` | Agent memory functions / API | **4 MCP tools** (`memory_store/search/list/forget`) + REST mirror; flat typed records |
-| Search | Substring over text | Hybrid semantic+BM25+entity, rich filters | Semantic (archival), graph (Zep) | FTS5 baseline → **Ollama semantic** → hybrid fusion (v1.x) |
-| Typing/metadata | entity `type` + observations | `metadata` + custom categories, `user/agent/run_id` scope | Labeled blocks (Letta) | **6 fixed dev types** + tags + `source` + `scope`/project + timestamps |
-| Forgetting | Manual delete only | Contradiction dedup ("latest wins") | Invalidate-not-delete (Zep); agent edits (Letta) | **Exponential decay (down-rank)** + **TTL (delete)**, both surfaced |
-| Storage / locality | Local JSONL | Cloud-default | Server / Neo4j | **Single Rust binary + SQLite, zero cloud** |
-| Import/interop | none | SDK import | API | **GSD STATE.md import** + JSON export |
-| Embeddings | none | Cloud/provider | Provider | **Local Ollama `nomic-embed-text`**, FTS5 fallback |
+| Feature | mem0 | Letta/MemGPT | Zep/Graphiti | Official MCP memory | LanceDB / sqlite-vec | qmd | Our Approach |
+|---------|------|--------------|--------------|--------------------|--------------------|-----|--------------|
+| Hybrid search | vector-first fusion | archival embed search | hybrid over graph | none (substring over graph) | RRF reranker, k=60 default | BM25+vec+RRF (orig query 2×) + cross-encoder | RRF k=60, SQL CTE + FULL OUTER JOIN, decay post-fusion, no reranker |
+| Recency/decay in ranking | no | no | temporal edges (heavyweight) | no | no | requested, unimplemented (#331) | shipped decay engine wired into fusion — differentiator |
+| Memory update | `update(id, data)` + server-side LLM AUDN | `core_memory_replace(label, old, new)` | LLM invalidation pipeline | delete + recreate observations | n/a | n/a (read-only index) | deterministic `memory_update(id, patch)`, re-embed on content change, no LLM in daemon |
+| Relations | optional graph add-on | none (blocks, no graph) | full bi-temporal KG | entities+relations+observations, 9 tools, name-string keys | n/a | n/a | flat id-keyed triples, 2–3 tools, 1-hop `related` in results |
+| Export/import | cloud export API | agent-file export | n/a (DB-bound) | whole-graph JSONL file | Data Pipes JSONL ± embeddings, re-embed on import | index rebuildable from source files | versioned JSONL, embeddings excluded by default, idempotent re-embedding import |
+| Input validation posture | cloud API (server-enforced) | server-enforced | server-enforced | minimal (local stdio) | n/a | n/a | 400/invalid_params taxonomy extended to boundary values; reject above max limit |
+| Fully local, single binary | no (cloud or Python+LLM) | no (server + Postgres) | no | yes (Node) | library, not product | yes (Bun + local models) | yes — Rust static binary; brew, Windows, musl |
 
 ## Sources
 
-- MCP reference knowledge-graph memory server — tool surface & JSONL persistence: https://github.com/modelcontextprotocol/servers/tree/main/src/memory (HIGH)
-- Mem0 add/search, hybrid retrieval, metadata/categories, scoping: https://docs.mem0.ai/api-reference/memory/search-memories , https://github.com/mem0ai/mem0 , https://github.com/mem0ai/mem0/blob/main/docs/core-concepts/memory-operations/add.mdx (HIGH)
-- Letta/MemGPT core/recall/archival tiers & memory blocks: https://www.letta.com/blog/agent-memory/ (HIGH)
-- Zep/Graphiti bi-temporal graph, fact invalidation vs deletion: https://arxiv.org/abs/2501.13956 , https://github.com/getzep/graphiti (HIGH)
-- OpenAI ChatGPT saved-memories vs chat-history, auditability, user control: https://help.openai.com/en/articles/8590148-memory-faq , https://openai.com/index/memory-and-new-controls-for-chatgpt/ (HIGH)
-- Decay/forgetting & relevance scoring (recency·frequency·similarity), forgetting curves: https://arxiv.org/html/2601.18642 (FadeMem) , https://co-r-e.com/method/agent-memory-forgetting (MEDIUM)
-- SQLite hybrid search (FTS5 BM25 + sqlite-vec + RRF), full-scan limitation: https://alexgarcia.xyz/blog/2024/sqlite-vec-hybrid-search/index.html , https://simonwillison.net/2024/Oct/4/hybrid-full-text-search-and-vector-search-with-sqlite/ (HIGH)
+Confidence tiers assigned via `gsd-tools query classify-confidence` (context7 → MEDIUM; websearch cross-verified → MEDIUM; single-source websearch/webfetch → LOW). Digests cached in `.planning/research/.cache` via the research-store seam.
+
+**Hybrid RRF (MEDIUM — cross-verified):**
+- [Alex Garcia — Hybrid full-text search and vector search with SQLite](https://alexgarcia.xyz/blog/2024/sqlite-vec-hybrid-search/index.html) (canonical sqlite-vec pattern: CTEs, FULL OUTER JOIN, coalesce, k=60, weights)
+- LanceDB `RRFReranker` API docs via Context7 (`/lancedb/lancedb`) — `create(k)` default k=60
+- [Reciprocal Rank Fusion explained](https://blog.serghei.pl/posts/reciprocal-rank-fusion-explained/), [Spice AI — RRF](https://spice.ai/learn/reciprocal-rank-fusion), [apxml — RRF fusion algorithms](https://apxml.com/courses/advanced-vector-search-llms/chapter-3-hybrid-search-approaches/rrf-fusion-algorithms), [MongoDB — RRF](https://www.mongodb.com/resources/basics/reciprocal-rank-fusion) (k=60 standard, flat optimum [20,100])
+- [Simon Willison on sqlite-vec hybrid](https://simonwillison.net/2024/Oct/4/hybrid-full-text-search-and-vector-search-with-sqlite/), [sqliteai/sqlite-rag](https://github.com/sqliteai/sqlite-rag), [llama-stack hybrid search issue #1158](https://github.com/meta-llama/llama-stack/issues/1158)
+
+**Update/relations tool shapes (MEDIUM — cross-verified):**
+- [mem0 — Update Memory docs](https://docs.mem0.ai/core-concepts/memory-operations/update), [mem0 memory operations (DeepWiki)](https://deepwiki.com/mem0ai/mem0/3.3-history-and-storage-management) (AUDN cycle is server-side)
+- [Letta — MemGPT agents docs](https://docs.letta.com/guides/legacy/memgpt_agents_legacy) (core_memory_replace/append, archival tools)
+- [Official MCP memory server](https://github.com/modelcontextprotocol/servers/tree/main/src/memory), [npm @modelcontextprotocol/server-memory](https://www.npmjs.com/package/@modelcontextprotocol/server-memory) (entities/relations/observations, 9-tool surface)
+- [Zep temporal KG paper (arXiv 2501.13956)](https://arxiv.org/html/2501.13956v1), [Graphiti overview (Neo4j blog)](https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/) (bi-temporal edges, invalidation)
+
+**qmd + hybrid pain points (MEDIUM):**
+- [tobi/qmd](https://github.com/tobi/qmd), [qmd search modes (DeepWiki)](https://deepwiki.com/tobi/qmd/3.2-search-modes-explained), [qmd issue #331 — ranking improvements](https://github.com/tobi/qmd/issues/331) (score mismatch, temporal-decay gap, dedup bugs)
+
+**Export formats (LOW–MEDIUM):**
+- [ChromaDB Data Pipes](https://datapipes.chromadb.dev/) (JSONL export ± embeddings, re-embed on import)
+- [Exporting SQLite to CSV/JSON/SQL (Sling Academy)](https://www.slingacademy.com/article/exporting-sqlite-data-to-csv-json-and-sql-formats/), [High Performance SQLite — Exports](https://databaseschool.com/series/high-performance-sqlite/videos/71) (VACUUM INTO = backup, not interchange)
+
+**REST validation (MEDIUM — convergent):**
+- [Speakeasy — pagination best practices](https://www.speakeasy.com/api-design/pagination), [restfulapi.net — pagination/sorting/filtering](https://restfulapi.net/api-pagination-sorting-filtering/), [Vinay Sahni — pragmatic REST](https://www.vinaysahni.com/best-practices-for-a-pragmatic-restful-api) (default+max limit, clamp-vs-400 both accepted if documented, 400 never 500)
+- [axum-valid](https://github.com/gengteng/axum-valid), [garde](https://github.com/jprochazk/garde), [axum official validator example](https://github.com/tokio-rs/axum/blob/main/examples/validator/src/main.rs) (manual extractor idiomatic at small surface)
+
+**Distribution (MEDIUM):**
+- [sqlite-vec PR #199 — musl typedef fix](https://github.com/asg017/sqlite-vec/pull/199), [Mozilla bug 1964446](https://bugzilla.mozilla.org/show_bug.cgi?id=1964446)
 
 ---
-*Feature research for: cross-runtime persistent agent memory (local-first MCP memory server)*
-*Researched: 2026-06-24*
+*Feature research for: agent-memory v1.1 Hardening & Interop (hybrid RRF, MCP update/relations, REST hardening, portable export, Windows/musl)*
+*Researched: 2026-07-12*

@@ -1,140 +1,192 @@
 # Stack Research
 
-**Domain:** Local-first Rust daemon — MCP server + REST API, embedded SQLite store with on-device (Ollama) semantic search
-**Researched:** 2026-06-24
-**Confidence:** HIGH (core crates verified against crates.io live versions; integration nuances verified against upstream docs/issues)
+**Domain:** v1.1 milestone additions to a shipped local-first Rust MCP memory daemon — hybrid RRF search, memory_update/relations, REST input hardening, Windows + musl binaries, portable export
+**Researched:** 2026-07-12
+**Confidence:** HIGH for "no new crates needed" items (verified against the pinned graph and official sqlite-vec docs); MEDIUM for cross-compile toolchain claims (verified against upstream READMEs/PRs but not yet spiked on the actual runner)
 
-> **Verdict in one line:** Build on **`rmcp` (official MCP SDK) + `axum` + `rusqlite` (bundled) + `sqlite-vec` + `reqwest` direct to Ollama**, all on one `tokio` runtime, packaged with **`cargo-dist`** (with a self-hosted-runner caveat). This matches the ecosystem's existing Rust conventions (mcp-hub already uses `axum 0.8`, `clap 4`, `tokio 1`, `thiserror 2`) and keeps the tool single-binary, zero-cloud, zero-config.
+> **Verdict in one line:** Almost everything in this milestone is **zero new runtime dependencies** — RRF is pure SQL on the already-bundled SQLite 3.51.3, update/relations is a `rusqlite_migration` step, REST hardening is manual bounds checks on the existing two-tier error taxonomy, and export is `serde_json` JSONL + `VACUUM INTO`. The only stack additions are **build-side**: `cargo-xwin 0.23` for Windows (cargo-zigbuild explicitly does NOT support Windows targets) and a `CFLAGS_<target>` typedef shim for musl (upstream fix PR #199 is still unmerged; crate 0.1.9 vendors the broken C).
 
 ---
 
 ## Recommended Stack
 
-### Core Technologies
+### Core Technologies (unchanged — validated in v1.0, listed for the pin contract)
 
-| Technology | Version | Purpose | Why Recommended |
-|------------|---------|---------|-----------------|
-| **`rmcp`** | `1.8` (`features = ["server", "transport-io", "transport-streamable-http-server", "macros"]`) | The MCP server — the primary interface (`memory_store/search/list/forget`) | The **official** Model Context Protocol Rust SDK (`modelcontextprotocol/rust-sdk`), 4.7M+ downloads, implements the latest protocol revision with backward compat. Provides **stdio** (`transport-io`) for the standard `claude_desktop`/Cursor launch model **and** **Streamable HTTP** (`transport-streamable-http-server`) as a `tower`/`axum`-nestable service. `#[tool]` / `#[tool_router]` macros remove handwritten JSON-RPC plumbing. No credible alternative for a tool that must be a first-class MCP citizen. |
-| **`tokio`** | `1` (`features = ["full"]`) | Async runtime hosting both the MCP server and the REST API in one process | Ecosystem standard and already used across mcp-hub/injection-scanner. rmcp, axum, and reqwest are all tokio-native, so one runtime serves everything — no second executor, no blocking-thread juggling. |
-| **`rusqlite`** | `0.40` (`features = ["bundled"]`) | Embedded SQLite store (memories, embeddings, metadata) | `bundled` compiles SQLite **into the binary** → zero system dependency, identical behavior on every prebuilt target, no "install sqlite first" step. Synchronous API is the right fit for a single-process local store (wrap writes in `tokio::task::spawn_blocking` or a single writer task). Directly supports loading the `sqlite-vec` extension via `sqlite3_auto_extension`. |
-| **`sqlite-vec`** | `0.1.9` | Vector similarity search inside SQLite (semantic memory recall) | Pure-C, dependency-free successor to the **deprecated** `sqlite-vss`; runs anywhere SQLite runs. Registered as an auto-extension, stores 768-dim `nomic-embed-text` vectors in a `vec0` virtual table and does KNN with `MATCH`. Keeps search **in the database** — no separate vector store, no extra process. (See Version Compatibility for the rusqlite 0.34+ registration nuance.) |
-| **`axum`** | `0.8` | Secondary REST API for non-MCP integrations | Already the ecosystem's chosen web framework (mcp-hub pins `axum 0.8`). Critically, rmcp's `StreamableHttpService` **is a `tower` service you nest directly into an axum `Router`** — so the MCP HTTP transport and the REST endpoints share **one router, one listener, one runtime**. `actix-web` would force a second, non-tower stack. |
-| **`reqwest`** | `0.12` (pin `0.12`, not `0.13`) | HTTP client to local Ollama `/api/embed` | Direct, dependency-light, fully under our control for the *one* call we make (request an embedding). Avoids an extra abstraction layer and an unmaintained-wrapper risk (see What NOT to Use re: `ollama-rs`). |
-| **`clap`** | `4` (`features = ["derive", "env"]`) | CLI surface (`serve`, `import --from gsd-state`, config flags) | Ecosystem standard; `derive` + `env` matches mcp-hub. |
-| **`serde` / `serde_json`** | `1` / `1` | (De)serialization of MCP payloads, REST bodies, Ollama JSON, config | Ecosystem standard, required transitively by rmcp/axum anyway. |
-| **`anyhow` / `thiserror`** | `1` / `2` | Errors: `anyhow` in the binary, `thiserror` typed errors in the library | Mandated by ecosystem CLAUDE.md; mcp-hub already on `thiserror 2`. |
+| Technology | Version | Purpose | Why It Must Not Move |
+|------------|---------|---------|----------------------|
+| `rusqlite` | `0.39` (`bundled`, `functions`) | Embedded SQLite (ships **SQLite 3.51.3**) | Shares `libsqlite3-sys 0.37` with `r2d2_sqlite 0.34`; 0.40 pulls libsqlite3-sys 0.38 → `links = "sqlite3"` conflict. **Nothing in this milestone requires bumping it.** |
+| `rusqlite_migration` | `2.5` | Schema migrations (relations table, any update-path columns) | 2.6 jumps to rusqlite ^0.40 — stay on 2.5 to hold the libsqlite3-sys 0.37 pin. |
+| `sqlite-vec` | `0.1.9` | vec0 KNN sidecar | Still `max_stable_version` on crates.io (verified 2026-07-12; 0.1.10 is alpha-only, latest alpha.4 2026-05-18). Its only build-dep is `cc`, so it stays outside the libsqlite3-sys pin. The musl fix is a build-flag workaround, **not** a version bump. |
+| `rmcp` | `1.8` | MCP server (gains `memory_update`, `memory_link`, `memory_relations` tools) | New tools are just more `#[tool]` methods on the existing router — no SDK change needed. |
+| `axum` | `0.8` | REST mirror (gains PATCH/update + relations routes, hardened validation) | No change; validation is handler-level. |
+| `serde` / `serde_json` | `1` / `1` | JSONL export/import records | Already pinned; JSONL is `to_writer` + `\n` per record. |
+| `chrono` | `0.4` (`default-features=false`, `features=["now"]`) | UTC timestamps | **Do not touch** — the trimmed feature set is what keeps zig darwin cross-compiles linking; it also happens to be Windows-safe (no `iana-time-zone`, no `Local`). |
 
-### Supporting Libraries
+### New Additions (this milestone)
 
-| Library | Version | Purpose | When to Use |
-|---------|---------|---------|-------------|
-| **`rusqlite_migration`** | `2` | Versioned, ordered schema migrations over the bundled SQLite connection | From day one. Lightweight (just `M::up(...)` SQL steps + `user_version`), no async, no macros — correct weight for a single-file embedded DB. Preferred over `refinery` here (see Alternatives). |
-| **`tower` / `tower-http`** | `0.5` / `0.6` | Middleware for the axum router (CORS, timeout, tracing) shared with the MCP HTTP service | When exposing the HTTP transport / REST surface. mcp-hub already uses `tower-http 0.6` with `timeout, cors`. |
-| **`tracing` / `tracing-subscriber`** | `0.1` / `0.3` (`env-filter`) | Structured logging for a long-running daemon | Always — observability-first is an ecosystem principle; matches mcp-hub. |
-| **`chrono`** | `0.4` | Timestamps for `created_at` / `last_accessed`, decay + TTL math | Decay scoring and TTL expiry both need wall-clock deltas. (`time` 0.3 is an acceptable substitute if you prefer fewer transitive deps.) |
-| **`dirs`** | `5`/`6` | Resolve default DB path (`~/.local/share/agent-memory/…`) | Zero-config default location for the SQLite file. mcp-hub uses `dirs 5`. |
-| **`zerocopy`** | `0.8` | Cast `Vec<f32>` embeddings to `&[u8]` BLOB and back without unsafe | When writing/reading raw vectors to SQLite (sqlite-vec expects little-endian f32 byte slices). Avoids hand-rolled `unsafe transmute`. |
-| **`uuid`** | `1` (`v4`) | Stable memory IDs | When generating memory record identifiers. |
-| **`tokio-cron-scheduler`** *(optional)* | `0.13` | Daily decay-score recompute as a background task | Only if you want a scheduler abstraction. A plain `tokio::time::interval` loop in a spawned task is simpler and usually sufficient — prefer it unless cron semantics are genuinely needed. |
+| Item | Version | Purpose | Kind |
+|------|---------|---------|------|
+| **`cargo-xwin`** | `0.23.0` (2026-06-16, verified crates.io) | Cross-compile `x86_64-pc-windows-msvc` from the ARM64 Linux runner | **Build tool only** — installed on the runner, not a dependency |
+| **`clang` / `llvm` + `lld`** (Debian arm64 pkgs) | distro current | Backend `cargo-xwin` drives (`clang-cl` against the xwin-fetched MSVC CRT); clang cross-targets x86_64-windows from aarch64 hosts natively | Runner provisioning |
+| **`CFLAGS_x86_64_unknown_linux_musl` / `CFLAGS_aarch64_unknown_linux_musl` env shim** | n/a | `-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t` — the `cc` crate honors per-target CFLAGS, so the vendored `sqlite-vec.c` BSD typedefs resolve without forking anything | Release-workflow env var |
+| **`base64`** *(optional, only if `--include-embeddings` export ships)* | `0.22` | Encode 768-dim f32 blobs into JSONL | Runtime dep — **defer unless the feature is confirmed**; default export should exclude embeddings and re-embed on import |
 
-### Development Tools
+**Explicitly NOT added:** no validation crate (`validator`/`garde`/`axum-valid`), no new search crate, no export/serialization framework, no second SQLite stack. Rationale per feature below.
 
-| Tool | Purpose | Notes |
-|------|---------|-------|
-| **`cargo-dist`** | Cross-platform prebuilt binaries + GitHub Release + **Homebrew formula generation** | Latest `0.32.0` (Dec 2025); actively maintained. Generates the release workflow, archives, checksums, shell/PowerShell installers, **and a Homebrew tap formula** from `Cargo.toml` metadata — directly satisfies "pre-built binaries + Homebrew". **Caveat:** its generated `release.yml` defaults to `ubuntu-latest`/`macos-latest`, which is **banned org-wide**. You must override `[workspace.metadata.dist] github-custom-runners` (or post-generate patch `runs-on:` to `arc-runner-unityinflow` / `orangepi`). See Stack Patterns. |
-| **`cargo-zigbuild`** | Cross-compile all target triples from one Linux host (incl. ARM64 `orangepi`) | **Proven in this ecosystem** — used to ship injection-scanner v0.0.2 (incl. apple-darwin) and mcp-hub v0.1.1 from the `orangepi` runner when the Hetzner X64 fleet was offline. Pairs with either cargo-dist or a hand-rolled matrix. ⚠️ **`bundled` rusqlite + `sqlite-vec` compile C code** — confirm the zig C toolchain links the bundled SQLite/vec C for each cross target early (this is the single biggest release risk; see Pitfalls). |
-| **`cargo clippy -- -D warnings`** | Lint gate | Mandated; must pass before commit. |
-| **`cargo fmt`** | Format | Mandated before every commit. |
-| **`cargo nextest`** *(optional)* | Faster test runner for the >80% coverage gate | Nice-to-have; `cargo test` is fine. |
+---
+
+## Per-Feature Stack Analysis
+
+### 1. Hybrid RRF search (SEARCH-04) — zero new dependencies
+
+Pure SQL on the existing engine. The **official sqlite-vec example** (nbc-headlines, Context7-verified) is exactly this shape:
+
+```sql
+WITH vec_matches AS (
+  SELECT memory_id, row_number() OVER (ORDER BY distance) AS rank_number, distance
+  FROM vec_memories WHERE embedding MATCH :query_vec AND k = :k
+),
+fts_matches AS (
+  SELECT rowid AS memory_id, row_number() OVER (ORDER BY rank) AS rank_number, rank AS score
+  FROM fts_memories WHERE fts_memories MATCH :query LIMIT :k
+)
+SELECT ...,
+  coalesce(1.0 / (:rrf_k + fts_matches.rank_number), 0.0) * :weight_fts
++ coalesce(1.0 / (:rrf_k + vec_matches.rank_number), 0.0) * :weight_vec AS combined_rank
+FROM fts_matches
+FULL OUTER JOIN vec_matches USING (memory_id)
+JOIN memories ON memories.id = coalesce(fts_matches.memory_id, vec_matches.memory_id)
+ORDER BY combined_rank DESC;
+```
+
+- **Engine requirements:** window functions (SQLite ≥ 3.25) and `FULL OUTER JOIN` (SQLite ≥ 3.39). libsqlite3-sys 0.37 bundles **SQLite 3.51.3** (verified docs.rs) — both available. No pin change.
+- **Conventions:** `rrf_k = 60` (the literature default), equal weights 1.0/1.0 to start; expose weights as config later if recall tuning demands it.
+- **Integration notes:** FTS5 `rank` is negative-BM25 (ascending = best), so `ORDER BY rank` is already correct. The existing decay blend (registered `exp` scalar function) composes on top: apply decay as a multiplier on `combined_rank`, keeping one ranking pipeline. Keep the existing keyword-only fallback path — RRF degrades to FTS-only when Ollama is absent (SC2 behavior preserved) simply because `vec_matches` is empty and `coalesce` handles it.
+
+### 2. `memory_update` + relation/link tools (MCP-06) — zero new dependencies
+
+- **Schema:** one new `rusqlite_migration 2.5` step: a `memory_relations(from_id, to_id, relation_type, created_at)` table with FKs to `memories` and `ON DELETE CASCADE` (so `memory_forget` and TTL sweep clean up edges for free). Pinned 2.5 handles this fine — additive migrations are its bread and butter.
+- **Caveat:** SQLite enforces FKs only when `PRAGMA foreign_keys = ON` is set **per connection** — set it in the existing r2d2 pool's connection customizer (alongside the WAL/busy_timeout pragmas you already set), or the CASCADE silently never fires.
+- **MCP surface:** new `#[tool]` methods on the existing rmcp 1.8 router; no SDK feature change. Reuse the shared `SearchOutcome`-style envelope so MCP/REST wire shapes stay aligned (existing decision).
+- **Update semantics:** `memory_update` re-embedding on content change goes through the existing single-writer lane + Ollama client; nothing new. If content changes, the FTS5 row and vec0 row must be updated in the same transaction as the base row — same pattern the store already uses for insert.
+
+### 3. REST input hardening (WR-01/02/07) — zero new dependencies; do NOT add a validation crate
+
+- **Recommendation: manual validation at the shared store seam**, mapped through the existing two-tier taxonomy (`InvalidQuery → 400/invalid_params`). The surface is tiny — `limit` bounds (e.g. 1..=1000), `ttl_secs` bounds (reject 0/negative/absurd), exact tag-match semantics — three checks do not justify a derive-macro dependency tree.
+- Add `#[serde(deny_unknown_fields)]` to REST request DTOs as part of hardening (free, catches client typos like `tags_` silently matching nothing).
+- Because validation lives at the **store seam**, MCP and REST get identical enforcement for free — same argument that won for the error taxonomy in 02-05.
+- `validator`/`garde` via `axum-valid 0.24` is the ecosystem answer **only when** you have many DTOs with cross-field rules. Revisit if the REST surface grows past ~10 endpoints.
+
+### 4. Windows binaries (DIST-03) — build-tooling change, likely small code change
+
+- **`cargo-zigbuild` cannot do this**: its README states only Linux and macOS targets are supported. Windows requires a different tool — this is a hard fact, not a preference.
+- **Primary path: `cargo-xwin 0.23.0` → `x86_64-pc-windows-msvc`.** Same `rust-cross` org as cargo-zigbuild (consistent tooling family), runs on Linux hosts including aarch64 (it's a cargo subcommand needing only `clang`; clang cross-targets x86_64-windows from ARM64). It fetches the MSVC CRT/SDK via xwin — note the **Microsoft license acceptance** step (`--accept-license` / env) in CI. MSVC is the tier-1 Windows ABI users expect.
+- **C-code risk (the real spike):** `libsqlite3-sys` bundled compiles `sqlite3.c` via `cc`, and rusqlite docs explicitly recommend `bundled` for Windows; `cc`-driven C under cargo-xwin (clang-cl) is that tool's core scenario. `sqlite-vec.c` must also compile under clang-cl — sqlite-vec upstream ships official Windows artifacts, so the C is MSVC-clean, but **spike the full workspace build first** before planning the release around it.
+- **Fallback path: `x86_64-pc-windows-gnu` via mingw-w64** (`gcc-mingw-w64-x86-64` exists for arm64 Debian hosts). Well-trodden for rusqlite-bundled; larger binaries, but avoids the MSVC CRT licensing step entirely.
+- **cfg(unix) audit (mcp-hub precedent) — expect this to be SMALL here:** agent-memory does not use the deps that sank mcp-hub (dialoguer/comfy_table/owo_colors); `dirs 6`, trimmed `chrono` (`now` works on Windows), rmcp stdio, axum, tokio are all Windows-clean. The likely offenders are direct `std::os::unix` usage — e.g. `PermissionsExt` 0o600 on the DB file and any Unix-path/loopback assumptions. Gate those behind `#[cfg(unix)]` with a Windows equivalent (or documented no-op) rather than refactoring dependencies.
+- **Skip `aarch64-pc-windows-msvc`** this milestone — tiny audience, doubles the spike surface.
+
+### 5. musl binaries — CFLAGS shim now, upstream later
+
+- **Root cause confirmed:** `sqlite-vec.c` carries platform-conditional BSD `u_int*_t` typedef fallbacks that break on musl. Upstream fix **PR asg017/sqlite-vec#199 is still open/unmerged** (verified 2026-07-12); multiple users confirm it fixes Alpine builds; **no crate release contains it** — Rust crate stable remains 0.1.9 with the broken vendored C (a June 2026 PR comment says newest upstream C doesn't need the patch, but that hasn't reached the crate).
+- **Recommended fix: per-target CFLAGS injection in the release workflow** — the `cc` crate (sqlite-vec's only build-dep) honors `CFLAGS_<target-with-underscores>`:
+
+  ```yaml
+  env:
+    CFLAGS_x86_64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t"
+    CFLAGS_aarch64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int32_t=uint32_t -Du_int64_t=uint64_t"
+  ```
+
+  Zero code change, zero fork, trivially removable when upstream ships. (If the failure mode turns out to be *re*definition rather than missing definition, the `-D` mapping still works — C11 permits identical typedef redefinition. `-D_GNU_SOURCE` is a second-choice shim since musl defines `u_int*_t` under it, but it widens the macro surface; prefer the targeted `-D`s.)
+- **Do NOT** fork/vendor sqlite-vec or move to 0.1.10-alpha for this — alpha in a release graph for a typedef workaround is bad trade.
+- musl targets themselves go through the **existing cargo-zigbuild** path (zig ships musl headers/libc) — same runner, just two more triples in the matrix. Track PR #199 / crate 0.1.10-stable as the shim's retirement condition.
+
+### 6. Portable export (DIST-04) — JSONL primary, `VACUUM INTO` as full-fidelity backup; zero new required deps
+
+- **`agent-memory export` → JSONL** (one JSON object per line, `serde_json` already pinned): schema-versioned header line (`{"format":"agent-memory-export","version":1,...}`), then one record per memory (id, type, content, tags, timestamps, decay inputs, relations). **Exclude embeddings by default** — they are re-derivable from content via Ollama on import, model/dim may differ across machines, and it keeps exports human-readable/diffable/greppable. This is the *interop* format (feeds DIST-goal "portable file" and future cross-tool import).
+- **Import** = the existing idempotent-import machinery (GSD import precedent) pointed at JSONL; re-embed on ingest with the same graceful no-Ollama fallback.
+- **`agent-memory backup` → `VACUUM INTO 'file.db'`** (SQLite ≥ 3.27; bundled 3.51.3 has it): one SQL statement, safe against a live WAL database, produces a minimal single-file consistent snapshot — strictly better than copying the db file (torn-copy risk with WAL). Full fidelity including vec0/FTS shadow tables. This is the *backup* format. Both commands, ~zero new code surface, no new crates.
+- **Optional:** `--include-embeddings` (base64 f32 blobs, add `base64 0.22`) only if a concrete offline-import-without-Ollama use case is confirmed — otherwise skip the dep.
+
+---
 
 ## Installation
 
 ```bash
-# Add to Cargo.toml [dependencies]
-cargo add rmcp --features server,transport-io,transport-streamable-http-server,macros
-cargo add tokio --features full
-cargo add rusqlite --features bundled
-cargo add sqlite-vec
-cargo add rusqlite_migration
-cargo add axum
-cargo add tower-http --features timeout,cors
-cargo add reqwest@0.12 --no-default-features --features json,rustls-tls
-cargo add clap --features derive,env
-cargo add serde --features derive
-cargo add serde_json anyhow
-cargo add thiserror@2
-cargo add tracing tracing-subscriber --features tracing-subscriber/env-filter
-cargo add chrono dirs uuid@1 zerocopy
+# Runtime dependencies: NO changes to Cargo.toml required for features 1–3, 6
+# (optional, only if --include-embeddings export is confirmed)
+# cargo add base64@0.22
 
-# Dev / release tooling (installed on the runner / dev machine, not deps)
-cargo install cargo-dist
-cargo install cargo-zigbuild   # already used in this ecosystem
+# Runner provisioning (release workflow, not deps)
+cargo install cargo-xwin --version 0.23.0   # Windows msvc cross
+sudo apt install clang lld                   # cargo-xwin backend (arm64 host OK)
+rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+# cargo-zigbuild + zig 0.14.1 already provisioned (existing pipeline) — used for musl, NOT Windows
 ```
-
-> Pin `reqwest = "0.12"` explicitly. `0.13.x` exists on crates.io but `0.12` is the stable line the wider ecosystem (and `rustls`) is settled on; opt into `rustls-tls` to avoid a system OpenSSL dependency in prebuilt binaries.
 
 ## Alternatives Considered
 
 | Recommended | Alternative | When to Use Alternative |
 |-------------|-------------|-------------------------|
-| `rmcp` (official SDK) | `rust-mcp-sdk` (rust-mcp-stack) | Mature community SDK with a different ergonomics model. Reasonable, but for a flagship MCP tool the **official** SDK is the safer long-term bet (protocol-version tracking, ecosystem gravity). Choose `rust-mcp-sdk` only if you hit a concrete rmcp limitation. |
-| `rusqlite` (bundled) | `libsql` `0.9` | Use libsql if you later want Turso/embedded-replica sync or remote SQLite. Overkill for a strictly local, zero-cloud tool and a heavier dependency. |
-| `rusqlite` (bundled) | `sqlx` `0.9` (sqlite) | Use sqlx if you want compile-time-checked queries and a fully async DB layer. But its async-over-SQLite adds complexity with no real win for a single-process embedded file, and the `sqlite-vec` auto-extension story is cleaner through rusqlite. |
-| `sqlite-vec` | BLOB + in-Rust cosine similarity | Viable fallback if `sqlite-vec` fails to cross-compile for a target: store `f32` vectors as BLOBs, load candidates, cosine in Rust. Simple and dependency-free, but O(n) per query and no SQL-level KNN. Keep as the documented Plan B (HUB-style A4 fallback). |
-| `reqwest` direct | `ollama-rs` `0.3` | Use `ollama-rs` if you need *broad* Ollama coverage (chat, streaming generate, model mgmt). We make essentially **one** call (embed); a typed wrapper adds a dependency + version-tracking burden for little gain. |
-| `axum` | `actix-web` | Only if a non-tower stack were required — it isn't, and it would break the "rmcp HTTP service nests into the same router" win. |
-| `cargo-dist` | Hand-rolled GitHub Actions matrix + `cargo-zigbuild` | Use hand-rolled if cargo-dist's runner-override story proves too fiddly against the self-hosted-only constraint. mcp-hub/injection-scanner **already ship this way** (zigbuild matrix on `orangepi`), so a hand-rolled path is a known-good, lower-magic option. Trade-off: you then write the Homebrew formula yourself. |
+| Pure-SQL RRF (one query, FULL OUTER JOIN CTEs) | Fetch two result sets, fuse in Rust | If the SQL becomes unreadable once decay-blend + tag-filter + RRF compose, in-Rust fusion of two simple queries is legitimate and testable — same complexity class, k is small. Not a dependency question either way. |
+| Manual validation at the store seam | `axum-valid 0.24` + `garde`/`validator` | REST surface grows to many DTOs with cross-field rules; today it's 3 bounds checks. |
+| `cargo-xwin` → windows-msvc | mingw-w64 → windows-gnu | If the clang-cl spike fails on `sqlite3.c`/`sqlite-vec.c`, or the MS CRT license step is unacceptable in CI. Known-good with rusqlite-bundled; ship gnu rather than slipping the milestone. |
+| CFLAGS typedef shim for musl | Wait for upstream PR #199 / crate 0.1.10 stable | Only if it merges + releases before the milestone ships — then delete the shim instead of adding it. |
+| JSONL export (embeddings excluded) | `VACUUM INTO` **as the export format** | If "portable file" is interpreted as *machine migration* rather than *interop*: VACUUM INTO preserves everything bit-perfectly but is opaque, version-locked to the schema, and not diffable. Recommendation: ship **both** commands with distinct names (export vs backup) so the semantics stay honest. |
+| JSONL | SQL text dump (`.dump`-style) | Never for this tool — ties consumers to SQLite semantics, worse than JSONL for cross-tool interop, worse than VACUUM INTO for fidelity. |
 
 ## What NOT to Use
 
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
-| **`sqlite-vss`** | Deprecated/abandoned by its author (Faiss C++ integration pain); effort moved to sqlite-vec. | `sqlite-vec` |
-| **Raw `sqlite3_auto_extension` + `std::mem::transmute`** for registering sqlite-vec | The pre-rusqlite-0.34 pattern **does not compile** against rusqlite 0.34+ (now `RawAutoExtension`). | Follow the current `sqlite-vec` Rust guide registration path for rusqlite 0.40. |
-| **A separate vector database** (Qdrant/LanceDB/Chroma) | Reintroduces a service/process and breaks "zero cloud, zero account, single binary." | `sqlite-vec` inside the embedded DB |
-| **`ubuntu-latest` / `macos-latest` in CI** (incl. cargo-dist's defaults) | **Banned org-wide**; cargo-dist emits these by default. | `arc-runner-unityinflow` (X64) / `orangepi` (ARM64) via custom-runner config |
-| **`unwrap()` / `expect()` in daemon paths** | Ecosystem hard rule; a long-running daemon panic kills all sessions. | `?` + `thiserror`/`anyhow`, graceful error returns over MCP/REST |
-| **A second async runtime / blocking threads for DB** | Fragments the executor. | One `tokio` runtime; `spawn_blocking` or a single writer task for rusqlite |
-| **Ollama `/api/embeddings` (legacy, singular `prompt`)** | Older endpoint; the current batch-capable endpoint is `/api/embed` with `"input"`. | POST `/api/embed` `{ "model": "nomic-embed-text", "input": "..." }` → `embeddings: [[f32; 768]]` |
+| **`cargo-zigbuild` for Windows targets** | Upstream README: only Linux and macOS targets supported. This will burn a spike for nothing. | `cargo-xwin 0.23` (msvc) or mingw-w64 (gnu) |
+| **rusqlite 0.40 / rusqlite_migration 2.6 bump** | Pulls libsqlite3-sys 0.38 → `links = "sqlite3"` conflict with `r2d2_sqlite 0.34`. Nothing in this milestone needs it — SQLite 3.51.3 already has every SQL feature RRF requires. | Keep 0.39 / 2.5 pin |
+| **`sqlite-vec 0.1.10-alpha.*`** to dodge the musl typedefs | Alpha in a release binary graph; the CFLAGS shim achieves the same with zero risk. | 0.1.9 + per-target CFLAGS |
+| **Forking/vendoring sqlite-vec.c** for the musl fix | Permanent maintenance burden for a 4-macro workaround; upstream fix exists and will land eventually. | CFLAGS shim, tracked retirement condition |
+| **`validator`/`garde` derive stack** for 3 bounds checks | Dependency tree + macro surface for what is one small function at the store seam; also splits validation away from the proven two-tier taxonomy. | Manual checks → `InvalidQuery → 400/invalid_params` |
+| **Reintroducing `chrono` default features or `Local`** (tempting on Windows work) | `iana-time-zone → core-foundation-sys` breaks the zig darwin cross-link (02-04 spike failure, standing decision). | Stay UTC-only, `features=["now"]` |
+| **Embedding blobs in default JSONL export** | Ties exports to embedding model/dim, bloats files ~4KB/record, kills diffability; embeddings are derivable data. | Re-embed on import; optional `--include-embeddings` flag if truly needed |
+| **Raw file-copy "backup"** of a live WAL database | Torn copies — WAL content not yet checkpointed into the main file. | `VACUUM INTO` |
 
 ## Stack Patterns by Variant
 
-**If you want the simplest single-process topology (recommended default):**
-- Build **one `axum::Router`**: nest rmcp's `StreamableHttpService` at e.g. `/mcp`, mount REST routes at `/api/*`, bind one `tokio` listener.
-- Also expose **stdio MCP** (`transport-io`) as the default `serve` mode for editor launch configs; HTTP is opt-in via a flag/port.
-- Because all of rmcp, axum, reqwest, rusqlite live in one runtime, the decay/TTL sweeper is just a spawned `tokio::time::interval` task.
+**If the cargo-xwin spike passes cleanly (expected):**
+- Windows release job = same ARM64 runner, `cargo xwin build --release --target x86_64-pc-windows-msvc`; smoke test must be host-arch-aware (cannot execute the .exe on the ARM64 Linux host — same lesson as mcp-hub's `Exec format error`; use `wine` only if provisioned, otherwise skip execution and verify artifact presence + size).
 
-**If a target triple fails to build `sqlite-vec` C (cross-compile risk):**
-- Fall back to **BLOB embeddings + in-Rust cosine** for that target (documented Plan B), keeping the same schema (`embedding BLOB`), so the storage format is forward-compatible.
-- Validate the C-toolchain link for **every** target on `orangepi`/zigbuild **before** committing to cargo-dist, mirroring the HUB-V2 lesson where `cfg(unix)` deps blocked Windows.
+**If the cargo-xwin spike fails on the C code:**
+- Fall back to windows-gnu via mingw-w64 in the same workflow slot; do not block the milestone re-debugging clang-cl. Document msvc as a follow-up (mirrors the mcp-hub HUB-V2 document-and-defer pattern, but with a shipping fallback instead of a deferral).
 
-**If Windows/macOS cross-compile is painful (ecosystem precedent: HUB-V2-01/02):**
-- Ship **Linux x86_64 + aarch64 (gnu/musl)** first via zigbuild, document macOS/Windows as a follow-up — but note injection-scanner v0.0.2 *did* land apple-darwin via zigbuild on `orangepi`, so darwin is plausible from the start. Homebrew on Apple Silicon needs the darwin-aarch64 binary, so prioritize it if Homebrew is a launch goal.
+**If upstream sqlite-vec releases the musl fix mid-milestone:**
+- Delete the CFLAGS env lines, rebuild musl targets, done. The shim is designed to be removed.
+
+**If RRF + decay + tag-filter in one SQL statement gets unwieldy:**
+- Keep the two CTE queries separate, fuse + decay-blend in Rust. The contract (SearchOutcome envelope) doesn't change; only the internals do.
 
 ## Version Compatibility
 
 | Package A | Compatible With | Notes |
 |-----------|-----------------|-------|
-| `rusqlite 0.40` (`bundled`) | `sqlite-vec 0.1.9` | Registration API changed at **rusqlite 0.34** — use `RawAutoExtension`, not `transmute`. Follow the current sqlite-vec Rust guide; do not copy pre-0.34 snippets. |
-| `rmcp 1.8` | `axum 0.8` + `tower 0.5`/`tower-http 0.6` | `StreamableHttpService` is a tower service nestable in an axum 0.8 router — versions align with mcp-hub's existing pins. |
-| `rmcp 1.8` | (was `0.7→0.8` breaking) | rmcp had breaking changes across 0.7→0.8→1.x; pin a **specific** `1.x` and read release notes before bumping. |
-| `reqwest 0.12` | `tokio 1`, `rustls` | Use `rustls-tls` (not default `native-tls`) so prebuilt binaries don't depend on a system OpenSSL. |
-| `cargo-dist 0.32` | self-hosted runners | Requires `github-custom-runners` override (or post-gen patch); default `ubuntu-latest`/`macos-latest` violate org policy. |
-| `nomic-embed-text` | `sqlite-vec vec0(embedding float[768])` | 768 dimensions (Matryoshka-capable 64–768; default 768). Schema must pin the dimension to match. |
+| `rusqlite 0.39` (bundled) | SQLite **3.51.3** | Verified docs.rs (libsqlite3-sys 0.37). Window functions (≥3.25), FULL OUTER JOIN (≥3.39), `VACUUM INTO` (≥3.27) all available — RRF and backup need no engine change. |
+| `rusqlite 0.39` + `rusqlite_migration 2.5` + `r2d2_sqlite 0.34` | `libsqlite3-sys 0.37` | The standing pin triangle — any single bump breaks `links = "sqlite3"`. Unchanged this milestone. |
+| `sqlite-vec 0.1.9` | musl targets | **Only with** the `CFLAGS_<target>` typedef shim (upstream PR #199 unmerged as of 2026-07-12). |
+| `sqlite-vec 0.1.9` + `libsqlite3-sys 0.37` bundled | `x86_64-pc-windows-msvc` via cargo-xwin 0.23 | Expected-good (cc/clang-cl is cargo-xwin's core path; rusqlite recommends bundled on Windows; sqlite-vec ships official Windows artifacts) — **but unproven for this workspace; spike first.** |
+| `cargo-zigbuild` (zig 0.14.1) | linux-gnu, linux-musl, apple-darwin | Existing pipeline + two musl triples. **NOT Windows.** |
+| `chrono 0.4` (`now` only) | Windows msvc/gnu targets | `Utc::now` works without the `clock`/`iana-time-zone` chain; the darwin-motivated trim is Windows-safe too. |
+| `memory_relations` FK CASCADE | r2d2 pool | Requires `PRAGMA foreign_keys = ON` per pooled connection (connection customizer), or CASCADE never fires. |
 
 ## Sources
 
-- [crates.io live API](https://crates.io/) — verified current stable versions: `rmcp 1.8.0`, `rusqlite 0.40.1`, `sqlite-vec 0.1.9`, `ollama-rs 0.3.5`, `axum 0.8.9`, `reqwest 0.13.4` (recommend pinning 0.12 line), `sqlx 0.9.0`, `libsql 0.9.30` — confidence HIGH
-- [modelcontextprotocol/rust-sdk (rmcp) README](https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/README.md) — official SDK, feature flags, transports — confidence HIGH
-- [docs.rs/rmcp](https://docs.rs/rmcp) — `StreamableHttpService`, transport feature names — confidence HIGH
-- [Shuttle: Build a Streamable HTTP MCP Server in Rust](https://www.shuttle.dev/blog/2025/10/29/stream-http-mcp) — axum-nesting pattern for rmcp HTTP service — confidence MEDIUM
-- [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec) + [Using sqlite-vec in Rust](https://alexgarcia.xyz/sqlite-vec/rust.html) — successor to sqlite-vss, rusqlite auto-extension registration — confidence HIGH
-- [sqlite-vec issue #206 — rusqlite 0.34 API change](https://github.com/asg017/sqlite-vec/issues/206) — `RawAutoExtension` registration nuance — confidence HIGH
-- [rusqlite README + PR #176 (bundled)](https://github.com/rusqlite/rusqlite) — bundled feature semantics — confidence HIGH
-- [ollama.com/library/nomic-embed-text](https://ollama.com/library/nomic-embed-text) — 768 dims, 8192 ctx, `/api/embed` `input` format — confidence HIGH
-- [axodotdev/cargo-dist releases + CHANGELOG](https://github.com/axodotdev/cargo-dist/releases) — v0.32.0 (Dec 2025) active; Homebrew formula generation; custom runners — confidence HIGH
-- Ecosystem precedent (in-repo): `07-mcp-hub/Cargo.toml` (axum 0.8, clap 4, tokio 1, thiserror 2, tower-http 0.6, dirs 5), `03-injection-scanner/Cargo.toml`, and CLAUDE.md Decisions Log (cargo-zigbuild on `orangepi`, HUB-V2 cross-compile lessons) — confidence HIGH
+- Context7 `/asg017/sqlite-vec` (nbc-headlines hybrid-search example) — exact RRF SQL pattern (CTEs, rrf_k=60, weighted coalesce, FULL OUTER JOIN) — MEDIUM
+- [docs.rs libsqlite3-sys 0.37](https://docs.rs/crate/libsqlite3-sys/0.37.0) — bundled = SQLite 3.51.3 — HIGH (official docs)
+- [rust-cross/cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) — "only Linux and macOS targets are supported" — MEDIUM (upstream README via search)
+- [rust-cross/cargo-xwin](https://github.com/rust-cross/cargo-xwin) + [crates.io](https://crates.io/crates/cargo-xwin) — 0.23.0 stable (2026-06-16), Linux-host Windows-msvc cross via xwin/clang-cl — MEDIUM
+- [asg017/sqlite-vec PR #199](https://github.com/asg017/sqlite-vec/pull/199) — musl typedef fix, **still open/unmerged 2026-07-12**, confirmed working on Alpine by users; no release contains it — MEDIUM (verified directly on the PR page)
+- [crates.io sqlite-vec versions](https://crates.io/api/v1/crates/sqlite-vec) — 0.1.9 remains max_stable (0.1.10-alpha.4, 2026-05-18) — HIGH (registry API)
+- [rusqlite README](https://github.com/rusqlite/rusqlite) — bundled uses `cc`, recommended for Windows — HIGH (official)
+- [axum validator example](https://github.com/tokio-rs/axum/blob/main/examples/validator/src/main.rs) + [axum-valid](https://github.com/gengteng/axum-valid) — validation-crate landscape (informed the "don't add one" call) — LOW/MEDIUM
+- [SQLite VACUUM INTO discussions](https://oldmoe.blog/2024/04/30/backup-strategies-for-sqlite-in-production/) — live-WAL-safe single-statement backup semantics — LOW (cross-consistent with sqlite.org lang_vacuum)
+- In-repo: `Cargo.toml` workspace pins + PROJECT.md Key Decisions (libsqlite3-sys pin triangle, chrono trim, error taxonomy, mcp-hub Windows precedent) — HIGH
 
 ---
-*Stack research for: local-first Rust MCP memory daemon*
-*Researched: 2026-06-24*
+*Stack research for: agent-memory v1.1 Hardening & Interop milestone*
+*Researched: 2026-07-12 (supersedes 2026-06-24 v1.0 stack research, which is fully validated/shipped)*
