@@ -290,7 +290,7 @@ cargo llvm-cov --workspace --fail-under-lines 80   # >80% coverage gate (CI-enfo
 ```
 
 CI runs fmt-check, clippy `-D warnings`, the full test suite, and the coverage gate
-on the UnityInFlow self-hosted runners. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+on GitHub-hosted runners (secretless, read-only token). See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
