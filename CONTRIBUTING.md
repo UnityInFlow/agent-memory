@@ -63,17 +63,31 @@ refactor: extract decay blend into helper
 
 ## CI
 
-CI runs on **UnityInFlow org self-hosted runners** (never GitHub-hosted
-images). PRs run the same gates listed above: fmt check, clippy
-`-D warnings`, the full workspace test suite, and the >80% llvm-cov line
-coverage gate. If your PR's CI seems stuck in queue, a maintainer may need to
-bring a runner online — leave a comment.
+CI (`.github/workflows/ci.yml`) runs on **GitHub-hosted `ubuntu-latest`**,
+secretless, with a read-only token. This repo is public and the UnityInFlow
+org runner group does not serve public repositories, so self-hosted runners
+are not an option here. PRs, including fork PRs, run the gates listed above:
+fmt check, clippy `-D warnings`, the full workspace test suite, and the >80%
+llvm-cov line coverage gate.
 
 ## Releases (maintainers)
 
-Releases are tag-triggered: pushing a `v*` tag runs
-`.github/workflows/release.yml`, which cross-compiles all supported triples
-via `cargo-zigbuild`, packages per-triple tarballs, generates
-`SHA256SUMS.txt`, and publishes a GitHub Release. The darwin cross-compile
-spike (`.github/workflows/spike-cross-compile.yml`) must be green before
-tagging.
+Releases are triggered by pushing an exact semver tag `vX.Y.Z`. Other
+`v`-prefixed tags, such as GSD milestone tags (`vX.Y-milestone`),
+deliberately do not trigger `.github/workflows/release.yml`.
+
+The release workflow runs on GitHub-hosted runners. It uses only the built-in
+`GITHUB_TOKEN`, with no org secret, and fires only on tag pushes, which forks
+cannot make (issue #1, the same exception as injection-scanner #45). It
+cross-compiles all supported triples via `cargo-zigbuild`, packages
+per-triple tarballs, generates `SHA256SUMS.txt`, attests every tarball and
+`SHA256SUMS.txt` with signed SLSA build provenance, and publishes the GitHub
+Release. Verify a downloaded asset with:
+
+```bash
+gh attestation verify agent-memory-<triple>.tar.gz --repo UnityInFlow/agent-memory
+```
+
+The Homebrew formula in `UnityInFlow/homebrew-tap` is updated manually
+afterwards. `.github/workflows/spike-cross-compile.yml` is a manually
+dispatched Windows + musl feasibility spike (Phase 3), not a release gate.
