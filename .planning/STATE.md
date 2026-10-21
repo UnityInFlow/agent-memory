@@ -21,7 +21,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 03 — api-hardening-toolchain-spikes
+**Current focus:** Phase 04 — memory-update-relations-hybrid-search
 
 ## Current Position
 
