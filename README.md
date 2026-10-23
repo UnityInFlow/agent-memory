@@ -393,7 +393,9 @@ never a silent clamp. The MCP transport rejects the same inputs identically as
 `invalid_params`, because validation lives once at the shared service seam. A
 `PATCH` body that is not valid JSON, has a wrongly typed field, or is sent
 without `Content-Type: application/json` is also a 400 with the same
-`{"error": ...}` body. A storage failure during search reports a generic
+`{"error": ...}` body. Every client error, including a malformed path segment
+(`/api/memories/abc`) or query parameter (`?limit=abc`, `?expand_links=1`),
+returns a JSON `{"error": "..."}` body. A storage failure during search reports a generic
 internal error (HTTP 500 / MCP `internal_error`, `search failed due to a
 storage error`); the detail goes only to the server's stderr log.
 
