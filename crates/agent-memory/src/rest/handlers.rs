@@ -98,7 +98,13 @@ pub struct ListQuery {
 /// `ttl_secs` → no expiry), a value sets it. `content` is never clearable.
 /// Uses the SAME explicit-null helper as the MCP DTO, so the two transports
 /// cannot drift on null-vs-absent.
+///
+/// Unknown keys are rejected (`deny_unknown_fields`, REVIEW WR-02), exactly as
+/// on the MCP DTO: the immutable `type`/`source` and typos such as `ttl_sec`
+/// make the whole PATCH a 400 naming the field, and nothing is written. A
+/// silently dropped merge-patch member would be a silent partial write.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateBody {
     /// New content (re-indexed and re-embedded). Never null or empty.
     #[serde(
@@ -1247,6 +1253,51 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(rows[0].tags, vec!["rest".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn patch_with_an_unknown_or_immutable_field_is_400_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let id = store_with_ttl(&state, None).await;
+
+        for (raw, field) in [
+            (r#"{"content": "x", "type": "DECISION"}"#, "type"),
+            (r#"{"content": "x", "source": "elsewhere"}"#, "source"),
+            (r#"{"ttl_sec": 60}"#, "ttl_sec"),
+        ] {
+            let resp = patch_raw(&state, id, raw).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{raw} must be a 400"
+            );
+            let body = body_json(resp).await;
+            let message = body["error"]
+                .as_str()
+                .expect("400 body has an error string");
+            assert!(
+                message.contains("unknown field") && message.contains(field),
+                "{raw}: error {message:?} should name the unknown field"
+            );
+        }
+        assert_400_containing(
+            patch_raw(&state, id, r#"{"content": "x", "type": "DECISION"}"#).await,
+            "unknown field",
+        )
+        .await;
+
+        // Nothing was written: content, type, tags and scope are as stored.
+        let rows = state
+            .service
+            .list(ServiceListArgs::default())
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "patch target");
+        assert_eq!(rows[0].mem_type, MemoryType::Pattern);
+        assert_eq!(rows[0].tags, vec!["rest".to_string()]);
+        assert_eq!(rows[0].scope.as_deref(), Some("unit"));
     }
 
     // --- MCP-07 link / unlink -------------------------------------------------

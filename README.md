@@ -222,6 +222,12 @@ forget the old. A patch with no field besides `id`, empty or whitespace-only
 `content`, or an out-of-bounds `ttl_secs` is rejected as `invalid_params`
 before anything is written.
 
+Unknown fields are rejected too, never silently ignored: a patch carrying
+`type`, `source` or a misspelled field such as `ttl_sec` fails as a whole and
+writes nothing. Over MCP it is a tool error result (`isError: true`) whose text
+reads `failed to deserialize parameters: unknown field ...` and names the
+field; over REST it is HTTP 400 with the same message in the `error` body.
+
 On success the result is the full updated memory — the same fields `memory_list`
 returns — plus `embedding_status`:
 

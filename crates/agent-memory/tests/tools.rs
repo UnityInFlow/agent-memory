@@ -413,3 +413,69 @@ fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_fo
 
     server.shutdown();
 }
+
+#[test]
+fn memory_update_with_an_unknown_field_is_invalid_params_over_stdio() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let store_resp = server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({ "content": "original text", "type": "PATTERN" }),
+    );
+    let id: i64 = tool_text(&store_resp)
+        .trim()
+        .parse()
+        .expect("memory_store returns a numeric id");
+
+    // rmcp deserializes `arguments` straight into UpdateArgs, so an unknown
+    // or immutable key is refused before the handler runs (REVIEW WR-02),
+    // never a success with the member silently dropped. rmcp 1.8 reports an
+    // argument-deserialization failure (its invalid_params error prefixed
+    // "failed to deserialize parameters:") as a tool error result
+    // (`isError: true`) rather than a JSON-RPC error member, per the MCP rule
+    // that input-validation errors are tool execution errors the model can
+    // correct (rmcp router/tool.rs `into_tool_argument_error`).
+    for (request_id, arguments, field) in [
+        (
+            3,
+            serde_json::json!({ "id": id, "content": "changed", "type": "DECISION" }),
+            "type",
+        ),
+        (
+            4,
+            serde_json::json!({ "id": id, "content": "changed", "ttl_sec": 60 }),
+            "ttl_sec",
+        ),
+    ] {
+        let resp = server.call_tool(request_id, "memory_update", arguments);
+        assert!(
+            resp.get("error").is_none(),
+            "rmcp reports a bad argument as a tool error result: {resp}"
+        );
+        assert_eq!(
+            resp.pointer("/result/isError"),
+            Some(&serde_json::json!(true)),
+            "an unknown field must be a tool error, never a success: {resp}"
+        );
+        let message = tool_text(&resp);
+        assert!(
+            message.starts_with("failed to deserialize parameters:")
+                && message.contains("unknown field")
+                && message.contains(&format!("`{field}`")),
+            "the error names the field {field:?}: {resp}"
+        );
+    }
+
+    // Nothing was written: the memory still carries its original content and type.
+    let views = tool_views(&server.call_tool(5, "memory_list", serde_json::json!({})));
+    assert_eq!(views.len(), 1, "exactly one memory: {views:?}");
+    assert_eq!(views[0]["content"], "original text");
+    assert_eq!(views[0]["type"], "PATTERN");
+
+    server.shutdown();
+}
