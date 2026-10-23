@@ -294,6 +294,56 @@ fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
 }
 
 #[test]
+fn memory_search_answers_hyphenated_and_punctuated_queries_over_stdio() {
+    // User decision option-a (T-04-15 revised), end to end through the real
+    // binary in keyword mode: a hyphenated term (which FTS5 reads as a column
+    // filter) and a punctuated question are both answered with the stored
+    // memory, never a JSON-RPC error and never SQLite text.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let stored = server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({
+            "content": "We chose sqlite-vec for local vector similarity search",
+            "type": "PATTERN"
+        }),
+    );
+    let m1: i64 = tool_text(&stored)
+        .parse()
+        .unwrap_or_else(|e| panic!("memory_store returns an id ({e}): {stored}"));
+
+    for (id, query) in [(3, "sqlite-vec"), (4, "what vector store do we use?")] {
+        let resp = server.call_tool(id, "memory_search", serde_json::json!({ "query": query }));
+        assert!(
+            resp.get("error").is_none(),
+            "{query:?} must be answered, not a JSON-RPC error: {resp}"
+        );
+        assert!(resp.get("result").is_some(), "{query:?}: {resp}");
+        assert!(
+            !resp.to_string().contains("sqlite error"),
+            "{query:?}: no SQLite text may reach the agent: {resp}"
+        );
+        let (mode, results) = search_outcome(&resp);
+        assert_eq!(mode, "keyword", "{query:?}: dead Ollama URL forces keyword");
+        assert_eq!(
+            results
+                .first()
+                .and_then(|v| v.get("id"))
+                .and_then(|i| i.as_i64()),
+            Some(m1),
+            "{query:?} must recall the sqlite-vec memory first: {resp}"
+        );
+    }
+
+    server.shutdown();
+}
+
+#[test]
 fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_found() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");

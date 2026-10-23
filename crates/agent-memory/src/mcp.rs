@@ -105,11 +105,16 @@ pub struct ListArgs {
     pub expand_links: bool,
 }
 
-/// Arguments for `memory_search` (D-04/D-06). `query` is the FTS5 keyword string;
-/// the remaining fields are optional filters and a result cap.
+/// Arguments for `memory_search` (D-04/D-06). `query` is plain natural language
+/// or FTS5 MATCH syntax; the remaining fields are optional filters and a
+/// result cap.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchArgs {
-    /// The keyword query (FTS5 MATCH syntax).
+    /// The search query: plain natural language or FTS5 MATCH syntax. Valid
+    /// FTS5 expressions (AND/OR/NOT, quoted phrases, prefix*) run exactly as
+    /// written; anything FTS5 cannot parse is retried once as its words OR-ed
+    /// together; a query with no words contributes no keyword matches. A query
+    /// is never rejected for its syntax, in either mode.
     pub query: String,
     /// Filter by memory type (UPPERCASE). Omit for all types.
     #[serde(default)]
@@ -307,7 +312,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Search stored memories. When the local Ollama embedder is reachable, search is hybrid: a keyword (FTS5) ranking and a semantic (embedding) ranking are fused with Reciprocal Rank Fusion (k=60), then weighted by decay so fresher memories win ties. When the embedder is unavailable, search falls back to keyword/FTS5 ranking alone. Returns {search_mode: 'hybrid'|'keyword', results: [...]}; results is empty when nothing matches. The query is FTS5 MATCH syntax in both modes, so a malformed query (an unbalanced quote, bare punctuation such as '?') is invalid_params. The semantic ranking applies type/tag/scope filters after its 4x-limit candidate cut, so a heavily filtered query may return fewer than limit results. Only returned results count as accessed. Set expand_links=true to attach each result's linked memories as trimmed related summaries."
+        description = "Search stored memories. When the local Ollama embedder is reachable, search is hybrid: a keyword (FTS5) ranking and a semantic (embedding) ranking are fused with Reciprocal Rank Fusion (k=60), then weighted by decay so fresher memories win ties. When the embedder is unavailable, search falls back to keyword/FTS5 ranking alone. Returns {search_mode: 'hybrid'|'keyword', results: [...]}; results is empty when nothing matches. The query may be plain natural language or FTS5 MATCH syntax: valid FTS5 expressions (AND/OR/NOT, quoted phrases, prefix*) run exactly as written, anything FTS5 cannot parse is retried once as its words OR-ed together, and a query with no words contributes no keyword matches, so a query is never rejected for its syntax, in either mode. The semantic ranking applies type/tag/scope filters after its 4x-limit candidate cut, so a heavily filtered query may return fewer than limit results. Only returned results count as accessed. Set expand_links=true to attach each result's linked memories as trimmed related summaries."
     )]
     async fn memory_search(
         &self,
@@ -1097,6 +1102,123 @@ mod tests {
             "{description}"
         );
         assert!(description.contains("k=60"), "{description}");
+        // Option-a (T-04-15 revised): the forgiving query contract is what
+        // agents read, and the retired invalid_params promise is gone.
+        assert!(
+            description.contains("plain natural language"),
+            "{description}"
+        );
+        assert!(description.contains("never rejected"), "{description}");
+        assert!(!description.contains("invalid_params"), "{description}");
+    }
+
+    /// The shared option-a corpus (mirrors agent-memory-core tests/hybrid.rs):
+    /// five rows, a targeted decision table (query -> 1-based corpus index
+    /// recalled first in both modes), and tokenless or no-hit queries.
+    const CORPUS: [&str; 5] = [
+        "We chose sqlite-vec for local vector similarity search",
+        "auth tokens rotate every hour",
+        "C++ build flags need care",
+        "don't retry the import blindly",
+        "the unbalanced ledger is reconciled nightly",
+    ];
+    const TARGETED: [(&str, usize); 7] = [
+        ("what vector store do we use?", 1),
+        ("sqlite-vec", 1),
+        ("don't retry", 4),
+        ("auth, tokens", 2),
+        ("auth: tokens", 2),
+        ("C++", 3),
+        ("\"unbalanced", 5),
+    ];
+    const TOKENLESS_OR_NO_HIT: [&str; 4] = ["AND", "", "?!,", "*"];
+
+    #[tokio::test]
+    async fn memory_search_answers_every_query_shape_in_both_modes() {
+        for (expected_mode, live) in [("hybrid", true), ("keyword", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let server = if live {
+                live_server(&dir)
+            } else {
+                test_server(&dir)
+            };
+            let mut ids = Vec::new();
+            for content in CORPUS {
+                ids.push(store_one(&server, content).await);
+            }
+
+            let queries = TARGETED
+                .iter()
+                .map(|(q, target)| (*q, Some(*target)))
+                .chain(TOKENLESS_OR_NO_HIT.iter().map(|q| (*q, None)));
+            for (input, target) in queries {
+                let result = server
+                    .memory_search(Parameters(search_args(serde_json::json!({
+                        "query": input
+                    }))))
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{expected_mode}: {input:?} must be answered, got {e:?}")
+                    });
+                let raw = serde_json::to_string(&result).expect("tool result serializes");
+                assert!(!raw.contains("sqlite error"), "{input:?}: {raw}");
+                let body = result_json(&result);
+                assert_eq!(body["search_mode"], expected_mode, "{input:?}: {body}");
+                let results = body["results"].as_array().expect("results array");
+                match target {
+                    Some(index) => assert_eq!(
+                        results.first().and_then(|r| r["id"].as_i64()),
+                        Some(ids[index - 1]),
+                        "{expected_mode}: {input:?} must recall corpus row {index} first: {body}"
+                    ),
+                    None if live => assert!(
+                        !results.is_empty(),
+                        "hybrid: {input:?} must answer from the semantic leg: {body}"
+                    ),
+                    None => assert!(
+                        results.is_empty(),
+                        "keyword: {input:?} has no keyword matches: {body}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_search_storage_failure_is_internal_error_without_sqlite_text() {
+        // T-04-19: a broken FTS index (renamed away underneath the server)
+        // reaches the agent only as the generic internal error, in both modes.
+        let internal_error_code = McpError::internal_error("x", None).code;
+        for live in [true, false] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let server = if live {
+                live_server(&dir)
+            } else {
+                test_server(&dir)
+            };
+            store_one(&server, "ledger reconciliation runbook").await;
+            agent_memory_core::store::sqlite::register_vec_extension().expect("register vec0");
+            rusqlite::Connection::open(dir.path().join("mem.db"))
+                .expect("open db")
+                .execute_batch("ALTER TABLE memories_fts RENAME TO memories_fts_offline;")
+                .expect("rename fts table");
+
+            let err = server
+                .memory_search(Parameters(search_args(serde_json::json!({
+                    "query": "ledger"
+                }))))
+                .await
+                .expect_err("a broken FTS index must fail the search");
+            assert_eq!(err.code, internal_error_code, "live={live}: {err:?}");
+            assert!(
+                err.message.contains("search failed due to a storage error"),
+                "live={live}: {err:?}"
+            );
+            assert!(
+                !err.message.to_lowercase().contains("sqlite"),
+                "live={live}: no SQLite text may reach the agent: {err:?}"
+            );
+        }
     }
 
     #[test]
