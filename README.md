@@ -18,10 +18,12 @@ sessions and across tools.
 - **Decay, not deletion.** Memories fade in ranking over time (exponential decay;
   high-value pinned types fade slower) but are **never** deleted by decay. The only
   ways a memory is removed are an explicit TTL expiry or `memory_forget`.
-- **Search by meaning.** Semantic search via local
-  [Ollama](https://ollama.com) embeddings when available, with automatic
-  fallback to SQLite FTS5 keyword ranking when it isn't — both blended with
-  decay. No Ollama, no network? Everything still works.
+- **Search by meaning and by keyword.** Hybrid search when local
+  [Ollama](https://ollama.com) embeddings are available: a keyword ranking and
+  a semantic ranking are fused, so an exact-term hit and a paraphrase both
+  surface. Automatic fallback to SQLite FTS5 keyword ranking when Ollama isn't
+  there, and both modes are blended with decay. No Ollama, no network?
+  Everything still works.
 
 ## Install
 
@@ -106,7 +108,7 @@ stored in one is immediately retrievable in another.
 | Tool | Purpose | Validated parameters |
 |------|---------|----------------------|
 | `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
-| `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
+| `memory_search` | Hybrid (keyword + semantic, rank-fused) search when Ollama is reachable, FTS5 keyword otherwise — weighted by decay, and only the returned results are recency-bumped. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_update` | Patch a memory in place by id — content, tags, scope, TTL (clean not-found for unknown ids). | `content`: never null or empty. `ttl_secs`: 1–3155760000 when set; `null` = no expiry. At least one field besides `id` |
 | `memory_link` | Link two memories with a typed, directed relation (idempotent; clean not-found for unknown ids). | `kind`: one of `relates_to`, `supersedes`, `caused_by`. `from_id` ≠ `to_id` |
@@ -146,14 +148,33 @@ Returns an envelope carrying the mode actually used plus the ranked results,
 each with a freshly-recomputed `decay_score`:
 
 ```json
-{ "search_mode": "semantic", "results": [ ... ] }
+{ "search_mode": "hybrid", "results": [ ... ] }
 ```
 
-`search_mode` is `"semantic"` when the query was answered via embeddings and
-`"keyword"` when the FTS5 path served it (Ollama absent or unreachable). A
-query that matches nothing returns an empty list, never an error. A present
-`limit` must be between 1 and 200 (omitted defaults to 50); a `tag` filter
-matches whole tags exactly and case-sensitively.
+| `search_mode` | When | How results are ranked |
+|---------------|------|------------------------|
+| `"hybrid"` | Ollama is reachable | Two rankings are fused with Reciprocal Rank Fusion: the semantic (embedding KNN) ranking and the keyword (FTS5 bm25) ranking, each oversampled to 4 × `limit`. A memory at rank *r* in a ranking scores `1 / (60 + r)` (k = 60), and a memory found by both rankings **sums** both scores, so agreement wins: 2nd in both beats 1st in one. The fused score is then multiplied by the memory's decay score, once, so at equal fused rank the fresher memory wins and pinned types keep their slower fade. |
+| `"keyword"` | Ollama is absent or unreachable | FTS5 bm25 relevance blended with decay — the v0.0.1 path, unchanged. |
+
+The envelope is the same `{search_mode, results}` shape in both modes. A query
+that matches nothing returns an empty list, never an error, and an empty hybrid
+answer is still reported as `"hybrid"`. A present `limit` must be between 1 and
+200 (omitted defaults to 50); a `tag` filter matches whole tags exactly and
+case-sensitively.
+
+- **The query is FTS5 MATCH syntax in both modes.** A query FTS5 cannot parse —
+  an unbalanced `"`, a dangling `AND`, bare punctuation such as `?`, `,` or `'`
+  — is a client error (`invalid_params` / HTTP 400) even when Ollama is up.
+  Hybrid never quietly answers from the semantic ranking alone. Use plain words
+  for natural-language questions: `what did we decide about caching`, not
+  `what did we decide about caching?`.
+- **Only returned results are recency-bumped.** The candidates fusion looked at
+  but did not return, and any `expand_links` neighbors, are not touched, so a
+  search never changes how unseen memories decay.
+- **Filters and the semantic ranking.** The semantic ranking applies
+  `type`/`tag`/`scope` filters after its 4 × `limit` candidate cut, so a
+  heavily filtered hybrid query can recall fewer than `limit` results. The
+  keyword ranking filters before its cut.
 
 ### `memory_list`
 
@@ -213,8 +234,8 @@ returns — plus `embedding_status`:
 - **`embedding_status`** is `1` when the stored vector matches the current
   content and `0` when a re-embed is pending — the update succeeded while Ollama
   was unreachable, and the background sweep re-embeds it once Ollama is back.
-  Until then semantic search cannot match it by meaning; keyword-fallback
-  search already sees the new content.
+  Until then the semantic ranking cannot match it by meaning; the keyword
+  ranking (in hybrid and keyword mode alike) already sees the new content.
 - **An update counts as a use.** It refreshes `last_accessed` (and the access
   count), so an edited memory ranks as current rather than decayed.
 
@@ -299,7 +320,9 @@ ollama pull nomic-embed-text
 ```
 
 That's the whole setup. When Ollama is reachable, stores embed content
-automatically and searches use vector KNN (cosine) blended with decay. Point
+automatically and searches run in hybrid mode: vector KNN (cosine) and FTS5
+keyword rankings fused with RRF, then weighted by decay
+(see [`memory_search`](#memory_search)). Point
 at a non-default Ollama with either:
 
 ```bash
@@ -313,7 +336,8 @@ isn't pulled:
 - stores still succeed — content is queued (`embedding_status = 0`) and
   backfilled by the background sweep once Ollama returns;
 - searches transparently fall back to the FTS5 keyword path and report it via
-  `"search_mode": "keyword"`;
+  `"search_mode": "keyword"` — the same envelope and the same ranking as
+  v0.0.1;
 - nothing errors, nothing blocks. The tool works fully offline without Ollama.
 
 ## REST API
@@ -369,17 +393,27 @@ VPN/SSH tunnel or an authenticating reverse proxy.
 
 ## Behavioral changes in v0.1.0
 
-Two deliberate contract changes from v0.0.1 (both apply identically to MCP and
-REST):
+Three deliberate contract changes from v0.0.1 (all apply identically to MCP
+and REST):
 
 1. **Tag filtering is now an exact, case-sensitive match** instead of a
    substring match — `tag=rust` no longer matches a memory tagged `rustling`,
-   and `Rust` does not match `rust`. This applies to search (semantic and
+   and `Rust` does not match `rust`. This applies to search (hybrid and
    keyword paths) and list.
 2. **Out-of-bounds `limit` and `ttl_secs` now return client errors** (HTTP 400
    / MCP `invalid_params`) carrying the valid range, instead of being silently
    clamped or accepted. Valid boundaries (`limit` 1–200, `ttl_secs`
    1–3155760000) and omitted values behave exactly as before.
+3. **`search_mode: "semantic"` is no longer emitted.** When the embedder is
+   available, searches are now hybrid: keyword and semantic rankings are fused
+   with RRF (k = 60) and decay-weighted, reported as `"search_mode": "hybrid"`.
+   `"keyword"` (embedder down) is unchanged, as is the envelope shape. Two side
+   effects:
+   - With Ollama up, a query FTS5 cannot parse (bare `?`, `,`, `'`, an
+     unbalanced `"`) is now a client error, exactly as it always was without
+     Ollama. v0.0.1 answered such queries from embeddings alone.
+   - Exact keyword hits now surface alongside paraphrase matches, so result
+     order can differ from v0.0.1's embedding-only ranking.
 
 ## Import from GSD
 

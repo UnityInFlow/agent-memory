@@ -307,7 +307,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Search stored memories by semantic similarity (local Ollama embeddings) blended with decay, falling back to keyword/FTS5 search when the embedder is unavailable. Returns {search_mode: 'semantic'|'keyword', results: [...]}; results is empty when nothing matches. Set expand_links=true to attach each result's linked memories as trimmed related summaries."
+        description = "Search stored memories. When the local Ollama embedder is reachable, search is hybrid: a keyword (FTS5) ranking and a semantic (embedding) ranking are fused with Reciprocal Rank Fusion (k=60), then weighted by decay so fresher memories win ties. When the embedder is unavailable, search falls back to keyword/FTS5 ranking alone. Returns {search_mode: 'hybrid'|'keyword', results: [...]}; results is empty when nothing matches. The query is FTS5 MATCH syntax in both modes, so a malformed query (an unbalanced quote, bare punctuation such as '?') is invalid_params. The semantic ranking applies type/tag/scope filters after its 4x-limit candidate cut, so a heavily filtered query may return fewer than limit results. Only returned results count as accessed. Set expand_links=true to attach each result's linked memories as trimmed related summaries."
     )]
     async fn memory_search(
         &self,
@@ -499,8 +499,22 @@ mod tests {
     const DEAD_OLLAMA: &str = "http://127.0.0.1:9";
 
     fn test_server(dir: &tempfile::TempDir) -> MemoryMcp {
+        server_with(dir, Arc::new(OllamaClient::new(DEAD_OLLAMA)))
+    }
+
+    /// A server whose embedder is UP (hash-seeded FakeEmbedder vectors), so
+    /// memory_search takes the hybrid path (SEARCH-04).
+    fn live_server(dir: &tempfile::TempDir) -> MemoryMcp {
+        server_with(
+            dir,
+            Arc::new(agent_memory_core::embed::FakeEmbedder::with_vectors(
+                std::collections::HashMap::new(),
+            )),
+        )
+    }
+
+    fn server_with(dir: &tempfile::TempDir, embedder: Arc<dyn Embedder>) -> MemoryMcp {
         let store = SqliteStore::open(&dir.path().join("mem.db")).expect("store opens");
-        let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(DEAD_OLLAMA));
         let service = MemoryService::new(
             Arc::new(store),
             Arc::new(SystemClock),
@@ -1010,6 +1024,76 @@ mod tests {
         assert!(
             serde_json::from_str::<SearchArgs>(r#"{"query": "q", "expand_links": "yes"}"#).is_err()
         );
+    }
+
+    fn search_args(json: serde_json::Value) -> SearchArgs {
+        serde_json::from_value(json).expect("search args deserialize")
+    }
+
+    #[tokio::test]
+    async fn memory_search_reports_hybrid_when_the_embedder_is_up_and_keyword_when_down() {
+        // SEARCH-04 wire contract on the MCP transport, from raw tool args.
+        for (expected_mode, live) in [("hybrid", true), ("keyword", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let server = if live {
+                live_server(&dir)
+            } else {
+                test_server(&dir)
+            };
+            let id = store_one(&server, "hybrid recall over the ledger").await;
+
+            let result = server
+                .memory_search(Parameters(search_args(serde_json::json!({
+                    "query": "ledger"
+                }))))
+                .await
+                .expect("search succeeds");
+            let body = result_json(&result);
+            assert_eq!(body["search_mode"], expected_mode, "{body}");
+            assert_eq!(body["results"][0]["id"], id, "{body}");
+            assert_eq!(
+                body.as_object().map(serde_json::Map::len),
+                Some(2),
+                "envelope is exactly {{search_mode, results}}: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_search_malformed_query_is_invalid_params_in_hybrid_mode() {
+        // T-04-15: the keyword leg's InvalidQuery is never swallowed in favor
+        // of the semantic leg's rows.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = live_server(&dir);
+        store_one(&server, "any searchable row").await;
+        let invalid_params_code = McpError::invalid_params("x", None).code;
+
+        for malformed in ["\"", "what is the plan?"] {
+            let err = server
+                .memory_search(Parameters(search_args(serde_json::json!({
+                    "query": malformed
+                }))))
+                .await
+                .expect_err("a malformed MATCH is client input in hybrid mode");
+            assert_eq!(err.code, invalid_params_code, "{malformed:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn memory_search_description_enumerates_exactly_hybrid_and_keyword() {
+        let tools = MemoryMcp::tool_router().list_all();
+        let search = tools
+            .iter()
+            .find(|t| t.name == "memory_search")
+            .expect("memory_search is registered");
+        let description = search.description.as_deref().unwrap_or_default();
+        // The whole enumeration, delimited on both sides, so a third mode on
+        // either side (the retired semantic one included) breaks the match.
+        assert!(
+            description.contains("{search_mode: 'hybrid'|'keyword', results"),
+            "{description}"
+        );
+        assert!(description.contains("k=60"), "{description}");
     }
 
     #[test]

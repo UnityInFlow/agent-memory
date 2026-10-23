@@ -443,8 +443,22 @@ mod tests {
     const DEAD_OLLAMA: &str = "http://127.0.0.1:9";
 
     fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
+        state_with(dir, Arc::new(OllamaClient::new(DEAD_OLLAMA)))
+    }
+
+    /// A state whose embedder is UP (hash-seeded FakeEmbedder vectors), so
+    /// search takes the hybrid path (SEARCH-04).
+    fn live_state(dir: &tempfile::TempDir) -> Arc<AppState> {
+        state_with(
+            dir,
+            Arc::new(agent_memory_core::embed::FakeEmbedder::with_vectors(
+                std::collections::HashMap::new(),
+            )),
+        )
+    }
+
+    fn state_with(dir: &tempfile::TempDir, embedder: Arc<dyn Embedder>) -> Arc<AppState> {
         let store = SqliteStore::open(&dir.path().join("mem.db")).expect("store opens");
-        let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(DEAD_OLLAMA));
         let service = MemoryService::new(
             Arc::new(store),
             Arc::new(SystemClock),
@@ -643,6 +657,82 @@ mod tests {
                 .is_empty(),
             "the error message must be non-empty, got: {body}"
         );
+    }
+
+    fn search_request(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.to_string(),
+            r#type: None,
+            tag: None,
+            scope: None,
+            limit: Some(10),
+            expand_links: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn search_reports_hybrid_with_a_live_embedder_and_keyword_with_a_dead_one() {
+        // SEARCH-04 wire contract: embedder up -> "hybrid", embedder down ->
+        // "keyword"; the envelope keys are the same in both modes.
+        for (expected_mode, live) in [("hybrid", true), ("keyword", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = if live {
+                live_state(&dir)
+            } else {
+                test_state(&dir)
+            };
+            store_handler(
+                State(state.clone()),
+                Json(store_request(
+                    "row level security controls database access",
+                    "PATTERN",
+                )),
+            )
+            .await
+            .expect("store succeeds");
+
+            let resp = search_handler(State(state), Json(search_request("database")))
+                .await
+                .expect("search succeeds")
+                .into_response();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_json(resp).await;
+            assert_eq!(body["search_mode"], expected_mode, "{body}");
+            let mut keys: Vec<&str> = body
+                .as_object()
+                .expect("envelope is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, vec!["results", "search_mode"], "{body}");
+            assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_query_is_400_in_hybrid_mode_too_never_a_semantic_200() {
+        // T-04-15: with the embedder UP the KNN leg could answer, but the
+        // keyword leg's InvalidQuery must still surface as a 400.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = live_state(&dir);
+        store_handler(
+            State(state.clone()),
+            Json(store_request("any searchable row", "PATTERN")),
+        )
+        .await
+        .expect("store succeeds");
+
+        for malformed in ["\"", "what is the plan?"] {
+            let err = search_handler(State(state.clone()), Json(search_request(malformed)))
+                .await
+                .expect_err("a malformed MATCH is client input in hybrid mode");
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{malformed:?} must be a 400 in hybrid mode, as in keyword mode"
+            );
+        }
     }
 
     #[tokio::test]

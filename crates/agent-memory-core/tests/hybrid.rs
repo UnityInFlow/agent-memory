@@ -18,9 +18,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
-use agent_memory_core::decay::{decay_score, DecayConfig, DEFAULT_HALF_LIFE_SECS};
-use agent_memory_core::domain::{MemoryType, NewMemory};
-use agent_memory_core::embed::{Embedder, FakeEmbedder, EMBEDDING_DIM};
+use agent_memory_core::decay::{
+    apply_decay, decay_score, DecayConfig, RankWeights, DEFAULT_HALF_LIFE_SECS,
+};
+use agent_memory_core::domain::{LinkKind, MemoryError, MemoryType, NewMemory};
+use agent_memory_core::embed::{
+    BoxFuture, EmbedError, Embedder, EmbedderHealth, FakeEmbedder, EMBEDDING_DIM,
+};
 use agent_memory_core::service::{rrf_fuse, MemoryService, SearchArgs, SearchMode, RRF_K};
 use agent_memory_core::store::sqlite::SqliteStore;
 use agent_memory_core::store::Store;
@@ -439,15 +443,277 @@ async fn filters_that_exclude_everything_stay_hybrid() {
     );
     assert!(outcome.results.is_empty());
 }
+// ---------------------------------------------------------------------------
+// Task 2: the degrade decision table (RESEARCH Pattern 1), row by row
+//
+// | Condition                              | Outcome                          |
+// |----------------------------------------|----------------------------------|
+// | Embed OK, both legs OK                 | fuse -> "hybrid"  (Test 2 above) |
+// | Embed OK, both legs empty              | [] still "hybrid" (Test 5 above) |
+// | Embed Err / empty batch                | unchanged v1.0 keyword path      |
+// | InvalidQuery from the keyword leg      | propagate (400 / invalid_params) |
+// | Internal SQLite error in either leg    | propagate (500 / internal_error) |
+// ---------------------------------------------------------------------------
 
-// Keeps the shared helpers referenced until Task 2 extends this file.
-#[allow(dead_code)]
-fn _harness_fields_used(h: &Harness) -> (&Path, &Arc<SqliteStore>) {
-    let _ = raw_conn;
-    (&h.db_path, &h.store)
+/// An embedder that answers with an EMPTY batch: the "invalid empty batch"
+/// degrade row, distinct from an outright embed error.
+struct EmptyBatchEmbedder;
+
+impl Embedder for EmptyBatchEmbedder {
+    fn embed<'a>(
+        &'a self,
+        _inputs: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, EmbedError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn health<'a>(&'a self) -> BoxFuture<'a, Result<EmbedderHealth, EmbedError>> {
+        Box::pin(async { Ok(EmbedderHealth::Ready) })
+    }
 }
 
-#[allow(dead_code)]
-fn _store_trait_in_scope(s: &dyn Store) -> &dyn Store {
-    s
+/// Seed a small keyword corpus with staggered ages and mixed types, so the v1.0
+/// bm25 × decay blend has something non-trivial to order.
+async fn seed_degrade_corpus(h: &Harness) {
+    for (content, mem_type) in [
+        ("database pool sizing for the api tier", MemoryType::Pattern),
+        (
+            "database database migration checklist",
+            MemoryType::Decision,
+        ),
+        (
+            "we never share a database between services",
+            MemoryType::Constraint,
+        ),
+        ("unrelated note about the office plants", MemoryType::Todo),
+        ("database backups run nightly at two", MemoryType::Pattern),
+    ] {
+        store(h, content, mem_type).await;
+        h.clock.advance(DEFAULT_HALF_LIFE_SECS as i64 / 3);
+    }
+}
+
+async fn assert_degrades_to_the_v1_keyword_path(embedder: Arc<dyn Embedder>) {
+    let h = harness(embedder);
+    seed_degrade_corpus(&h).await;
+    let args = SearchArgs {
+        query: "database".to_string(),
+        limit: Some(3),
+        ..Default::default()
+    };
+
+    // The v1.0 path called directly, BEFORE the service search bumps anything:
+    // public Store::search plus the service's on-read decay recompute.
+    let now = h.clock.now();
+    let cfg = DecayConfig::default();
+    let mut direct = h
+        .store
+        .search(args.clone(), now, RankWeights::default(), cfg)
+        .expect("direct Store::search");
+    for view in &mut direct {
+        apply_decay(view, now, &cfg);
+    }
+    assert_eq!(direct.len(), 3, "the fixture must exercise the limit");
+
+    let outcome = h.service.search(args).await.expect("degraded search");
+    assert_eq!(outcome.search_mode, SearchMode::Keyword);
+
+    // Byte-for-byte: the same envelope shape, the same rows, the same order,
+    // the same decay scores. The keyword path is untouched by hybrid.
+    let got = serde_json::to_value(&outcome).expect("serialize outcome");
+    let expected = serde_json::json!({ "search_mode": "keyword", "results": direct });
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn embed_error_degrades_to_the_unchanged_v1_keyword_path() {
+    assert_degrades_to_the_v1_keyword_path(Arc::new(FakeEmbedder::failing())).await;
+}
+
+#[tokio::test]
+async fn an_empty_embed_batch_degrades_to_the_unchanged_v1_keyword_path() {
+    assert_degrades_to_the_v1_keyword_path(Arc::new(EmptyBatchEmbedder)).await;
+}
+
+#[tokio::test]
+async fn a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword_mode() {
+    // T-04-15: the same input must classify the same way in every mode, never
+    // a 400 in one mode and a semantic-only 200 in the other. The KNN leg
+    // would happily answer these queries, so its rows must not leak out.
+    // FTS5 rejects bare punctuation too: a natural-language "?" query is
+    // client input in hybrid mode, exactly as it always was in keyword mode.
+    for malformed in ["\"unbalanced", "AND", "what is the plan?"] {
+        for (label, embedder) in [
+            ("hybrid", live(HashMap::new())),
+            (
+                "keyword",
+                Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
+            ),
+        ] {
+            let h = harness(embedder);
+            store(
+                &h,
+                "what is the plan for the unbalanced ledger",
+                MemoryType::Pattern,
+            )
+            .await;
+            let err = h
+                .service
+                .search(query(malformed, None))
+                .await
+                .expect_err("a malformed MATCH must not succeed in any mode");
+            assert!(
+                matches!(err, MemoryError::InvalidQuery(ref q) if q == malformed),
+                "{label} mode: {malformed:?} must be InvalidQuery, got {err:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_internal_error_in_either_leg_propagates_and_never_serves_the_other_leg() {
+    // Break one leg's index underneath a live store (renamed away, so the
+    // leg's SQL hits "no such table"): the search must fail with an internal
+    // Sqlite error (REST 500 / MCP internal_error), never quietly return the
+    // surviving leg's rows as a hybrid answer.
+    for leg_table in ["memories_fts", "vec_memories"] {
+        let h = harness(live(HashMap::new()));
+        store(&h, "ledger reconciliation runbook", MemoryType::Pattern).await;
+        raw_conn(&h.db_path)
+            .execute_batch(&format!(
+                "ALTER TABLE {leg_table} RENAME TO {leg_table}_offline;"
+            ))
+            .expect("rename leg table");
+
+        let err = h
+            .service
+            .search(query("ledger", None))
+            .await
+            .expect_err("a broken leg must fail the search");
+        assert!(
+            matches!(err, MemoryError::Sqlite(_)),
+            "with {leg_table} gone the search must surface an internal Sqlite error, got {err:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bump scope (SEARCH-05 / Pitfall 3 / T-04-17)
+// ---------------------------------------------------------------------------
+
+/// `access_count` for every row, by id.
+fn access_counts(db_path: &Path) -> HashMap<i64, i64> {
+    let conn = raw_conn(db_path);
+    let mut stmt = conn
+        .prepare("SELECT id, access_count FROM memories")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+/// Wait (bounded) until the fire-and-forget bump has landed `expected` total
+/// increments, then give any stray over-fire a moment to land too.
+async fn settle_bumps(db_path: &Path, expected: i64) -> HashMap<i64, i64> {
+    for _ in 0..300 {
+        if access_counts(db_path).values().sum::<i64>() >= expected {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    access_counts(db_path)
+}
+
+#[tokio::test]
+async fn only_the_returned_ids_are_bumped_never_the_fusion_candidates() {
+    // 20 rows, every one a candidate in BOTH legs: all contain the keyword and
+    // all carry a vector, and each leg fetches limit * 4 = 20. limit = 5.
+    let h = harness(live(HashMap::new()));
+    for i in 0..20 {
+        store(&h, &format!("ledger entry number {i}"), MemoryType::Pattern).await;
+    }
+    assert!(access_counts(&h.db_path).values().all(|c| *c == 0));
+
+    let outcome = h
+        .service
+        .search(query("ledger", Some(5)))
+        .await
+        .expect("search");
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
+    let mut returned = ids(&outcome.results);
+    assert_eq!(returned.len(), 5);
+
+    let counts = settle_bumps(&h.db_path, 5).await;
+    let mut bumped: Vec<i64> = counts
+        .iter()
+        .filter(|(_, c)| **c > 0)
+        .map(|(id, _)| *id)
+        .collect();
+    bumped.sort_unstable();
+    returned.sort_unstable();
+    assert_eq!(counts.len(), 20);
+    assert_eq!(
+        bumped, returned,
+        "exactly the 5 returned rows are bumped; the other 15 candidates are untouched"
+    );
+    assert!(
+        counts.values().all(|c| *c <= 1),
+        "each bumped once: {counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn hybrid_expansion_runs_after_the_bump_and_never_bumps_neighbors() {
+    // The 04-03 carry-forward on the new path: truncate, then bump the
+    // returned ids, then expand. The neighbor links to the only returned row.
+    const Q: &str = "harbor";
+    const ANCHOR: &str = "harbor pilot boarding procedure";
+    const NEIGHBOR: &str = "tide tables for the outer channel";
+    let mut vectors = HashMap::new();
+    vectors.insert(Q.to_string(), unit_axis(0));
+    vectors.insert(ANCHOR.to_string(), sim_vec(0.99, 1));
+    vectors.insert(NEIGHBOR.to_string(), sim_vec(0.5, 2));
+    let h = harness(live(vectors));
+    let anchor = store(&h, ANCHOR, MemoryType::Pattern).await;
+    let neighbor = store(&h, NEIGHBOR, MemoryType::Pattern).await;
+    h.service
+        .link(anchor, neighbor, LinkKind::RelatesTo)
+        .await
+        .expect("link");
+
+    let outcome = h
+        .service
+        .search(SearchArgs {
+            query: Q.to_string(),
+            limit: Some(1),
+            expand_links: true,
+            ..Default::default()
+        })
+        .await
+        .expect("search");
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
+    assert_eq!(ids(&outcome.results), vec![anchor]);
+    let related = outcome.results[0]
+        .related
+        .as_ref()
+        .expect("expand_links attaches related");
+    assert_eq!(
+        related.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![neighbor]
+    );
+
+    let counts = settle_bumps(&h.db_path, 1).await;
+    assert_eq!(counts.get(&anchor), Some(&1), "the returned row is bumped");
+    assert_eq!(
+        counts.get(&neighbor),
+        Some(&0),
+        "an expanded neighbor is never bumped (D-06)"
+    );
+
+    // Without the flag the hybrid envelope carries no `related` member at all.
+    let plain = h.service.search(query(Q, Some(1))).await.expect("search");
+    let json = serde_json::to_value(&plain).expect("serialize");
+    assert!(json["results"][0].get("related").is_none(), "{json}");
 }
