@@ -83,11 +83,13 @@ pub struct ListQuery {
     /// Filter by logical scope. Omit for all scopes.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Cap the number of returned rows.
+    /// Cap the number of returned rows (1-200). Omitted lists every row.
+    /// Required when `expand_links` is true.
     #[serde(default)]
     pub limit: Option<i64>,
     /// Attach 1-hop `related` summaries to each row (MCP-07). Omitted = false
-    /// (the v1.0 response, byte-identical).
+    /// (the v1.0 response, byte-identical). Requires `limit`:
+    /// `expand_links=true` without a limit is rejected as a 400.
     #[serde(default)]
     pub expand_links: bool,
 }
@@ -228,7 +230,9 @@ fn extractor_rejection(status: StatusCode, message: String) -> ApiError {
 /// `GET /api/memories?type=&tag=&scope=&limit=&expand_links=` → 200 `Vec<MemoryView>`.
 ///
 /// A malformed query string (`limit=abc`, `expand_links=1`) is a 400 with the
-/// `{"error"}` body via [`extractor_rejection`].
+/// `{"error"}` body via [`extractor_rejection`]. `expand_links=true` without a
+/// `limit` is a 400 `{"error"}` raised at the service seam (REVIEW WR-04
+/// option-a).
 pub async fn list_handler(
     State(state): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, QueryRejection>,
@@ -974,6 +978,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_with_expand_links_and_no_limit_returns_400_never_500() {
+        // REVIEW WR-04, user decision option-a: an expanded list must carry a
+        // limit — it is rejected as client input at the service seam.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let err = list_handler(
+            State(state),
+            Ok(Query(ListQuery {
+                r#type: None,
+                tag: None,
+                scope: None,
+                limit: None,
+                expand_links: true,
+            })),
+        )
+        .await
+        .expect_err("expand_links without a limit is rejected");
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("400 body carries a string error field")
+                .contains("limit is required when expand_links is true"),
+            "the error must tell the caller to pass a limit, got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn forget_deletes_then_404s_with_not_found_body() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = test_state(&dir);
@@ -1538,8 +1574,8 @@ mod tests {
             }
         };
 
-        // GET /api/memories?expand_links=true
-        let rows = body_json(list_raw("?expand_links=true").await).await;
+        // GET /api/memories?expand_links=true&limit=10
+        let rows = body_json(list_raw("?expand_links=true&limit=10").await).await;
         let rows = rows.as_array().expect("array");
         let effect = rows.iter().find(|r| r["id"] == a).expect("effect row");
         assert_eq!(effect["related"][0]["id"], b);
@@ -1626,10 +1662,10 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
 
         let rows: serde_json::Value = client
-            .get(format!("{base}/api/memories?expand_links=true"))
+            .get(format!("{base}/api/memories?expand_links=true&limit=10"))
             .send()
             .await
-            .expect("GET /api/memories?expand_links=true")
+            .expect("GET /api/memories?expand_links=true&limit=10")
             .json()
             .await
             .expect("json rows");

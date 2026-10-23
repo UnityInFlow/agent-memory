@@ -479,3 +479,91 @@ fn memory_update_with_an_unknown_field_is_invalid_params_over_stdio() {
 
     server.shutdown();
 }
+
+/// REVIEW WR-04, user decision option-a (reject): `memory_list` with
+/// `expand_links` and no `limit` is invalid_params over stdio; with a limit,
+/// and without `expand_links`, the tool behaves exactly as before.
+#[test]
+fn memory_list_with_expand_links_requires_a_limit_over_stdio() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let mut store = |request_id: i64, content: &str| -> i64 {
+        let resp = server.call_tool(
+            request_id,
+            "memory_store",
+            serde_json::json!({ "content": content, "type": "DECISION" }),
+        );
+        tool_text(&resp)
+            .trim()
+            .parse()
+            .expect("memory_store returns a numeric id")
+    };
+    let a = store(2, "first linked decision");
+    let b = store(3, "second linked decision");
+
+    let link_resp = server.call_tool(
+        4,
+        "memory_link",
+        serde_json::json!({ "from_id": b, "to_id": a, "kind": "relates_to" }),
+    );
+    assert!(
+        link_resp.get("error").is_none()
+            && link_resp.pointer("/result/isError") != Some(&serde_json::json!(true)),
+        "memory_link must succeed: {link_resp}"
+    );
+
+    let resp = server.call_tool(
+        5,
+        "memory_list",
+        serde_json::json!({ "expand_links": true }),
+    );
+    // This is a JSON-RPC error member, NOT an `isError: true` tool result
+    // (unlike the memory_update unknown-field test above): rmcp 1.8 only turns
+    // invalid_params messages prefixed "failed to deserialize parameters:" into
+    // tool errors (router/tool.rs `into_tool_argument_error`), and this
+    // rejection is raised at the service seam after deserialization succeeded.
+    assert_eq!(
+        resp.pointer("/error/code"),
+        Some(&serde_json::json!(-32602)),
+        "an expanded list without a limit must be invalid_params: {resp}"
+    );
+    assert!(resp.get("result").is_none(), "no result member: {resp}");
+    let message = resp
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("limit is required when expand_links is true"),
+        "the error tells the caller to pass a limit: {resp}"
+    );
+
+    // The server is still alive, and expand_links with a limit is unchanged.
+    let views = tool_views(&server.call_tool(
+        6,
+        "memory_list",
+        serde_json::json!({ "expand_links": true, "limit": 10 }),
+    ));
+    let row_a = views
+        .iter()
+        .find(|v| v["id"] == serde_json::json!(a))
+        .unwrap_or_else(|| panic!("row {a} is listed: {views:?}"));
+    assert_eq!(
+        row_a["related"][0]["id"],
+        serde_json::json!(b),
+        "row {a} carries its neighbour: {row_a}"
+    );
+
+    // A list without expand_links and without a limit returns every row, no related.
+    let views = tool_views(&server.call_tool(7, "memory_list", serde_json::json!({})));
+    assert_eq!(views.len(), 2, "every row: {views:?}");
+    assert!(
+        views.iter().all(|v| v.get("related").is_none()),
+        "no related member without expand_links: {views:?}"
+    );
+
+    server.shutdown();
+}

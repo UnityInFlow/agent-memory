@@ -359,15 +359,15 @@ pub const MAX_TTL_SECS: i64 = 3_155_760_000;
 /// edges (`memory_links.created_at` descending). Fixed — there is no
 /// caller-tunable knob in v0.1.0.
 ///
-/// What this bounds (REVIEW WR-04 doc correction): each result carries at most
-/// `MAX_EXPANDED_LINKS` neighbours. Search is always bounded by its limit
-/// (1–[`MAX_LIMIT`], default 50), so an expanded search returns at most
-/// `200 × 10` summaries. A list without a limit returns every row (v1.0
-/// behaviour, RESEARCH Pitfall 6), and each row is expanded up to
-/// `MAX_EXPANDED_LINKS`, so an unlimited expanded list grows with the corpus.
-/// T-04-11's `200 × 10` bound therefore covers search and list-with-limit
-/// only; changing unlimited expanded-list behaviour is a deferred API-contract
-/// decision.
+/// What this bounds (REVIEW WR-04, user decision option-a, 2026-10-23): each
+/// result carries at most `MAX_EXPANDED_LINKS` neighbours. Search is always
+/// bounded by its limit (1–[`MAX_LIMIT`], default 50), and
+/// [`crate::service::MemoryService::list`] rejects `expand_links` without a
+/// `limit` as [`MemoryError::InvalidArgument`] (REST 400 / MCP
+/// `invalid_params`) before any store hop. So every expanded search or list
+/// returns at most `200 × 10` summaries, and T-04-11's bound covers every
+/// expanded response. A list without `expand_links` still returns every row
+/// when `limit` is omitted (v1.0 behaviour, RESEARCH Pitfall 6).
 pub const MAX_EXPANDED_LINKS: usize = 10;
 
 /// The library's typed error. `thiserror` per the ecosystem rule (libraries use

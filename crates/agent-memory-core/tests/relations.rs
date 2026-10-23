@@ -24,7 +24,7 @@ use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
 use agent_memory_core::domain::{
     LinkDirection, LinkKind, LinkOutcome, MemoryError, MemoryType, MemoryView, NewMemory,
-    RelatedLink, MAX_EXPANDED_LINKS,
+    RelatedLink, MAX_EXPANDED_LINKS, MAX_LIMIT,
 };
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
 use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs, SearchMode};
@@ -405,9 +405,13 @@ fn search_args(query: &str, expand_links: bool) -> SearchArgs {
     }
 }
 
+/// An expanded list must carry a limit (REVIEW WR-04, user decision
+/// option-a); `MAX_LIMIT` keeps every row of these small fixtures. A
+/// flag-less list keeps `limit: None`, so it still exercises the unlimited path.
 fn list_args(expand_links: bool) -> ListArgs {
     ListArgs {
         expand_links,
+        limit: expand_links.then_some(MAX_LIMIT),
         ..Default::default()
     }
 }
