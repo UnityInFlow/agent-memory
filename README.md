@@ -81,6 +81,46 @@ AGENT_MEMORY_DB=/path/to/memory.db agent-memory serve
 The server speaks JSON-RPC over **stdout**; all logs go to **stderr**, so stdout
 stays a pure protocol channel.
 
+## Upgrading
+
+A new agent-memory version may need to migrate the database schema. It does
+this automatically the first time it opens the file, and backs the database up
+first.
+
+- **Pre-migration backup.** Before any schema migration, the database is copied
+  with SQLite's online backup to `memory.db.backup-pre-NNNN-YYYYMMDD`, next to
+  `memory.db`. `NNNN` is the schema version being migrated to and `YYYYMMDD` is
+  the UTC date. A brand-new database has nothing to back up.
+- **One backup per target schema version.** Re-running the same upgrade
+  replaces that version's backup atomically. The new copy is written to a
+  temporary file, renamed into place, and only then is the older copy removed.
+  Backups made for other schema versions are never touched.
+- **No backup, no migration.** If the backup cannot be written (for example a
+  full disk or a read-only directory), the server refuses to start and the
+  database is not migrated.
+- **Starting several servers at once is safe.** If an MCP server and the REST
+  daemon open an older database at the same moment, both start. The schema is
+  migrated once, and the surviving backup is always a genuine pre-migration
+  copy.
+
+**Restoring a backup:**
+
+1. Stop every agent-memory process that uses the database: each MCP server and
+   the REST daemon.
+2. Copy the backup over the database:
+   `cp memory.db.backup-pre-0003-20261023 memory.db`.
+3. Delete `memory.db-wal` and `memory.db-shm` if they exist. They belong to the
+   database you replaced.
+4. Start the older agent-memory binary that matches the backup's schema.
+
+**A newer database meets an older binary.** A database written by a newer
+agent-memory is refused at startup, and the file is left untouched. The error
+names both schema versions:
+
+```text
+database schema is version 4 but this binary supports up to version 3 — upgrade agent-memory (brew upgrade unityinflow/tap/agent-memory) or point --db at a different file
+```
+
 ## MCP configuration (`.mcp.json`)
 
 Point every runtime at **one** database via `AGENT_MEMORY_DB` and they share memory:
