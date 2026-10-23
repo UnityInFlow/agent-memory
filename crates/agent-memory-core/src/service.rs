@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::clock::Clock;
 use crate::decay::{apply_decay, decay_score, DecayConfig, DecayEngine, RankWeights, SweepReport};
-use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
+use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
 use crate::embed::Embedder;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
@@ -354,6 +354,52 @@ impl MemoryService {
     pub async fn forget(&self, id: i64) -> Result<bool, MemoryError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.forget(id))
+            .await
+            .map_err(MemoryError::Join)?
+    }
+
+    /// Patch a memory in place (MCP-06), returning the full post-update view
+    /// plus `embedding_status` (D-10), or `Ok(None)` for an unknown id (clean
+    /// not-found, never an error — the [`MemoryService::forget`] contract).
+    ///
+    /// Order mirrors [`MemoryService::store`]: validate the patch FIRST (so a
+    /// bad patch never costs an embed round-trip — D-06 seam), stamp the clock,
+    /// then embed the new content best-effort ONLY when the patch carries
+    /// content (tags/scope/TTL-only patches never touch the embedder). An embed
+    /// failure never fails the update: the row lands pending
+    /// (`embedding_status = 0`) and the sweep backfills it (SEARCH-03). The
+    /// store applies the patch, the vector swap and the freshness bump (D-09)
+    /// in one writer transaction.
+    pub async fn update(
+        &self,
+        id: i64,
+        patch: MemoryPatch,
+    ) -> Result<Option<UpdatedMemory>, MemoryError> {
+        crate::domain::validate_patch(&patch)?;
+        let now = self.clock.now();
+        let embedding = match &patch.content {
+            Some(Some(content)) => {
+                let inputs = [content.clone()];
+                match self.embedder.embed(&inputs).await {
+                    Ok(mut vectors) if !vectors.is_empty() => Some(vectors.swap_remove(0)),
+                    Ok(_) => {
+                        tracing::warn!(
+                            "embedding skipped (empty batch response); updating with embedding_status = 0"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "embedding failed ({e}); updating with embedding_status = 0"
+                        );
+                        None
+                    }
+                }
+            }
+            Some(None) | None => None,
+        };
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.update(id, patch, embedding, now))
             .await
             .map_err(MemoryError::Join)?
     }

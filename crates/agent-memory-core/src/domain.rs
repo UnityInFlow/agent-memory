@@ -114,6 +114,49 @@ pub struct MemoryView {
     pub last_accessed: i64,
 }
 
+/// A JSON-merge-patch for `memory_update` (MCP-06 / D-08).
+///
+/// Every field is a double `Option`, so a transport can carry the three wire
+/// states of a JSON member through to the core:
+///
+/// | wire            | value            | meaning                         |
+/// |-----------------|------------------|---------------------------------|
+/// | member absent   | `None`           | leave the field unchanged       |
+/// | `null`          | `Some(None)`     | clear it (where clearing is legal) |
+/// | a value         | `Some(Some(v))`  | set it                          |
+///
+/// Clearing means: `tags` → empty list, `scope` → global (`NULL`, the same
+/// default [`NewMemory`] stores), `ttl_secs` → no expiry. `content` can never
+/// be cleared or emptied (rejected by the service). `mem_type` and `source` are
+/// deliberately NOT patchable (MCP-06 scope; type immutability also keeps
+/// `base_weight` fixed).
+///
+/// Plain struct with no serde derives: the transports own deserialization
+/// (they need an explicit-null helper — plain `Option<Option<T>>` collapses
+/// `null` into "absent") and construct this directly.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MemoryPatch {
+    pub content: Option<Option<String>>,
+    pub tags: Option<Option<Vec<String>>>,
+    pub scope: Option<Option<String>>,
+    pub ttl_secs: Option<Option<i64>>,
+}
+
+/// The `memory_update` response (D-10): the full post-update [`MemoryView`]
+/// plus `embedding_status`, so a caller can observe a pending re-embed (`0`)
+/// after an embedder outage — the sweep backfills it to `1` later.
+///
+/// The view is `#[serde(flatten)]`ed, so on the wire this is the familiar
+/// MemoryView object with one extra member. `MemoryView` itself is untouched,
+/// which keeps every existing list/search envelope byte-identical.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UpdatedMemory {
+    #[serde(flatten)]
+    pub view: MemoryView,
+    /// `1` = a vector is stored for the current content; `0` = pending.
+    pub embedding_status: i64,
+}
+
 /// Smallest accepted `limit` on search/list (D-01/D-03).
 pub const MIN_LIMIT: i64 = 1;
 
@@ -205,6 +248,36 @@ pub(crate) fn validate_ttl(ttl_secs: Option<i64>) -> Result<(), MemoryError> {
         }
     }
     Ok(())
+}
+
+/// Validate a [`MemoryPatch`] at the service seam, before any embed or store
+/// hop (MCP-06 / D-08; Phase 3 D-06 — bad input is always the client tier):
+///
+/// - a patch with every field absent is a client error, not a silent no-op;
+/// - `content` may not be `null`, empty, or whitespace-only;
+/// - a present `ttl_secs` goes through the shared [`validate_ttl`] bounds.
+pub(crate) fn validate_patch(patch: &MemoryPatch) -> Result<(), MemoryError> {
+    if patch.content.is_none()
+        && patch.tags.is_none()
+        && patch.scope.is_none()
+        && patch.ttl_secs.is_none()
+    {
+        return Err(MemoryError::InvalidArgument(
+            "at least one of content, tags, scope, ttl_secs must be provided".to_string(),
+        ));
+    }
+    match &patch.content {
+        None => {}
+        Some(Some(content)) if !content.trim().is_empty() => {}
+        Some(Some(_)) | Some(None) => {
+            return Err(MemoryError::InvalidArgument(
+                "content must be a non-empty string".to_string(),
+            ));
+        }
+    }
+    // Only a present value is bounds-checked: absent (keep) and null (clear
+    // the expiry) both flatten to None, which validate_ttl always accepts.
+    validate_ttl(patch.ttl_secs.flatten())
 }
 
 #[cfg(test)]

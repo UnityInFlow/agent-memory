@@ -20,7 +20,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
-use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
+use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
 use crate::service::{ListArgs, SearchArgs};
 use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
 use crate::store::Store;
@@ -598,6 +598,131 @@ impl Store for SqliteStore {
         let changed = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(changed > 0)
+    }
+
+    fn update(
+        &self,
+        id: i64,
+        patch: MemoryPatch,
+        embedding: Option<Vec<f32>>,
+        now: i64,
+    ) -> Result<Option<UpdatedMemory>, MemoryError> {
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
+        let tx = conn.transaction()?;
+
+        // Current values, read inside the writer tx so the merge below cannot
+        // race another write. Absent → clean not-found (the tx rolls back on
+        // drop; nothing was written).
+        let current = tx
+            .query_row(
+                "SELECT content, tags, scope, expires_at FROM memories WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((cur_content, cur_tags_json, cur_scope, cur_expires_at)) = current else {
+            return Ok(None);
+        };
+
+        // D-08 merge in Rust: None = unchanged, Some(None) = clear,
+        // Some(Some(v)) = set. The service has already rejected null/empty
+        // content, so a `Some(None)` content is unreachable — treated as
+        // unchanged rather than trusted to clear a NOT NULL column.
+        let (content, content_changed) = match patch.content {
+            Some(Some(new_content)) => (new_content, true),
+            Some(None) | None => (cur_content, false),
+        };
+        let tags_json = match patch.tags {
+            // Same JSON text encoding insert() writes.
+            Some(Some(tags)) => serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string()),
+            Some(None) => "[]".to_string(),
+            None => cur_tags_json,
+        };
+        let scope = match patch.scope {
+            Some(Some(scope)) => Some(scope),
+            // NULL = global: the default insert() stores for an omitted scope.
+            Some(None) => None,
+            None => cur_scope,
+        };
+        let expires_at = match patch.ttl_secs {
+            // Recomputed from patch time; ttl bounds already validated, so the
+            // addition cannot overflow (MAX_TTL_SECS keeps it far from i64::MAX).
+            Some(Some(ttl)) => Some(now + ttl),
+            Some(None) => None,
+            None => cur_expires_at,
+        };
+
+        // INVARIANT — id immutability: the row is updated IN PLACE, never
+        // removed and re-inserted. `memories.id` is a plain INTEGER PRIMARY KEY
+        // whose rowids SQLite may recycle, so a delete+insert "update" could
+        // silently re-attach relation edges to an unrelated memory (T-04-08).
+        //
+        // D-09: the freshness bump rides in the same statement (bump_access
+        // semantics) — an update is the strongest recency signal. decay_score
+        // is reset to 1.0, the exact value of the decay curve at
+        // last_accessed = now (insert() stores the same literal).
+        //
+        // The memories_au trigger re-mirrors the FTS5 content row for free.
+        // All values bound — never formatted into the SQL (T-04-06).
+        tx.execute(
+            "UPDATE memories SET content = ?2, tags = ?3, scope = ?4, expires_at = ?5, \
+                 last_accessed = ?6, access_count = access_count + 1, decay_score = 1.0 \
+             WHERE id = ?1",
+            params![id, content, tags_json, scope, expires_at, now],
+        )?;
+
+        if content_changed {
+            // vec0 ignores triggers: the stale vector must go explicitly, in
+            // THIS transaction, or the old meaning would keep matching.
+            tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])?;
+            match embedding {
+                Some(vector) => {
+                    let blob: &[u8] = bytemuck::cast_slice(&vector);
+                    tx.execute(
+                        "INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)",
+                        params![id, blob],
+                    )?;
+                    tx.execute(
+                        "UPDATE memories SET embedding_status = 1 WHERE id = ?1",
+                        params![id],
+                    )?;
+                }
+                None => {
+                    // Embed outage (or skipped): pending — the sweep backfill
+                    // re-embeds it once the embedder recovers (SEARCH-03).
+                    tx.execute(
+                        "UPDATE memories SET embedding_status = 0 WHERE id = ?1",
+                        params![id],
+                    )?;
+                }
+            }
+        }
+
+        let updated = tx.query_row(
+            "SELECT id, mem_type, content, tags, source, scope, base_weight, \
+                    decay_score, access_count, created_at, last_accessed, expires_at, \
+                    embedding_status \
+             FROM memories WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(UpdatedMemory {
+                    view: row_to_view(row)?,
+                    embedding_status: row.get("embedding_status")?,
+                })
+            },
+        )?;
+        tx.commit()?;
+        Ok(Some(updated))
     }
 
     fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError> {
