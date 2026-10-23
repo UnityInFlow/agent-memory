@@ -430,12 +430,25 @@ Out-of-bounds `limit`/`ttl_secs` values return **HTTP 400** with a JSON body
 whose `error` field names the field, range, and offending value — shaped
 `invalid argument: limit must be between 1 and 200 (got 0)` — never a 500 and
 never a silent clamp. The MCP transport rejects the same inputs identically as
-`invalid_params`, because validation lives once at the shared service seam. A
-`PATCH` body that is not valid JSON, has a wrongly typed field, or is sent
-without `Content-Type: application/json` is also a 400 with the same
-`{"error": ...}` body. Every client error, including a malformed path segment
-(`/api/memories/abc`) or query parameter (`?limit=abc`, `?expand_links=1`),
-returns a JSON `{"error": "..."}` body. A storage failure during search reports a generic
+`invalid_params`, because validation lives once at the shared service seam.
+
+Malformed input that never reaches the seam gets the same 400 `{"error": ...}`
+body on these routes only:
+
+- **request body** on `PATCH /api/memories/{id}` and `POST /api/links`: not
+  valid JSON, a missing or wrongly typed field, or no
+  `Content-Type: application/json` (and, on `PATCH` only, an unknown field);
+- **path segment** on `PATCH`/`DELETE /api/memories/{id}` and
+  `DELETE /api/links/{from_id}/{to_id}/{kind}`, e.g. `/api/memories/abc`;
+- **query parameter** on `GET /api/memories`, e.g. `?limit=abc` or
+  `?expand_links=1`.
+
+The two v0.0.1 body routes, `POST /api/memories` and `POST /api/search`, keep
+axum's default body rejection: a **plain-text** (not JSON) response with 422
+for a missing or wrongly typed field, 400 for malformed JSON, and 415 for a
+missing `Content-Type`. A body that does deserialize is validated as above, so
+an out-of-bounds `limit`/`ttl_secs` or an unknown `type` on those routes is
+still a 400 `{"error"}`. A storage failure during search reports a generic
 internal error (HTTP 500 / MCP `internal_error`, `search failed due to a
 storage error`); the detail goes only to the server's stderr log.
 
