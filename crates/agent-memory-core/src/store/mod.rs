@@ -10,7 +10,10 @@ pub mod migrations;
 pub mod sqlite;
 
 use crate::decay::{DecayConfig, RankWeights};
-use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
+use crate::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
+    UpdatedMemory,
+};
 use crate::service::{ListArgs, SearchArgs};
 
 /// Synchronous persistence interface, implemented by [`sqlite::SqliteStore`].
@@ -81,7 +84,10 @@ pub trait Store: Send + Sync {
     /// row with that id existed (clean not-found, never an error — MCP-04). The
     /// FTS5 mirror is kept in sync by the delete trigger; the `vec_memories`
     /// row is deleted EXPLICITLY (vec0 virtual tables ignore triggers —
-    /// RESEARCH Pitfall 3 / T-02-05).
+    /// RESEARCH Pitfall 3 / T-02-05). Every `memory_links` edge touching the
+    /// row goes with it: the FK `ON DELETE CASCADE` is the primary mechanism,
+    /// and an explicit orphan-edge delete in the same transaction covers any
+    /// connection that skipped the `foreign_keys` pragma (MCP-07 / T-04-12).
     fn forget(&self, id: i64) -> Result<bool, MemoryError>;
 
     /// Patch a memory IN PLACE (MCP-06 / D-08), returning the post-update row,
@@ -104,6 +110,27 @@ pub trait Store: Send + Sync {
         now: i64,
     ) -> Result<Option<UpdatedMemory>, MemoryError>;
 
+    /// Create the directed edge `from_id -[kind]-> to_id` (MCP-07), stamped
+    /// `created_at = now`. One writer transaction: both endpoints are checked
+    /// first, and a missing one returns [`LinkOutcome::NotFound`] naming it
+    /// (`from_id` first) — a clean not-found, never an FK-violation error
+    /// (D-02 / T-04-13). A duplicate `(from_id, to_id, kind)` is an idempotent
+    /// no-op that still returns [`LinkOutcome::Linked`]. The self-link check
+    /// belongs to the service seam and has already run.
+    fn link(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+        now: i64,
+    ) -> Result<LinkOutcome, MemoryError>;
+
+    /// Remove the directed edge `from_id -[kind]-> to_id` (MCP-07). Returns
+    /// `true` if an edge was removed, `false` if no such edge existed — the
+    /// clean not-found of [`Store::forget`], never an error (D-02). Direction
+    /// and kind are part of the edge's identity.
+    fn unlink(&self, from_id: i64, to_id: i64, kind: LinkKind) -> Result<bool, MemoryError>;
+
     /// Bump the recency of the given ids: set `last_accessed = now` and increment
     /// `access_count`. Runs on the writer lane. A no-op for an empty id slice.
     fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError>;
@@ -114,7 +141,9 @@ pub trait Store: Send + Sync {
     /// decay materialization is structurally forbidden from deleting (STORE-04 /
     /// Pitfall 7). The FTS5 delete trigger keeps `memories_fts` in sync; orphaned
     /// `vec_memories` rows are cleared explicitly in the same transaction (vec0
-    /// ignores triggers — Pitfall 3 / T-02-05).
+    /// ignores triggers — Pitfall 3 / T-02-05). Edges of expired rows cascade
+    /// exactly as for [`Store::forget`], with the same explicit orphan-edge
+    /// delete as the belt-and-braces backstop (MCP-07 / T-04-12).
     fn sweep_expired(&self, now: i64) -> Result<usize, MemoryError>;
 
     /// Recompute and persist each surviving row's `decay_score` column at `now`,

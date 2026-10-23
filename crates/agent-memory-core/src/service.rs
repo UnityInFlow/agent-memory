@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use crate::clock::Clock;
 use crate::decay::{apply_decay, decay_score, DecayConfig, DecayEngine, RankWeights, SweepReport};
-use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
+use crate::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
+    UpdatedMemory,
+};
 use crate::embed::Embedder;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
@@ -354,6 +357,48 @@ impl MemoryService {
     pub async fn forget(&self, id: i64) -> Result<bool, MemoryError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.forget(id))
+            .await
+            .map_err(MemoryError::Join)?
+    }
+
+    /// Link two memories with a typed, directed relation (MCP-07):
+    /// `from_id -[kind]-> to_id`.
+    ///
+    /// The self-link check runs FIRST, at this seam, before any store hop
+    /// (D-02): `from_id == to_id` is [`MemoryError::InvalidArgument`] even if
+    /// the id does not exist. The kind is already a closed [`LinkKind`] — the
+    /// transports parse the wire string with [`LinkKind::try_from`] (D-01).
+    ///
+    /// A missing endpoint is [`LinkOutcome::NotFound`] naming the id (clean
+    /// not-found data, never an error); linking an edge that already exists is
+    /// an idempotent [`LinkOutcome::Linked`] (D-02). The edge is stamped with
+    /// the injected clock, which orders 1-hop expansion (D-07).
+    pub async fn link(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+    ) -> Result<LinkOutcome, MemoryError> {
+        crate::domain::validate_link_endpoints(from_id, to_id)?;
+        let now = self.clock.now();
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.link(from_id, to_id, kind, now))
+            .await
+            .map_err(MemoryError::Join)?
+    }
+
+    /// Remove the directed edge `from_id -[kind]-> to_id` (MCP-07). Returns
+    /// `true` if it was removed, `false` if no such edge existed — the clean
+    /// not-found of [`MemoryService::forget`], never an error (D-02). A
+    /// self-pair simply never matches an edge, so it is a not-found too.
+    pub async fn unlink(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+    ) -> Result<bool, MemoryError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.unlink(from_id, to_id, kind))
             .await
             .map_err(MemoryError::Join)?
     }

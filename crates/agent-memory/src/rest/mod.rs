@@ -29,7 +29,7 @@ use crate::mcp::AppState;
 /// everything else is a 500. The body is always `{"error": "..."}` so bad input
 /// can never surface as a 500. A missing resource is not an error here:
 /// handlers return their 404 body from not-found data (forget's `Ok(false)`,
-/// update's `Ok(None)`), so a server fault can never be mis-tiered as a 404 (WR-02).
+/// update's `Ok(None)`, link's `NotFound`), so a server fault can never be mis-tiered as a 404 (WR-02).
 #[derive(Debug)]
 pub enum ApiError {
     /// Invalid client input (e.g. an unknown memory type) → 400.
@@ -77,6 +77,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/memories/{id}",
             delete(handlers::forget_handler).patch(handlers::update_handler),
+        )
+        .route("/api/links", post(handlers::link_handler))
+        .route(
+            "/api/links/{from_id}/{to_id}/{kind}",
+            delete(handlers::unlink_handler),
         )
         .route("/health", get(handlers::health_handler))
         .with_state(state)

@@ -1,4 +1,4 @@
-//! The six REST handlers — thin adapters with ZERO business logic.
+//! The REST handlers — thin adapters with ZERO business logic.
 //!
 //! Each handler copies the `mcp.rs` per-tool shape: validate the wire type via
 //! `MemoryType::try_from` up front, build the exact core service arg structs,
@@ -16,7 +16,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use agent_memory_core::domain::{MemoryError, MemoryPatch, MemoryType, NewMemory};
+use agent_memory_core::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, NewMemory,
+};
 use agent_memory_core::embed::EmbedderHealth;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, SearchArgs as ServiceSearchArgs, SearchOutcome,
@@ -114,6 +116,18 @@ pub struct UpdateBody {
         deserialize_with = "crate::serde_util::deserialize_explicit_null"
     )]
     pub ttl_secs: Option<Option<i64>>,
+}
+
+/// Body for `POST /api/links` — mirrors `mcp::LinkArgs` field for field:
+/// the directed edge `from_id -[kind]-> to_id`.
+#[derive(Debug, serde::Deserialize)]
+pub struct LinkBody {
+    /// The id of the memory the edge starts at.
+    pub from_id: i64,
+    /// The id of the memory the edge points to. Must differ from `from_id`.
+    pub to_id: i64,
+    /// One of: relates_to, supersedes, caused_by.
+    pub kind: String,
 }
 
 impl From<UpdateBody> for MemoryPatch {
@@ -280,6 +294,94 @@ pub async fn update_handler(
             Json(serde_json::json!({ "id": id, "updated": false, "reason": "not_found" })),
         )
             .into_response()),
+    }
+}
+
+/// Parse a wire `kind` up front: an unknown kind is a clean 400 naming the
+/// allowed set, before anything touches the service (the D-07 type pattern).
+fn parse_link_kind(wire: &str) -> Result<LinkKind, ApiError> {
+    LinkKind::try_from(wire).map_err(map_memory_error)
+}
+
+/// `POST /api/links` → 200 `{"from_id", "to_id", "kind", "linked": true}`, or
+/// 404 `{..., "linked": false, "reason": "not_found", "missing_id"}` when
+/// either memory does not exist — the exact JSON the `mcp.rs` link tool
+/// returns, with HTTP-native status codes. A duplicate link is a 200 no-op.
+///
+/// Every body rejection (malformed JSON, wrong types, missing content-type)
+/// is a 400 `{"error"}`, like PATCH; a self-link or unknown kind is a 400
+/// from the seam. A missing endpoint is never an FK-violation 500.
+pub async fn link_handler(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<LinkBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
+    let kind = parse_link_kind(&body.kind)?;
+
+    let outcome = state
+        .service
+        .link(body.from_id, body.to_id, kind)
+        .await
+        .map_err(map_memory_error)?;
+
+    match outcome {
+        LinkOutcome::Linked => Ok(Json(serde_json::json!({
+            "from_id": body.from_id,
+            "to_id": body.to_id,
+            "kind": kind,
+            "linked": true
+        }))
+        .into_response()),
+        LinkOutcome::NotFound { missing_id } => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "from_id": body.from_id,
+                "to_id": body.to_id,
+                "kind": kind,
+                "linked": false,
+                "reason": "not_found",
+                "missing_id": missing_id
+            })),
+        )
+            .into_response()),
+    }
+}
+
+/// `DELETE /api/links/{from_id}/{to_id}/{kind}` → 200 `{"from_id", "to_id",
+/// "kind", "unlinked": true}`, or 404 `{..., "unlinked": false, "reason":
+/// "not_found"}` when no such edge exists — the `mcp.rs` unlink tool's JSON.
+/// An unknown `kind` segment is a 400.
+pub async fn unlink_handler(
+    State(state): State<Arc<AppState>>,
+    Path((from_id, to_id, kind)): Path<(i64, i64, String)>,
+) -> Result<Response, ApiError> {
+    let kind = parse_link_kind(&kind)?;
+    let removed = state
+        .service
+        .unlink(from_id, to_id, kind)
+        .await
+        .map_err(map_memory_error)?;
+
+    if removed {
+        Ok(Json(serde_json::json!({
+            "from_id": from_id,
+            "to_id": to_id,
+            "kind": kind,
+            "unlinked": true
+        }))
+        .into_response())
+    } else {
+        Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "from_id": from_id,
+                "to_id": to_id,
+                "kind": kind,
+                "unlinked": false,
+                "reason": "not_found"
+            })),
+        )
+            .into_response())
     }
 }
 
@@ -921,6 +1023,220 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(rows[0].tags, vec!["rest".to_string()]);
+    }
+
+    // --- MCP-07 link / unlink -------------------------------------------------
+
+    async fn link_request(
+        state: &Arc<AppState>,
+        raw: &str,
+        content_type: Option<&str>,
+    ) -> Response {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/links");
+        if let Some(ct) = content_type {
+            builder = builder.header(axum::http::header::CONTENT_TYPE, ct);
+        }
+        let req = builder
+            .body(axum::body::Body::from(raw.to_string()))
+            .expect("request builds");
+        let body = Json::<LinkBody>::from_request(req, &()).await;
+        match link_handler(State(state.clone()), body).await {
+            Ok(resp) => resp,
+            Err(err) => err.into_response(),
+        }
+    }
+
+    async fn link_raw(state: &Arc<AppState>, raw: &str) -> Response {
+        link_request(state, raw, Some("application/json")).await
+    }
+
+    async fn unlink_path(state: &Arc<AppState>, from: i64, to: i64, kind: &str) -> Response {
+        match unlink_handler(State(state.clone()), Path((from, to, kind.to_string()))).await {
+            Ok(resp) => resp,
+            Err(err) => err.into_response(),
+        }
+    }
+
+    async fn stored_id(state: &Arc<AppState>, content: &str) -> i64 {
+        let resp = store_handler(
+            State(state.clone()),
+            Json(store_request(content, "DECISION")),
+        )
+        .await
+        .expect("store succeeds")
+        .into_response();
+        body_json(resp).await["id"].as_i64().expect("id")
+    }
+
+    #[tokio::test]
+    async fn post_links_links_idempotently_and_delete_unlinks_then_404s() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "effect").await;
+        let b = stored_id(&state, "cause").await;
+        let raw = format!(r#"{{"from_id": {a}, "to_id": {b}, "kind": "caused_by"}}"#);
+        let linked = serde_json::json!({
+            "from_id": a, "to_id": b, "kind": "caused_by", "linked": true
+        });
+
+        for attempt in ["first", "duplicate"] {
+            let resp = link_raw(&state, &raw).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{attempt} link is a 200");
+            assert_eq!(body_json(resp).await, linked, "{attempt}");
+        }
+
+        let resp = unlink_path(&state, a, b, "caused_by").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({
+                "from_id": a, "to_id": b, "kind": "caused_by", "unlinked": true
+            })
+        );
+
+        let resp = unlink_path(&state, a, b, "caused_by").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({
+                "from_id": a, "to_id": b, "kind": "caused_by",
+                "unlinked": false, "reason": "not_found"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn post_links_to_a_missing_memory_is_404_naming_it_never_500() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "present").await;
+
+        let resp = link_raw(
+            &state,
+            &format!(r#"{{"from_id": 999999, "to_id": {a}, "kind": "relates_to"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({
+                "from_id": 999_999, "to_id": a, "kind": "relates_to",
+                "linked": false, "reason": "not_found", "missing_id": 999_999
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_link_requests_are_400_never_500() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "solo").await;
+
+        let resp = link_raw(
+            &state,
+            &format!(r#"{{"from_id": {a}, "to_id": {a}, "kind": "supersedes"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(resp).await["error"],
+            format!("invalid argument: from_id and to_id must differ (got {a})")
+        );
+
+        let kind_error =
+            "invalid argument: kind must be one of relates_to, supersedes, caused_by (got 'blocks')";
+        let resp = link_raw(
+            &state,
+            &format!(r#"{{"from_id": {a}, "to_id": 2, "kind": "blocks"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], kind_error);
+
+        let resp = unlink_path(&state, a, 2, "blocks").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], kind_error);
+
+        for (raw, content_type) in [
+            (r#"{"from_id": 1, "to_id": 2"#, Some("application/json")),
+            (
+                r#"{"from_id": "one", "to_id": 2, "kind": "relates_to"}"#,
+                Some("application/json"),
+            ),
+            (
+                r#"{"from_id": 1, "kind": "relates_to"}"#,
+                Some("application/json"),
+            ),
+            (r#"{"from_id": 1, "to_id": 2, "kind": "relates_to"}"#, None),
+        ] {
+            let resp = link_request(&state, raw, content_type).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "link body {raw:?} (content-type {content_type:?}) must be a 400"
+            );
+        }
+    }
+
+    /// The real router over a loopback listener: route wiring, the
+    /// `{from_id}/{to_id}/{kind}` path extractor and the JSON body all run
+    /// exactly as they do in `serve-rest`.
+    #[tokio::test]
+    async fn links_routes_work_over_real_http() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "newer").await;
+        let b = stored_id(&state, "older").await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::rest::build_router(state))
+                .await
+                .expect("serve");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("client");
+        let base = format!("http://{addr}");
+
+        let resp = client
+            .post(format!("{base}/api/links"))
+            .json(&serde_json::json!({ "from_id": a, "to_id": b, "kind": "supersedes" }))
+            .send()
+            .await
+            .expect("POST /api/links");
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let resp = client
+            .delete(format!("{base}/api/links/{a}/{b}/blocks"))
+            .send()
+            .await
+            .expect("DELETE with a bad kind");
+        assert_eq!(resp.status().as_u16(), 400);
+
+        let resp = client
+            .delete(format!("{base}/api/links/{a}/{b}/supersedes"))
+            .send()
+            .await
+            .expect("DELETE /api/links");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["unlinked"], true);
+
+        let resp = client
+            .delete(format!("{base}/api/links/{a}/{b}/supersedes"))
+            .send()
+            .await
+            .expect("DELETE again");
+        assert_eq!(resp.status().as_u16(), 404);
+
+        server.abort();
     }
 
     #[test]
