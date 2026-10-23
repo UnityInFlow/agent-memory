@@ -735,6 +735,124 @@ mod tests {
         }
     }
 
+    /// The shared option-a corpus (mirrors agent-memory-core tests/hybrid.rs):
+    /// five rows, a targeted decision table (query -> 1-based corpus index
+    /// recalled first in both modes), and tokenless or no-hit queries.
+    const CORPUS: [&str; 5] = [
+        "We chose sqlite-vec for local vector similarity search",
+        "auth tokens rotate every hour",
+        "C++ build flags need care",
+        "don't retry the import blindly",
+        "the unbalanced ledger is reconciled nightly",
+    ];
+    const TARGETED: [(&str, usize); 7] = [
+        ("what vector store do we use?", 1),
+        ("sqlite-vec", 1),
+        ("don't retry", 4),
+        ("auth, tokens", 2),
+        ("auth: tokens", 2),
+        ("C++", 3),
+        ("\"unbalanced", 5),
+    ];
+    const TOKENLESS_OR_NO_HIT: [&str; 4] = ["AND", "", "?!,", "*"];
+
+    #[tokio::test]
+    async fn search_answers_every_query_shape_in_both_modes() {
+        for (expected_mode, live) in [("hybrid", true), ("keyword", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = if live {
+                live_state(&dir)
+            } else {
+                test_state(&dir)
+            };
+            let mut ids = Vec::new();
+            for content in CORPUS {
+                let resp = store_handler(
+                    State(state.clone()),
+                    Json(store_request(content, "PATTERN")),
+                )
+                .await
+                .expect("store succeeds")
+                .into_response();
+                ids.push(body_json(resp).await["id"].as_i64().expect("id"));
+            }
+
+            let queries = TARGETED
+                .iter()
+                .map(|(q, target)| (*q, Some(*target)))
+                .chain(TOKENLESS_OR_NO_HIT.iter().map(|q| (*q, None)));
+            for (input, target) in queries {
+                let resp = search_handler(State(state.clone()), Json(search_request(input)))
+                    .await
+                    .unwrap_or_else(|_| panic!("{expected_mode}: {input:?} must be answered"))
+                    .into_response();
+                assert_eq!(resp.status(), StatusCode::OK, "{expected_mode}: {input:?}");
+                let body = body_json(resp).await;
+                assert!(
+                    !body.to_string().contains("sqlite error"),
+                    "{input:?}: {body}"
+                );
+                assert_eq!(body["search_mode"], expected_mode, "{input:?}: {body}");
+                let results = body["results"].as_array().expect("results array");
+                match target {
+                    Some(index) => assert_eq!(
+                        results.first().and_then(|r| r["id"].as_i64()),
+                        Some(ids[index - 1]),
+                        "{expected_mode}: {input:?} must recall corpus row {index} first: {body}"
+                    ),
+                    None if live => assert!(
+                        !results.is_empty(),
+                        "hybrid: {input:?} must answer from the semantic leg: {body}"
+                    ),
+                    None => assert!(
+                        results.is_empty(),
+                        "keyword: {input:?} has no keyword matches: {body}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn search_storage_failure_is_500_without_sqlite_text() {
+        // T-04-19: a broken FTS index (renamed away underneath the server)
+        // reaches the REST client only as the generic internal error.
+        for live in [true, false] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = if live {
+                live_state(&dir)
+            } else {
+                test_state(&dir)
+            };
+            stored_id(&state, "ledger reconciliation runbook").await;
+            agent_memory_core::store::sqlite::register_vec_extension().expect("register vec0");
+            rusqlite::Connection::open(dir.path().join("mem.db"))
+                .expect("open db")
+                .execute_batch("ALTER TABLE memories_fts RENAME TO memories_fts_offline;")
+                .expect("rename fts table");
+
+            let resp = match search_handler(State(state), Json(search_request("ledger"))).await {
+                Ok(_) => panic!("live={live}: a broken FTS index must fail the search"),
+                Err(err) => err.into_response(),
+            };
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "live={live}"
+            );
+            let body = body_json(resp).await;
+            let error = body["error"].as_str().expect("500 body carries an error");
+            assert!(
+                error.contains("search failed due to a storage error"),
+                "live={live}: {body}"
+            );
+            assert!(
+                !error.to_lowercase().contains("sqlite"),
+                "live={live}: no SQLite text may reach the client: {body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn search_with_zero_limit_returns_400_never_500() {
         // API-02 / D-01: an out-of-bounds limit is CLIENT input — 400 with the

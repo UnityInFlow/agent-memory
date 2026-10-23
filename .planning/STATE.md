@@ -112,6 +112,7 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-04: Hybrid search = RRF (k=60, 1-based ranks, duplicate ids sum, id tie-break) over two pure-relevance legs (KNN distance, bm25 ASC), each oversampled limit*4 capped at MAX_KNN_K; decay applied once, multiplicatively, post-fusion (SEARCH-04/05)
 - [Phase 04]: 04-04: SearchMode::Semantic removed; embedder-up searches report search_mode "hybrid", embedder-down stays "keyword" byte-identical to v1.0 (README behavioral change 3)
 - [Phase 04]: 04-04: Keyword-leg errors propagate first, so a malformed MATCH (incl. bare ?/,/' punctuation) is InvalidQuery/400 in hybrid as in keyword mode (T-04-15); follow-up candidate: sanitize natural-language queries for the keyword leg
+- [Phase 04]: 04-05: T-04-15 revised by user decision option-a (2026-10-23) — search runs the raw FTS5 MATCH first, then one sanitized retry (word tokens quoted and OR-joined) on any FTS5 query-parse error, including the step-time `no such column` class from hyphens/colons; a tokenless query is an empty keyword leg (hybrid answers semantic-only, keyword mode returns empty); identical in both modes, so search never returns InvalidQuery; every search-path internal error is redacted to SEARCH_STORAGE_FAILURE (T-04-19). Supersedes the 04-04 decision that a malformed MATCH is InvalidQuery/400 in hybrid mode.
 
 ### Pending Todos
 

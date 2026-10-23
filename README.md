@@ -108,7 +108,7 @@ stored in one is immediately retrievable in another.
 | Tool | Purpose | Validated parameters |
 |------|---------|----------------------|
 | `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
-| `memory_search` | Hybrid (keyword + semantic, rank-fused) search when Ollama is reachable, FTS5 keyword otherwise — weighted by decay, and only the returned results are recency-bumped. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
+| `memory_search` | Hybrid (keyword + semantic, rank-fused) search when Ollama is reachable, FTS5 keyword otherwise — weighted by decay, and only the returned results are recency-bumped. Accepts plain natural-language queries (any punctuation) as well as FTS5 syntax. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_update` | Patch a memory in place by id — content, tags, scope, TTL (clean not-found for unknown ids). | `content`: never null or empty. `ttl_secs`: 1–3155760000 when set; `null` = no expiry. At least one field besides `id` |
 | `memory_link` | Link two memories with a typed, directed relation (idempotent; clean not-found for unknown ids). | `kind`: one of `relates_to`, `supersedes`, `caused_by`. `from_id` ≠ `to_id` |
@@ -162,12 +162,16 @@ answer is still reported as `"hybrid"`. A present `limit` must be between 1 and
 200 (omitted defaults to 50); a `tag` filter matches whole tags exactly and
 case-sensitively.
 
-- **The query is FTS5 MATCH syntax in both modes.** A query FTS5 cannot parse —
-  an unbalanced `"`, a dangling `AND`, bare punctuation such as `?`, `,` or `'`
-  — is a client error (`invalid_params` / HTTP 400) even when Ollama is up.
-  Hybrid never quietly answers from the semantic ranking alone. Use plain words
-  for natural-language questions: `what did we decide about caching`, not
-  `what did we decide about caching?`.
+- **Plain language or FTS5 syntax — a query is never rejected.** The raw query
+  runs through FTS5 first, so valid FTS5 expressions (`sqlite AND vec`,
+  `"exact phrase"`, `vec*`) keep their exact meaning. A query FTS5 cannot parse
+  — a question mark, a comma or apostrophe, a hyphen or colon (`sqlite-vec`,
+  `TODO: auth`), an unbalanced `"` — is retried once with its words quoted and
+  OR-ed together, so `what vector store do we use?` searches for `what`,
+  `vector`, `store`, … A query with no words at all (empty, `?!`, `*`)
+  contributes no keyword matches: hybrid answers from the semantic ranking
+  alone and keyword mode returns an empty list. This holds identically in both
+  modes, so whether Ollama is up never changes how a query is treated.
 - **Only returned results are recency-bumped.** The candidates fusion looked at
   but did not return, and any `expand_links` neighbors, are not touched, so a
   search never changes how unseen memories decay.
@@ -367,7 +371,9 @@ never a silent clamp. The MCP transport rejects the same inputs identically as
 `invalid_params`, because validation lives once at the shared service seam. A
 `PATCH` body that is not valid JSON, has a wrongly typed field, or is sent
 without `Content-Type: application/json` is also a 400 with the same
-`{"error": ...}` body.
+`{"error": ...}` body. A storage failure during search reports a generic
+internal error (HTTP 500 / MCP `internal_error`, `search failed due to a
+storage error`); the detail goes only to the server's stderr log.
 
 ```bash
 curl -X PATCH localhost:7437/api/memories/42 \
@@ -409,9 +415,12 @@ and REST):
    with RRF (k = 60) and decay-weighted, reported as `"search_mode": "hybrid"`.
    `"keyword"` (embedder down) is unchanged, as is the envelope shape. Two side
    effects:
-   - With Ollama up, a query FTS5 cannot parse (bare `?`, `,`, `'`, an
-     unbalanced `"`) is now a client error, exactly as it always was without
-     Ollama. v0.0.1 answered such queries from embeddings alone.
+   - Queries FTS5 cannot parse are now answered in both modes. With Ollama
+     down, v0.0.1 rejected punctuated queries (bare `?`, `,`, `'`, an
+     unbalanced `"`) with HTTP 400 / `invalid_params`, and failed hyphenated or
+     colon-bearing queries (`sqlite-vec`, `TODO: auth`) with HTTP 500 /
+     `internal_error`. v0.1.0 answers both: the raw query runs first, and only
+     if FTS5 cannot parse it is it retried once as its words OR-ed together.
    - Exact keyword hits now surface alongside paraphrase matches, so result
      order can differ from v0.0.1's embedding-only ranking.
 
