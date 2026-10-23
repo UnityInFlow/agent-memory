@@ -327,6 +327,12 @@ pub enum MemoryError {
     #[error("invalid memory type '{0}' (expected one of DECISION, PATTERN, ERROR, TODO, ARCHITECTURE, CONSTRAINT)")]
     InvalidType(String),
 
+    /// Client tier (REST 400 / MCP `invalid_params`). **Since v0.1.0, search
+    /// never produces it** (user decision option-a, T-04-15 revised): the
+    /// keyword leg retries FTS5-unparseable input once as its words OR-ed
+    /// together, and treats a tokenless query as no keyword matches, in both
+    /// modes. The variant is kept so both transport error mappers stay
+    /// exhaustive and the client-tier error vocabulary stays stable.
     #[error("invalid search query {0:?}: not a valid FTS5 match expression")]
     InvalidQuery(String),
 

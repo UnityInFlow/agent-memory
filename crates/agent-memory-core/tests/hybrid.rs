@@ -538,33 +538,63 @@ async fn an_empty_embed_batch_degrades_to_the_unchanged_v1_keyword_path() {
     assert_degrades_to_the_v1_keyword_path(Arc::new(EmptyBatchEmbedder)).await;
 }
 
+/// The shared option-a corpus (04-05 plan): the same five PATTERN rows back
+/// every decision-table test, at the core and on both transports.
+const M1: &str = "We chose sqlite-vec for local vector similarity search";
+const M2: &str = "auth tokens rotate every hour";
+const M3: &str = "C++ build flags need care";
+const M4: &str = "don't retry the import blindly";
+const M5: &str = "the unbalanced ledger is reconciled nightly";
+
+/// Queries FTS5 cannot parse as written, each with the corpus row (1-based
+/// index into M1..M5) it must recall first in BOTH modes.
+const TARGETED: [(&str, usize); 7] = [
+    ("what vector store do we use?", 1),
+    ("sqlite-vec", 1),
+    ("don't retry", 4),
+    ("auth, tokens", 2),
+    ("auth: tokens", 2),
+    ("C++", 3),
+    ("\"unbalanced", 5),
+];
+
+/// Tokenless or no-hit queries: no keyword matches. Keyword mode answers an
+/// empty set; hybrid answers from the semantic leg alone. (`AND` sanitizes
+/// to the phrase "and", which no corpus row contains.)
+const TOKENLESS_OR_NO_HIT: [&str; 4] = ["AND", "", "?!,", "*"];
+
+/// Store M1..M5 as PATTERN rows at one TestClock instant (equal decay) and
+/// return their ids in corpus order.
+async fn store_corpus(h: &Harness) -> Vec<i64> {
+    let mut out = Vec::new();
+    for content in [M1, M2, M3, M4, M5] {
+        out.push(store(h, content, MemoryType::Pattern).await);
+    }
+    out
+}
+
+fn both_modes() -> [(SearchMode, Arc<dyn Embedder>); 2] {
+    [
+        (SearchMode::Hybrid, live(HashMap::new())),
+        (
+            SearchMode::Keyword,
+            Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
+        ),
+    ]
+}
+
 #[tokio::test]
 async fn queries_fts5_cannot_parse_succeed_identically_in_both_modes() {
     // T-04-15 revised by user decision option-a (2026-10-23): the same input
     // classifies the same way in every mode, and that classification is now
-    // "answered", never InvalidQuery and never a 500. The raw MATCH runs
-    // first; FTS5-unparseable input is retried once as its words OR-ed.
-    for input in [
-        "\"unbalanced",
-        "AND",
-        "what is the plan?",
-        "sqlite-vec",
-        "auth: tokens",
-    ] {
-        for (expected_mode, embedder) in [
-            (SearchMode::Hybrid, live(HashMap::new())),
-            (
-                SearchMode::Keyword,
-                Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
-            ),
-        ] {
-            let h = harness(embedder);
-            store(
-                &h,
-                "what is the plan for the unbalanced ledger",
-                MemoryType::Pattern,
-            )
-            .await;
+    // "answered" — never InvalidQuery, never a 500. The raw MATCH runs first;
+    // FTS5-unparseable input is retried once as its words OR-ed; a tokenless
+    // query contributes no keyword matches.
+    for (expected_mode, embedder) in both_modes() {
+        let h = harness(embedder);
+        let corpus = store_corpus(&h).await;
+
+        for (input, target) in TARGETED {
             let outcome = h
                 .service
                 .search(query(input, None))
@@ -576,40 +606,103 @@ async fn queries_fts5_cannot_parse_succeed_identically_in_both_modes() {
                 outcome.search_mode, expected_mode,
                 "{input:?} must carry the mode's search_mode"
             );
+            assert_eq!(
+                ids(&outcome.results).first(),
+                Some(&corpus[target - 1]),
+                "{expected_mode:?} mode: {input:?} must recall M{target} first, got {:?}",
+                ids(&outcome.results)
+            );
         }
-    }
 
-    // The tracer slice: a hyphenated term and a punctuated question both
-    // recall the sqlite-vec memory first, with the embedder up or down.
-    for input in ["sqlite-vec", "what vector store do we use?"] {
-        for (expected_mode, embedder) in [
-            (SearchMode::Hybrid, live(HashMap::new())),
-            (
-                SearchMode::Keyword,
-                Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
-            ),
-        ] {
-            let h = harness(embedder);
-            let m1 = store(
-                &h,
-                "We chose sqlite-vec for local vector similarity search",
-                MemoryType::Pattern,
-            )
-            .await;
-            store(&h, "auth tokens rotate every hour", MemoryType::Pattern).await;
+        for input in TOKENLESS_OR_NO_HIT {
             let outcome = h
                 .service
                 .search(query(input, None))
                 .await
-                .unwrap_or_else(|e| panic!("{expected_mode:?}: {input:?} failed: {e:?}"));
+                .unwrap_or_else(|e| {
+                    panic!("{expected_mode:?} mode: {input:?} must be answered, got {e:?}")
+                });
             assert_eq!(outcome.search_mode, expected_mode, "{input:?}");
-            assert_eq!(
-                ids(&outcome.results).first(),
-                Some(&m1),
-                "{expected_mode:?}: {input:?} must recall the sqlite-vec memory first"
-            );
+            match expected_mode {
+                SearchMode::Keyword => assert!(
+                    outcome.results.is_empty(),
+                    "keyword mode: {input:?} has no keyword matches, got {:?}",
+                    ids(&outcome.results)
+                ),
+                SearchMode::Hybrid => assert!(
+                    !outcome.results.is_empty(),
+                    "hybrid mode: {input:?} must still answer from the semantic leg"
+                ),
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn structured_fts5_syntax_still_runs_raw() {
+    // The raw query always runs first, so valid FTS5 keeps its exact meaning.
+    // Each expected set differs from what a sanitized OR-of-words retry would
+    // return, so a wrongly retried query fails here.
+    const S1: &str = "sqlite only here";
+    const S2: &str = "sqlite with vec support";
+    const S3: &str = "an exact phrase lives here";
+    const S4: &str = "phrase before exact here";
+    const S5: &str = "vector math notes";
+
+    let h = harness(Arc::new(FakeEmbedder::failing()));
+    let mut s = Vec::new();
+    for content in [S1, S2, S3, S4, S5] {
+        s.push(store(&h, content, MemoryType::Pattern).await);
+    }
+
+    // (query, exact raw result as indices into S1..S5; retry would differ)
+    let table: [(&str, &[usize]); 3] = [
+        ("sqlite AND vec", &[2]),   // retry: S1 + S2
+        ("\"exact phrase\"", &[3]), // retry: S3 + S4
+        ("vec*", &[2, 5]),          // retry: S2 only
+    ];
+    for (input, expected) in table {
+        let outcome = h
+            .service
+            .search(query(input, None))
+            .await
+            .unwrap_or_else(|e| panic!("{input:?} is valid FTS5: {e:?}"));
+        assert_eq!(outcome.search_mode, SearchMode::Keyword);
+        let mut got = ids(&outcome.results);
+        got.sort_unstable();
+        let mut want: Vec<i64> = expected.iter().map(|i| s[i - 1]).collect();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "{input:?} must run raw, not as a sanitized retry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_broken_fts_index_in_keyword_mode_is_the_generic_internal_error() {
+    // T-04-19 on the keyword-degrade path: the FTS index renamed away, the
+    // embedder down. The prepare-time "no such table" is never retried and
+    // reaches the caller only as SEARCH_STORAGE_FAILURE.
+    let h = harness(Arc::new(FakeEmbedder::failing()));
+    store(&h, "ledger reconciliation runbook", MemoryType::Pattern).await;
+    raw_conn(&h.db_path)
+        .execute_batch("ALTER TABLE memories_fts RENAME TO memories_fts_offline;")
+        .expect("rename fts table");
+
+    let err = h
+        .service
+        .search(query("ledger", None))
+        .await
+        .expect_err("a broken FTS index must fail keyword search");
+    assert!(
+        matches!(err, MemoryError::Internal(ref m) if m == SEARCH_STORAGE_FAILURE),
+        "keyword mode must surface the generic internal error, got {err:?}"
+    );
+    assert!(
+        !err.to_string().to_lowercase().contains("sqlite"),
+        "no SQLite text may reach the client: {err}"
+    );
 }
 
 #[tokio::test]
