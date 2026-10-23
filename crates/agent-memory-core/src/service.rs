@@ -10,8 +10,9 @@
 //! **The SEARCH-03 degrade seam lives HERE**, never in transports: an embed
 //! failure downgrades `store` to a pending row and routes `search` to the FTS5
 //! keyword path — and ONLY an embed failure triggers the fallback (an empty
-//! semantic result set is a valid `Semantic` answer).
+//! hybrid result set is a valid `Hybrid` answer).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::clock::Clock;
@@ -47,20 +48,60 @@ pub struct SearchArgs {
     pub scope: Option<String>,
     pub limit: Option<i64>,
     /// Attach 1-hop relation summaries to every returned row (MCP-07 / D-04).
-    /// Orthogonal to the search mode: applies on the semantic and the keyword
+    /// Orthogonal to the search mode: applies on the hybrid and the keyword
     /// path alike. `false` (the default) keeps the v1.0 envelope byte-identical.
     pub expand_links: bool,
 }
 
 /// Which search path produced a result set. Serialized lowercase — the shared
 /// wire form for MCP and REST (RESEARCH Open Question 3).
+///
+/// There is no `semantic` value any more: with the embedder up, every search
+/// is fused (SEARCH-04), so a semantic-only variant would have no producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
-    /// Ranked by Ollama embedding similarity blended with decay (SEARCH-02).
-    Semantic,
+    /// The embedder was available: the KNN leg and the bm25 keyword leg were
+    /// fused with Reciprocal Rank Fusion, then decay-blended (SEARCH-04/05).
+    Hybrid,
     /// FTS5 keyword fallback — the embedder was unavailable (SEARCH-03).
     Keyword,
+}
+
+/// Reciprocal Rank Fusion smoothing constant: the `k` in `1 / (k + rank)`,
+/// the Cormack & Clarke convention (SEARCH-04).
+///
+/// This is NOT the KNN oversample size or its cap (`MAX_KNN_K` in the SQLite
+/// store, 800). The two are different quantities that happen to both be
+/// called `k` in the literature, so neither is ever passed around as a bare
+/// `k` (RESEARCH Pitfall 2). Changing this reshapes every hybrid ranking.
+pub const RRF_K: f64 = 60.0;
+
+/// Fuse ranked id lists with Reciprocal Rank Fusion (SEARCH-04).
+///
+/// Each leg is a list of ids, best first. An id at 1-based rank `r` in a leg
+/// contributes `1 / (RRF_K + r)`, and an id that appears in several legs SUMS
+/// its contributions, so agreement between legs is rewarded: rank 2 in both
+/// legs (`2/62`) beats rank 1 in one leg (`1/61`). Only ranks matter, never
+/// the legs' raw scores, which is why bm25 values and cosine distances never
+/// need to be put on a common scale.
+///
+/// Output is sorted by fused score, descending (`total_cmp`), with ties
+/// broken by ascending id, so the result is deterministic regardless of hash
+/// order. Decay is NOT applied here: the caller blends it in once, after
+/// fusion (SEARCH-05 / RESEARCH Pitfall 1), so the legs must be pure
+/// relevance orderings.
+pub fn rrf_fuse(legs: &[Vec<i64>]) -> Vec<(i64, f64)> {
+    let mut scores: HashMap<i64, f64> = HashMap::new();
+    for leg in legs {
+        for (idx, id) in leg.iter().enumerate() {
+            let rank = idx as f64 + 1.0;
+            *scores.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + rank);
+        }
+    }
+    let mut fused: Vec<(i64, f64)> = scores.into_iter().collect();
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    fused
 }
 
 /// The ONE shared search envelope every transport serializes (MCP now, REST in
@@ -69,8 +110,8 @@ pub enum SearchMode {
 pub struct SearchOutcome {
     /// Which path produced `results` — surfaces degraded state to agents/users.
     pub search_mode: SearchMode,
-    /// Ranked result rows (may be empty; an empty semantic set is still
-    /// `Semantic` — only an embed failure switches the mode).
+    /// Ranked result rows (may be empty; an empty hybrid set is still
+    /// `Hybrid` — only an embed failure switches the mode).
     pub results: Vec<MemoryView>,
 }
 
@@ -166,22 +207,28 @@ impl MemoryService {
         Ok(views)
     }
 
-    /// Search the corpus (MCP-02 / SEARCH-02 / SEARCH-03 / D-04).
+    /// Search the corpus (MCP-02 / SEARCH-03 / SEARCH-04 / SEARCH-05 / D-04).
     ///
-    /// Semantic-first with graceful keyword fallback — **the degrade decision
+    /// Hybrid-first with graceful keyword fallback — **the degrade decision
     /// lives HERE at the embedder seam, never in transports**:
     ///
-    /// - Embed OK → vec0 KNN candidates (`spawn_blocking`), then in Rust blend
-    ///   `relevance × (1 − cosine_distance) + decay × decay_score` over the
-    ///   oversampled set, truncate to the limit, and return
-    ///   [`SearchMode::Semantic`]. An empty candidate set is a valid semantic
-    ///   answer (Pitfall 2: emptiness never means "fall back").
+    /// - Embed OK → [`Self::hybrid_candidates`]: the KNN leg and the bm25
+    ///   keyword leg run concurrently, both oversampled and both in pure
+    ///   relevance order. They are fused with [`rrf_fuse`], each fused score is
+    ///   multiplied by the pinned-aware decay score once, and the result is
+    ///   truncated to the limit and returned as [`SearchMode::Hybrid`]. An
+    ///   empty result is a valid hybrid answer (Pitfall 2: emptiness never
+    ///   means "fall back"). A leg error is never swallowed: a malformed
+    ///   MATCH is [`MemoryError::InvalidQuery`] here exactly as in keyword
+    ///   mode, so hybrid never silently serves semantic-only results (T-04-15).
     /// - Embed Err → one loud warning, then the UNCHANGED Phase-1 FTS5
     ///   bm25×decay path, returned as [`SearchMode::Keyword`]. A malformed FTS5
     ///   query error on this path maps exactly as before. Never an error and
     ///   never empty-because-of-outage (SEARCH-03).
     ///
-    /// Both paths fire the fire-and-forget recency bump on returned ids.
+    /// Both paths fire the fire-and-forget recency bump on the returned ids
+    /// only — never on fusion candidates or on expanded neighbors — and then
+    /// attach the 1-hop expansion when `expand_links` is set.
     pub async fn search(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
         // API-02 / D-01: validate before any embed hop — an out-of-bounds
         // limit rejects with MemoryError::InvalidArgument; the old silent
@@ -197,40 +244,14 @@ impl MemoryService {
         match self.embedder.embed(&query_input).await {
             Ok(mut vectors) if !vectors.is_empty() => {
                 let query_vec = vectors.swap_remove(0);
-                let store = self.store.clone();
-                let knn_args = args;
-                let candidates =
-                    tokio::task::spawn_blocking(move || store.knn_search(query_vec, knn_args))
-                        .await
-                        .map_err(MemoryError::Join)??;
+                // `args` moves into the legs here; `limit` and `expand_links`
+                // were captured above.
+                let fused = self.hybrid_candidates(query_vec, args, now).await?;
+                let results: Vec<MemoryView> = fused.into_iter().take(limit).collect();
 
-                // Similarity×decay blend in Rust over the small candidate set:
-                // cosine distance 0 = identical, so (1 - distance) grows with a
-                // better match — additive with the decay term like the FTS5
-                // blend (decay recomputed from last_accessed at `now`, STORE-03).
-                let mut scored: Vec<(MemoryView, f64)> = candidates
-                    .into_iter()
-                    .map(|(mut view, distance)| {
-                        let d = decay_score(
-                            now,
-                            view.last_accessed,
-                            cfg.half_life_secs,
-                            view.mem_type.is_pinned(),
-                        );
-                        view.decay_score = d;
-                        let blended = weights.relevance * (1.0 - distance) + weights.decay * d;
-                        (view, blended)
-                    })
-                    .collect();
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-                let results: Vec<MemoryView> = scored
-                    .into_iter()
-                    .take(limit)
-                    .map(|(view, _)| view)
-                    .collect();
-
-                // Bump ONLY the returned ids, before expansion runs — expanded
-                // neighbors are never passed here (D-06).
+                // Bump ONLY the returned ids — after truncation, so fusion
+                // candidates are never bumped (Pitfall 3 / T-04-17), and before
+                // expansion, so expanded neighbors are never bumped (D-06).
                 self.spawn_bump(results.iter().map(|v| v.id).collect(), now);
                 let results = if expand_links {
                     self.expand_related(results).await?
@@ -238,7 +259,7 @@ impl MemoryService {
                     results
                 };
                 Ok(SearchOutcome {
-                    search_mode: SearchMode::Semantic,
+                    search_mode: SearchMode::Hybrid,
                     results,
                 })
             }
@@ -364,6 +385,74 @@ impl MemoryService {
             imported,
             skipped_duplicates,
         })
+    }
+
+    /// The hybrid ranking (SEARCH-04/05), before truncation: every fusion
+    /// candidate, best first.
+    ///
+    /// 1. Both legs run concurrently on blocking threads: [`Store::knn_search`]
+    ///    (cosine-distance order) and [`Store::keyword_candidates`] (bm25
+    ///    order). Both are pure relevance and both oversample `limit * 4`.
+    /// 2. Errors propagate, the keyword leg's first: the KNN leg never parses
+    ///    the query, so checking the keyword leg first means a malformed MATCH
+    ///    is always [`MemoryError::InvalidQuery`] (REST 400 / MCP
+    ///    invalid_params), the same classification as keyword mode (T-04-15).
+    /// 3. The two id lists are fused with [`rrf_fuse`].
+    /// 4. Decay is applied exactly ONCE, post-fusion and multiplicatively:
+    ///    `final = rrf_score × decay_score(now, last_accessed, half_life,
+    ///    pinned)`. RRF scores are tiny (at most 2/61 ≈ 0.033) while decay is
+    ///    in (0, 1], so an additive term would drown relevance. Multiplying
+    ///    keeps "equal fused rank → the fresher memory wins" exact, and the
+    ///    pinned half-life keeps its advantage (Pitfall 1). Each view carries
+    ///    that same decay value on the wire.
+    /// 5. Sorted by the final score descending, ties by ascending id.
+    ///
+    /// Fusion is O(candidates) in memory over lists bounded by the KNN cap
+    /// (T-04-16). Nothing here bumps access stats.
+    async fn hybrid_candidates(
+        &self,
+        query_vec: Vec<f32>,
+        args: SearchArgs,
+        now: i64,
+    ) -> Result<Vec<MemoryView>, MemoryError> {
+        let cfg = self.decay_cfg;
+        let knn_store = self.store.clone();
+        let knn_args = args.clone();
+        let keyword_store = self.store.clone();
+        let keyword_args = args;
+        let (knn, keyword) = tokio::join!(
+            tokio::task::spawn_blocking(move || knn_store.knn_search(query_vec, knn_args)),
+            tokio::task::spawn_blocking(move || keyword_store.keyword_candidates(keyword_args)),
+        );
+        let keyword = keyword.map_err(MemoryError::Join)??;
+        let knn = knn.map_err(MemoryError::Join)??;
+
+        let knn_ids: Vec<i64> = knn.iter().map(|(view, _)| view.id).collect();
+        let keyword_ids: Vec<i64> = keyword.iter().map(|view| view.id).collect();
+        let mut views: HashMap<i64, MemoryView> = HashMap::new();
+        for view in knn.into_iter().map(|(view, _)| view).chain(keyword) {
+            views.entry(view.id).or_insert(view);
+        }
+
+        let mut scored: Vec<(MemoryView, f64)> = rrf_fuse(&[knn_ids, keyword_ids])
+            .into_iter()
+            .filter_map(|(id, rrf_score)| {
+                // Every fused id came from one of the two legs, so the lookup
+                // always hits; filter_map just avoids an unwrap.
+                views.remove(&id).map(|mut view| {
+                    let d = decay_score(
+                        now,
+                        view.last_accessed,
+                        cfg.half_life_secs,
+                        view.mem_type.is_pinned(),
+                    );
+                    view.decay_score = d;
+                    (view, rrf_score * d)
+                })
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.id.cmp(&b.0.id)));
+        Ok(scored.into_iter().map(|(view, _)| view).collect())
     }
 
     /// Attach 1-hop relation summaries to already-final result rows (MCP-07):
