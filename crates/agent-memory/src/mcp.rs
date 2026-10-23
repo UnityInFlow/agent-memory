@@ -1060,22 +1060,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_search_malformed_query_is_invalid_params_in_hybrid_mode() {
-        // T-04-15: the keyword leg's InvalidQuery is never swallowed in favor
-        // of the semantic leg's rows.
+    async fn memory_search_answers_queries_fts5_cannot_parse_in_hybrid_mode() {
+        // User decision option-a (T-04-15 revised): a query FTS5 cannot parse
+        // is answered in hybrid mode exactly as in keyword mode — never
+        // invalid_params, never internal_error, never SQLite text.
         let dir = tempfile::tempdir().expect("tempdir");
         let server = live_server(&dir);
         store_one(&server, "any searchable row").await;
-        let invalid_params_code = McpError::invalid_params("x", None).code;
 
-        for malformed in ["\"", "what is the plan?"] {
-            let err = server
+        for input in ["\"", "what is the plan?", "sqlite-vec"] {
+            let result = server
                 .memory_search(Parameters(search_args(serde_json::json!({
-                    "query": malformed
+                    "query": input
                 }))))
                 .await
-                .expect_err("a malformed MATCH is client input in hybrid mode");
-            assert_eq!(err.code, invalid_params_code, "{malformed:?}: {err:?}");
+                .unwrap_or_else(|e| panic!("{input:?} must be answered in hybrid mode: {e:?}"));
+            let raw = serde_json::to_string(&result).expect("tool result serializes");
+            assert!(!raw.contains("sqlite error"), "{input:?}: {raw}");
+            let body = result_json(&result);
+            assert_eq!(body["search_mode"], "hybrid", "{input:?}: {body}");
         }
     }
 

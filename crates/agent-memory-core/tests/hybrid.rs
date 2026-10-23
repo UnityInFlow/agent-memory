@@ -25,7 +25,9 @@ use agent_memory_core::domain::{LinkKind, MemoryError, MemoryType, NewMemory};
 use agent_memory_core::embed::{
     BoxFuture, EmbedError, Embedder, EmbedderHealth, FakeEmbedder, EMBEDDING_DIM,
 };
-use agent_memory_core::service::{rrf_fuse, MemoryService, SearchArgs, SearchMode, RRF_K};
+use agent_memory_core::service::{
+    rrf_fuse, MemoryService, SearchArgs, SearchMode, RRF_K, SEARCH_STORAGE_FAILURE,
+};
 use agent_memory_core::store::sqlite::SqliteStore;
 use agent_memory_core::store::Store;
 
@@ -451,8 +453,9 @@ async fn filters_that_exclude_everything_stay_hybrid() {
 // | Embed OK, both legs OK                 | fuse -> "hybrid"  (Test 2 above) |
 // | Embed OK, both legs empty              | [] still "hybrid" (Test 5 above) |
 // | Embed Err / empty batch                | unchanged v1.0 keyword path      |
-// | InvalidQuery from the keyword leg      | propagate (400 / invalid_params) |
-// | Internal SQLite error in either leg    | propagate (500 / internal_error) |
+// | Query FTS5 cannot parse (option-a)     | raw first, one sanitized retry;  |
+// |                                        | tokenless -> semantic-only       |
+// | Internal SQLite error in either leg    | propagate, redacted (500)        |
 // ---------------------------------------------------------------------------
 
 /// An embedder that answers with an EMPTY batch: the "invalid empty batch"
@@ -536,17 +539,22 @@ async fn an_empty_embed_batch_degrades_to_the_unchanged_v1_keyword_path() {
 }
 
 #[tokio::test]
-async fn a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword_mode() {
-    // T-04-15: the same input must classify the same way in every mode, never
-    // a 400 in one mode and a semantic-only 200 in the other. The KNN leg
-    // would happily answer these queries, so its rows must not leak out.
-    // FTS5 rejects bare punctuation too: a natural-language "?" query is
-    // client input in hybrid mode, exactly as it always was in keyword mode.
-    for malformed in ["\"unbalanced", "AND", "what is the plan?"] {
-        for (label, embedder) in [
-            ("hybrid", live(HashMap::new())),
+async fn queries_fts5_cannot_parse_succeed_identically_in_both_modes() {
+    // T-04-15 revised by user decision option-a (2026-10-23): the same input
+    // classifies the same way in every mode, and that classification is now
+    // "answered", never InvalidQuery and never a 500. The raw MATCH runs
+    // first; FTS5-unparseable input is retried once as its words OR-ed.
+    for input in [
+        "\"unbalanced",
+        "AND",
+        "what is the plan?",
+        "sqlite-vec",
+        "auth: tokens",
+    ] {
+        for (expected_mode, embedder) in [
+            (SearchMode::Hybrid, live(HashMap::new())),
             (
-                "keyword",
+                SearchMode::Keyword,
                 Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
             ),
         ] {
@@ -557,14 +565,48 @@ async fn a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword
                 MemoryType::Pattern,
             )
             .await;
-            let err = h
+            let outcome = h
                 .service
-                .search(query(malformed, None))
+                .search(query(input, None))
                 .await
-                .expect_err("a malformed MATCH must not succeed in any mode");
-            assert!(
-                matches!(err, MemoryError::InvalidQuery(ref q) if q == malformed),
-                "{label} mode: {malformed:?} must be InvalidQuery, got {err:?}"
+                .unwrap_or_else(|e| {
+                    panic!("{expected_mode:?} mode: {input:?} must be answered, got {e:?}")
+                });
+            assert_eq!(
+                outcome.search_mode, expected_mode,
+                "{input:?} must carry the mode's search_mode"
+            );
+        }
+    }
+
+    // The tracer slice: a hyphenated term and a punctuated question both
+    // recall the sqlite-vec memory first, with the embedder up or down.
+    for input in ["sqlite-vec", "what vector store do we use?"] {
+        for (expected_mode, embedder) in [
+            (SearchMode::Hybrid, live(HashMap::new())),
+            (
+                SearchMode::Keyword,
+                Arc::new(FakeEmbedder::failing()) as Arc<dyn Embedder>,
+            ),
+        ] {
+            let h = harness(embedder);
+            let m1 = store(
+                &h,
+                "We chose sqlite-vec for local vector similarity search",
+                MemoryType::Pattern,
+            )
+            .await;
+            store(&h, "auth tokens rotate every hour", MemoryType::Pattern).await;
+            let outcome = h
+                .service
+                .search(query(input, None))
+                .await
+                .unwrap_or_else(|e| panic!("{expected_mode:?}: {input:?} failed: {e:?}"));
+            assert_eq!(outcome.search_mode, expected_mode, "{input:?}");
+            assert_eq!(
+                ids(&outcome.results).first(),
+                Some(&m1),
+                "{expected_mode:?}: {input:?} must recall the sqlite-vec memory first"
             );
         }
     }
@@ -573,9 +615,10 @@ async fn a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword
 #[tokio::test]
 async fn an_internal_error_in_either_leg_propagates_and_never_serves_the_other_leg() {
     // Break one leg's index underneath a live store (renamed away, so the
-    // leg's SQL hits "no such table"): the search must fail with an internal
-    // Sqlite error (REST 500 / MCP internal_error), never quietly return the
-    // surviving leg's rows as a hybrid answer.
+    // leg's SQL hits "no such table"): the search must fail on the internal
+    // tier (REST 500 / MCP internal_error), never quietly return the
+    // surviving leg's rows as a hybrid answer. The error is redacted at the
+    // service seam (T-04-19): only SEARCH_STORAGE_FAILURE, no SQLite text.
     for leg_table in ["memories_fts", "vec_memories"] {
         let h = harness(live(HashMap::new()));
         store(&h, "ledger reconciliation runbook", MemoryType::Pattern).await;
@@ -591,8 +634,12 @@ async fn an_internal_error_in_either_leg_propagates_and_never_serves_the_other_l
             .await
             .expect_err("a broken leg must fail the search");
         assert!(
-            matches!(err, MemoryError::Sqlite(_)),
-            "with {leg_table} gone the search must surface an internal Sqlite error, got {err:?}"
+            matches!(err, MemoryError::Internal(ref m) if m == SEARCH_STORAGE_FAILURE),
+            "with {leg_table} gone the search must surface the generic internal error, got {err:?}"
+        );
+        assert!(
+            !err.to_string().to_lowercase().contains("sqlite"),
+            "no SQLite text may reach the client: {err}"
         );
     }
 }

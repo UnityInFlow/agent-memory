@@ -25,6 +25,40 @@ use crate::embed::Embedder;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
 
+/// The only message a client ever sees for a storage-tier search failure
+/// (T-04-19). The underlying error goes to the stderr log, never to a response
+/// body, so no SQLite text (table/column names, engine detail) leaks out of
+/// any search path. Both transports surface it on the internal tier (REST 500
+/// / MCP `internal_error`).
+pub const SEARCH_STORAGE_FAILURE: &str =
+    "search failed due to a storage error (details are in the server log)";
+
+/// Tier every search-path error for the wire — the ONE place this happens.
+///
+/// - Client tier (`InvalidType`, `InvalidQuery`, `InvalidArgument`) passes
+///   through: its text echoes only client input and public bounds.
+/// - Crate-authored internal text (`Internal`, `SchemaTooNew`) passes through.
+/// - Storage-engine errors (`Sqlite`, `Pool`, `Join`, `Migration`) are logged
+///   with full detail, then replaced by [`SEARCH_STORAGE_FAILURE`].
+///
+/// No catch-all arm: a new [`MemoryError`] variant must be tiered here at
+/// compile time.
+fn redact_search_error(e: MemoryError) -> MemoryError {
+    match e {
+        MemoryError::InvalidType(_)
+        | MemoryError::InvalidQuery(_)
+        | MemoryError::InvalidArgument(_) => e,
+        MemoryError::Internal(_) | MemoryError::SchemaTooNew { .. } => e,
+        MemoryError::Sqlite(_)
+        | MemoryError::Pool(_)
+        | MemoryError::Join(_)
+        | MemoryError::Migration(_) => {
+            tracing::error!(error = %e, "search failed with a storage error");
+            MemoryError::Internal(SEARCH_STORAGE_FAILURE.to_string())
+        }
+    }
+}
+
 /// Filters for [`MemoryService::list`]. All fields are optional; a `None` field
 /// disables that filter. `limit` caps the number of rows returned.
 #[derive(Debug, Clone, Default)]
@@ -38,8 +72,12 @@ pub struct ListArgs {
     pub expand_links: bool,
 }
 
-/// Arguments for [`MemoryService::search`]. `query` is the FTS5 MATCH string; the
-/// remaining fields are optional filters and a result cap.
+/// Arguments for [`MemoryService::search`]. `query` is plain natural language or
+/// FTS5 MATCH syntax: valid FTS5 runs exactly as written, anything FTS5 cannot
+/// parse is retried once as its words OR-ed together, and a query with no words
+/// contributes no keyword matches — it is never rejected for its syntax, in
+/// either mode (T-04-15 revised). The remaining fields are optional filters and
+/// a result cap.
 #[derive(Debug, Clone, Default)]
 pub struct SearchArgs {
     pub query: String,
@@ -218,18 +256,36 @@ impl MemoryService {
     ///   multiplied by the pinned-aware decay score once, and the result is
     ///   truncated to the limit and returned as [`SearchMode::Hybrid`]. An
     ///   empty result is a valid hybrid answer (Pitfall 2: emptiness never
-    ///   means "fall back"). A leg error is never swallowed: a malformed
-    ///   MATCH is [`MemoryError::InvalidQuery`] here exactly as in keyword
-    ///   mode, so hybrid never silently serves semantic-only results (T-04-15).
+    ///   means "fall back"). A leg's internal error is never swallowed, so
+    ///   hybrid never silently serves one leg's rows as a fused answer.
     /// - Embed Err → one loud warning, then the UNCHANGED Phase-1 FTS5
-    ///   bm25×decay path, returned as [`SearchMode::Keyword`]. A malformed FTS5
-    ///   query error on this path maps exactly as before. Never an error and
-    ///   never empty-because-of-outage (SEARCH-03).
+    ///   bm25×decay path, returned as [`SearchMode::Keyword`]. Never an error
+    ///   and never empty-because-of-outage (SEARCH-03).
+    ///
+    /// **Query handling is identical in both modes** (user decision option-a,
+    /// T-04-15 revised): both keyword paths share one store helper that runs
+    /// the raw FTS5 MATCH first, retries FTS5-unparseable input once as its
+    /// word tokens OR-ed together, and treats a tokenless query as no keyword
+    /// matches. Hybrid then answers from the semantic leg alone; keyword mode
+    /// returns an empty set. Search never returns [`MemoryError::InvalidQuery`].
     ///
     /// Both paths fire the fire-and-forget recency bump on the returned ids
     /// only — never on fusion candidates or on expanded neighbors — and then
     /// attach the 1-hop expansion when `expand_links` is set.
+    ///
+    /// Every error, from either arm and from the expansion, leaves through
+    /// [`redact_search_error`]: a storage failure reaches the client only as
+    /// [`MemoryError::Internal`] carrying [`SEARCH_STORAGE_FAILURE`], with the
+    /// detail in the stderr log (T-04-19).
     pub async fn search(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
+        self.search_unredacted(args)
+            .await
+            .map_err(redact_search_error)
+    }
+
+    /// The body of [`Self::search`], before its errors are tiered for the wire
+    /// by [`redact_search_error`].
+    async fn search_unredacted(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
         // API-02 / D-01: validate before any embed hop — an out-of-bounds
         // limit rejects with MemoryError::InvalidArgument; the old silent
         // zero-clamp is gone, so bad input never truncates quietly.
@@ -286,7 +342,7 @@ impl MemoryService {
                     apply_decay(view, now, &cfg);
                 }
 
-                // Same order as the semantic leg: bump the returned ids, then
+                // Same order as the hybrid path: bump the returned ids, then
                 // expand — neighbors are never bumped (D-06).
                 self.spawn_bump(views.iter().map(|v| v.id).collect(), now);
                 let views = if expand_links {
@@ -393,10 +449,12 @@ impl MemoryService {
     /// 1. Both legs run concurrently on blocking threads: [`Store::knn_search`]
     ///    (cosine-distance order) and [`Store::keyword_candidates`] (bm25
     ///    order). Both are pure relevance and both oversample `limit * 4`.
-    /// 2. Errors propagate, the keyword leg's first: the KNN leg never parses
-    ///    the query, so checking the keyword leg first means a malformed MATCH
-    ///    is always [`MemoryError::InvalidQuery`] (REST 400 / MCP
-    ///    invalid_params), the same classification as keyword mode (T-04-15).
+    /// 2. Errors propagate, the keyword leg's first, so which internal error
+    ///    surfaces is deterministic when both legs fail. The keyword leg never
+    ///    fails on query syntax: it shares the keyword-mode helper (raw MATCH
+    ///    first, one sanitized OR-of-words retry, tokenless → no candidates),
+    ///    so classification is identical in both modes (T-04-15 revised). A
+    ///    tokenless query fuses the KNN leg alone.
     /// 3. The two id lists are fused with [`rrf_fuse`].
     /// 4. Decay is applied exactly ONCE, post-fusion and multiplicatively:
     ///    `final = rrf_score × decay_score(now, last_accessed, half_life,

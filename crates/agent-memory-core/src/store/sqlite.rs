@@ -318,24 +318,107 @@ fn corrupt_column(what: &str, value: &str) -> rusqlite::Error {
     )
 }
 
-/// Classify a post-bind FTS5 execution error at the store seam: a MATCH string
-/// FTS5 cannot parse is CLIENT input → [`MemoryError::InvalidQuery`]; anything
-/// else stays an internal [`MemoryError::Sqlite`].
+/// FTS5 query-parse markers, matched against the SQLite error message.
 ///
-/// Observed FTS5 query-parse messages from the bundled SQLite: a lone `"`
-/// reports `unterminated string`; other malformed expressions (dangling
-/// operators, bad NEAR syntax, …) report `fts5: syntax error`. The regression
-/// test in `tests/fallback.rs` defines correctness; the string markers serve it.
+/// - `fts5: ` covers `fts5: syntax error near …` (bare punctuation, a dangling
+///   `AND`, an empty query) and `fts5: parser stack overflow` (deep nesting).
+/// - `unterminated string`: an unbalanced `"`.
+/// - `no such column`: a hyphen or colon makes FTS5 read a column filter
+///   (`sqlite-vec` → column `vec`), which fails on the one-column table.
+/// - `unknown special query`: a leading `*`.
+/// - `expected integer`: a non-numeric `NEAR(…, x)` distance.
 ///
-/// Only errors surfacing AFTER the MATCH parameter is bound (statement step /
-/// row iteration) go through here — a `conn.prepare` failure (e.g. missing
-/// fts5 module) is an internal error, not client input.
-fn map_fts_query_error(query: &str, e: rusqlite::Error) -> MemoryError {
-    let msg = e.to_string();
-    if msg.contains("fts5: syntax error") || msg.contains("unterminated string") {
-        MemoryError::InvalidQuery(query.to_string())
+/// Only FTS5 query-parse messages belong here, never a generic SQLite message
+/// (T-04-22): a marker match is what licenses the sanitized retry.
+const FTS5_QUERY_PARSE_MARKERS: [&str; 5] = [
+    "fts5: ",
+    "unterminated string",
+    "no such column",
+    "unknown special query",
+    "expected integer",
+];
+
+/// Is `e` FTS5 rejecting the bound MATCH string as client input?
+///
+/// True only when the error is a `SqliteFailure` whose primary result code is
+/// `SQLITE_ERROR` AND whose message carries one of
+/// [`FTS5_QUERY_PARSE_MARKERS`]. The message is read from the failure's detail
+/// string, falling back to the error's `Display`.
+///
+/// Invariant: this is only ever handed errors raised AFTER a static statement
+/// prepared successfully (statement step / row iteration), so every table and
+/// column the SQL names exists. A `no such column` here can therefore only
+/// come from FTS5 parsing a column filter out of the MATCH string on the
+/// single-column `memories_fts(content)` table. Prepare-time failures (a
+/// missing table, a missing fts5 module) never reach this function.
+fn is_match_input_error(e: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(code, detail) = e else {
+        return false;
+    };
+    if code.extended_code & 0xff != rusqlite::ffi::SQLITE_ERROR {
+        return false;
+    }
+    let msg = detail.clone().unwrap_or_else(|| e.to_string());
+    FTS5_QUERY_PARSE_MARKERS
+        .iter()
+        .any(|marker| msg.contains(marker))
+}
+
+/// Rewrite `raw` as an FTS5 expression that always parses: its word tokens,
+/// each quoted as an FTS5 string, joined with ` OR ` (order preserved, no
+/// dedupe, no cap).
+///
+/// A token is a maximal run of `char::is_alphanumeric` or `_` characters;
+/// every other character splits. Tokens therefore cannot contain `"`, but any
+/// embedded quote is doubled anyway, as FTS5 string syntax requires. Returns
+/// `None` when no token remains (empty, punctuation-only, `*`): the keyword
+/// leg then has nothing to match.
+fn sanitize_fts_query(raw: &str) -> Option<String> {
+    let terms: Vec<String> = raw
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| format!("\"{}\"", piece.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        None
     } else {
-        MemoryError::Sqlite(e)
+        Some(terms.join(" OR "))
+    }
+}
+
+/// Run a keyword MATCH raw first, with ONE sanitized retry (user decision
+/// option-a, 2026-10-23; T-04-15 revised).
+///
+/// - `run(raw)` succeeds → its rows. Valid structured FTS5 syntax (`AND`,
+///   quoted phrases, `prefix*`) therefore keeps its exact meaning.
+/// - `run(raw)` fails with an FTS5 query-parse error ([`is_match_input_error`])
+///   → the query is retried once as [`sanitize_fts_query`]. A tokenless query
+///   is an empty answer, never an error. Any failure of the retry is a server
+///   fault ([`MemoryError::Sqlite`]): the sanitized form parses by
+///   construction.
+/// - `run(raw)` fails any other way → [`MemoryError::Sqlite`].
+///
+/// Both [`Store::search`] (the keyword-degrade path) and
+/// [`Store::keyword_candidates`] (the hybrid keyword leg) go through here, so a
+/// query classifies identically with the embedder up or down.
+fn match_with_sanitized_retry(
+    raw: &str,
+    mut run: impl FnMut(&str) -> Result<Vec<MemoryView>, rusqlite::Error>,
+) -> Result<Vec<MemoryView>, MemoryError> {
+    match run(raw) {
+        Ok(rows) => Ok(rows),
+        Err(e) if is_match_input_error(&e) => {
+            // Log the size only: the query text is user content.
+            tracing::debug!(
+                query_chars = raw.chars().count(),
+                "FTS5 could not parse the search query; retrying with its words OR-ed"
+            );
+            match sanitize_fts_query(raw) {
+                None => Ok(Vec::new()),
+                Some(fallback) => run(&fallback).map_err(MemoryError::Sqlite),
+            }
+        }
+        Err(e) => Err(MemoryError::Sqlite(e)),
     }
 }
 
@@ -552,7 +635,7 @@ impl Store for SqliteStore {
         // half-life for pinned types (DECISION/ARCHITECTURE/CONSTRAINT, D-08).
         // All params bound — the FTS5 MATCH string is never concatenated (T-02-01).
         // The tag filter is an exact, case-sensitive json_each equality
-        // (API-03 / D-07); the FTS5 error routing below is untouched.
+        // (API-03 / D-07); the FTS5 MATCH retry below is unaffected by it.
         let mut stmt = conn.prepare(
             "SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
                     m.base_weight, m.decay_score, m.access_count, m.created_at, \
@@ -573,34 +656,32 @@ impl Store for SqliteStore {
              LIMIT ?9",
         )?;
 
-        let rows = stmt.query_map(
-            params![
-                args.query,
-                mem_type_filter,
-                args.scope,
-                weights.relevance,
-                weights.decay,
-                now,
-                cfg.half_life_secs,
-                pinned_hl,
-                limit,
-                args.tag,
-            ],
-            row_to_view,
-        );
-
-        // A malformed FTS5 MATCH string surfaces at step time (the bound MATCH
-        // parses on execution, not prepare) and is mapped HERE, at the store
-        // seam, to MemoryError::InvalidQuery via map_fts_query_error — which
-        // both transports surface as a client error (REST 400 / MCP
-        // invalid_params), never a panic and never a 500 (T-02-02, WR-05).
-        // A valid query that matches nothing yields an empty vec.
-        let rows = rows.map_err(|e| map_fts_query_error(&args.query, e))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| map_fts_query_error(&args.query, e))?);
-        }
-        Ok(out)
+        // The bound MATCH string parses at step time, not at prepare, so an
+        // FTS5 parse error surfaces inside `run`. Revised T-04-15 (option-a):
+        // the raw query runs first, so structured FTS5 syntax keeps its
+        // meaning; FTS5-unparseable client input gets one sanitized retry; a
+        // tokenless query is an empty vec. This is the same helper the hybrid
+        // keyword leg uses, so both modes are equally forgiving. A valid query
+        // that matches nothing yields an empty vec.
+        let run = |match_query: &str| -> Result<Vec<MemoryView>, rusqlite::Error> {
+            stmt.query_map(
+                params![
+                    match_query,
+                    mem_type_filter,
+                    args.scope,
+                    weights.relevance,
+                    weights.decay,
+                    now,
+                    cfg.half_life_secs,
+                    pinned_hl,
+                    limit,
+                    args.tag,
+                ],
+                row_to_view,
+            )?
+            .collect()
+        };
+        match_with_sanitized_retry(&args.query, run)
     }
 
     fn keyword_candidates(&self, args: SearchArgs) -> Result<Vec<MemoryView>, MemoryError> {
@@ -614,7 +695,7 @@ impl Store for SqliteStore {
         // ascending order is best first, with no negation and no decay term.
         // Decay is applied once by the service, after fusion. The id tie-break
         // keeps the leg deterministic. FROM/JOIN, filters and the
-        // map_fts_query_error routing are copied from `search`, and every
+        // match_with_sanitized_retry routing are copied from `search`, and every
         // value is bound, never concatenated (T-04-18).
         let mut stmt = conn.prepare(
             "SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
@@ -631,19 +712,18 @@ impl Store for SqliteStore {
              LIMIT ?5",
         )?;
 
-        let rows = stmt.query_map(
-            params![args.query, mem_type_filter, args.scope, args.tag, fetch],
-            row_to_view,
-        );
-
-        // A malformed MATCH surfaces at step time, as on `search`: it is
-        // client input (InvalidQuery), never an internal error (T-04-15).
-        let rows = rows.map_err(|e| map_fts_query_error(&args.query, e))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| map_fts_query_error(&args.query, e))?);
-        }
-        Ok(out)
+        // Revised T-04-15 (option-a): the same raw-first, one-sanitized-retry
+        // helper as `search`, so a query classifies identically with the
+        // embedder up or down. An FTS5-unparseable query never fails the leg,
+        // and a tokenless one contributes no keyword candidates.
+        let run = |match_query: &str| -> Result<Vec<MemoryView>, rusqlite::Error> {
+            stmt.query_map(
+                params![match_query, mem_type_filter, args.scope, args.tag, fetch],
+                row_to_view,
+            )?
+            .collect()
+        };
+        match_with_sanitized_retry(&args.query, run)
     }
 
     fn forget(&self, id: i64) -> Result<bool, MemoryError> {

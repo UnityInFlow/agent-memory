@@ -198,24 +198,31 @@ async fn rest_end_to_end_store_list_search_forget_health() {
         "search results must contain the stored id {id}, got: {body}"
     );
 
-    // POST /api/search with a malformed FTS5 query (a lone double-quote) in
-    // keyword mode → 400 with an error body — CLIENT input, never a 500.
-    let resp = client
-        .post(format!("{base}/api/search"))
-        .json(&serde_json::json!({ "query": "\"" }))
-        .send()
-        .await
-        .expect("malformed-query search request");
-    assert_eq!(
-        resp.status(),
-        400,
-        "malformed FTS5 query must map to 400, never 500"
-    );
-    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
-    assert!(
-        body.get("error").and_then(|e| e.as_str()).is_some(),
-        "400 body must carry an error field, got: {body}"
-    );
+    // POST /api/search with queries FTS5 cannot parse, in keyword mode (user
+    // decision option-a): a lone double-quote (no word tokens → empty answer)
+    // and a hyphenated term (read by FTS5 as a column filter → retried with
+    // its words) are both 200 with a results array — never a 400, never a
+    // 500, and never SQLite text in the response.
+    for input in ["\"", "sqlite-vec"] {
+        let resp = client
+            .post(format!("{base}/api/search"))
+            .json(&serde_json::json!({ "query": input }))
+            .send()
+            .await
+            .expect("unparseable-query search request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "{input:?} must be answered in keyword mode, never rejected"
+        );
+        let text = resp.text().await.expect("search body reads");
+        assert!(!text.contains("sqlite error"), "{input:?}: {text}");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("200 body is JSON");
+        assert!(
+            body.get("results").and_then(|r| r.as_array()).is_some(),
+            "{input:?}: 200 body must carry a results array, got: {body}"
+        );
+    }
 
     // POST /api/search with limit 0 → 400 carrying the valid range (API-02) —
     // realism-only proof over real HTTP; the coverage-bearing tests are the
