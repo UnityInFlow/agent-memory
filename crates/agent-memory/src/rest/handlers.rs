@@ -65,6 +65,10 @@ pub struct SearchRequest {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Attach 1-hop `related` summaries to each row (MCP-07). Omitted = false
+    /// (the v1.0 response, byte-identical).
+    #[serde(default)]
+    pub expand_links: bool,
 }
 
 /// Query string for `GET /api/memories` — mirrors `mcp::ListArgs`.
@@ -82,6 +86,10 @@ pub struct ListQuery {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Attach 1-hop `related` summaries to each row (MCP-07). Omitted = false
+    /// (the v1.0 response, byte-identical).
+    #[serde(default)]
+    pub expand_links: bool,
 }
 
 /// Body for `PATCH /api/memories/{id}` — mirrors `mcp::UpdateArgs` field for
@@ -197,7 +205,7 @@ pub async fn store_handler(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response())
 }
 
-/// `GET /api/memories?type=&tag=&scope=&limit=` → 200 `Vec<MemoryView>`.
+/// `GET /api/memories?type=&tag=&scope=&limit=&expand_links=` → 200 `Vec<MemoryView>`.
 pub async fn list_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
@@ -211,6 +219,7 @@ pub async fn list_handler(
             tag: q.tag,
             scope: q.scope,
             limit: q.limit,
+            expand_links: q.expand_links,
         })
         .await
         .map_err(map_memory_error)?;
@@ -235,6 +244,7 @@ pub async fn search_handler(
             tag: req.tag,
             scope: req.scope,
             limit: req.limit,
+            expand_links: req.expand_links,
         })
         .await
         .map_err(map_memory_error)?;
@@ -526,6 +536,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: None,
+                expand_links: false,
             }),
         )
         .await
@@ -544,6 +555,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: None,
+                expand_links: false,
             }),
         )
         .await
@@ -574,6 +586,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: Some(10),
+                expand_links: false,
             }),
         )
         .await
@@ -610,6 +623,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: None,
+                expand_links: false,
             }),
         )
         .await
@@ -646,6 +660,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: Some(0),
+                expand_links: false,
             }),
         )
         .await
@@ -701,6 +716,7 @@ mod tests {
                 tag: None,
                 scope: None,
                 limit: Some(-5),
+                expand_links: false,
             }),
         )
         .await
@@ -1180,6 +1196,87 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn expand_links_from_raw_query_and_body_on_list_and_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "pulsar effect").await;
+        let b = stored_id(&state, "pulsar cause").await;
+        let resp = link_raw(
+            &state,
+            &format!(r#"{{"from_id": {a}, "to_id": {b}, "kind": "caused_by"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let list_raw = |raw_query: &'static str| {
+            let state = state.clone();
+            async move {
+                let uri: axum::http::Uri = format!("/api/memories{raw_query}")
+                    .parse()
+                    .expect("uri parses");
+                let query = Query::<ListQuery>::try_from_uri(&uri).expect("query parses");
+                list_handler(State(state), query)
+                    .await
+                    .expect("list succeeds")
+                    .into_response()
+            }
+        };
+
+        // GET /api/memories?expand_links=true
+        let rows = body_json(list_raw("?expand_links=true").await).await;
+        let rows = rows.as_array().expect("array");
+        let effect = rows.iter().find(|r| r["id"] == a).expect("effect row");
+        assert_eq!(effect["related"][0]["id"], b);
+        assert_eq!(effect["related"][0]["kind"], "caused_by");
+        assert_eq!(effect["related"][0]["direction"], "out");
+        let cause = rows.iter().find(|r| r["id"] == b).expect("cause row");
+        assert_eq!(cause["related"][0]["kind"], "caused");
+        assert_eq!(cause["related"][0]["direction"], "in");
+
+        // Absent or false: the v1.0 rows, no related member.
+        for q in ["", "?expand_links=false"] {
+            let rows = body_json(list_raw(q).await).await;
+            assert!(
+                rows.as_array()
+                    .expect("array")
+                    .iter()
+                    .all(|r| r.get("related").is_none()),
+                "{q:?}"
+            );
+        }
+
+        // A non-boolean query value is rejected by the typed extractor.
+        let uri: axum::http::Uri = "/api/memories?expand_links=yes".parse().expect("uri");
+        assert!(Query::<ListQuery>::try_from_uri(&uri).is_err());
+
+        // POST /api/search with a raw JSON body.
+        let search_raw = |raw: &'static str| {
+            let state = state.clone();
+            async move {
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/search")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(raw))
+                    .expect("request builds");
+                let Json(body) = Json::<SearchRequest>::from_request(req, &())
+                    .await
+                    .expect("body parses");
+                search_handler(State(state), Json(body))
+                    .await
+                    .expect("search succeeds")
+                    .into_response()
+            }
+        };
+        let body =
+            body_json(search_raw(r#"{"query": "effect", "expand_links": true}"#).await).await;
+        assert_eq!(body["search_mode"], "keyword");
+        assert_eq!(body["results"][0]["related"][0]["id"], b);
+        let body = body_json(search_raw(r#"{"query": "effect"}"#).await).await;
+        assert!(body["results"][0].get("related").is_none(), "{body}");
+    }
+
     /// The real router over a loopback listener: route wiring, the
     /// `{from_id}/{to_id}/{kind}` path extractor and the JSON body all run
     /// exactly as they do in `serve-rest`.
@@ -1212,6 +1309,23 @@ mod tests {
             .await
             .expect("POST /api/links");
         assert_eq!(resp.status().as_u16(), 200);
+
+        let rows: serde_json::Value = client
+            .get(format!("{base}/api/memories?expand_links=true"))
+            .send()
+            .await
+            .expect("GET /api/memories?expand_links=true")
+            .json()
+            .await
+            .expect("json rows");
+        let newer = rows
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|r| r["id"] == a)
+            .expect("row a");
+        assert_eq!(newer["related"][0]["id"], b);
+        assert_eq!(newer["related"][0]["kind"], "supersedes");
 
         let resp = client
             .delete(format!("{base}/api/links/{a}/{b}/blocks"))

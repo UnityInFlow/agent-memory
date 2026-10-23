@@ -101,15 +101,17 @@ Drop the same block into each agent runtime's MCP config; because they open the
 same `AGENT_MEMORY_DB` file (WAL-mode SQLite with a serialized writer), a memory
 stored in one is immediately retrievable in another.
 
-## The five tools
+## The seven tools
 
 | Tool | Purpose | Validated parameters |
 |------|---------|----------------------|
 | `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
-| `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive) |
-| `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive) |
+| `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
+| `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_update` | Patch a memory in place by id — content, tags, scope, TTL (clean not-found for unknown ids). | `content`: never null or empty. `ttl_secs`: 1–3155760000 when set; `null` = no expiry. At least one field besides `id` |
-| `memory_forget` | Delete a memory by id (clean not-found for unknown ids). | — |
+| `memory_link` | Link two memories with a typed, directed relation (idempotent; clean not-found for unknown ids). | `kind`: one of `relates_to`, `supersedes`, `caused_by`. `from_id` ≠ `to_id` |
+| `memory_unlink` | Remove a relation (clean not-found when no such edge exists). | `kind`: one of `relates_to`, `supersedes`, `caused_by` |
+| `memory_forget` | Delete a memory by id (clean not-found for unknown ids). Its relations go with it. | — |
 
 Out-of-bounds values are rejected as client errors (`invalid_params` over MCP)
 with a message naming the field, the valid range, and the offending value —
@@ -161,6 +163,9 @@ matches whole tags exactly and case-sensitively.
 
 A present `limit` must be between 1 and 200 (omitted returns everything); a
 `tag` filter matches an exact tag (case-sensitive).
+
+Both `memory_search` and `memory_list` accept `"expand_links": true` to attach
+each result's linked memories — see [Relations](#relations-memory_link--memory_unlink).
 
 ### `memory_forget`
 
@@ -216,6 +221,73 @@ returns — plus `embedding_status`:
 For an unknown id the result is `{ "id": 42, "updated": false, "reason": "not_found" }`
 — a normal tool result, not an error.
 
+### Relations (`memory_link` / `memory_unlink`)
+
+Connect memories with flat, typed relations — no graph model, just one directed
+edge `from_id -[kind]-> to_id` per link:
+
+| `kind` | Reads as | Seen from `to_id` (expansion) |
+|--------|----------|-------------------------------|
+| `relates_to` | `from_id` relates to `to_id` (symmetric "see also") | `relates_to` |
+| `supersedes` | `from_id` replaces the older `to_id` | `superseded_by` |
+| `caused_by` | `from_id` was caused by `to_id` | `caused` |
+
+```json
+{ "from_id": 57, "to_id": 42, "kind": "supersedes" }
+```
+
+`memory_link` returns `{ "from_id": 57, "to_id": 42, "kind": "supersedes", "linked": true }`.
+
+- **Idempotent.** Linking the same `(from_id, to_id, kind)` again is a no-op
+  success — safe to retry. A different `kind` between the same pair is a
+  separate relation.
+- **Rejected as `invalid_params`:** a self-link (`from_id and to_id must differ
+  (got 57)`) and an unknown kind (`kind must be one of relates_to, supersedes,
+  caused_by (got 'blocks')`).
+- **Unknown ids are a clean not-found:** `{ ..., "linked": false, "reason":
+  "not_found", "missing_id": 42 }` names the id that does not exist. Nothing is
+  written.
+
+`memory_unlink` takes the same three fields; direction and kind must match the
+stored edge. It returns `"unlinked": true`, or `"unlinked": false, "reason":
+"not_found"` when no such edge exists.
+
+**Relations never outlive their memories.** Forgetting a memory, or its TTL
+expiring, removes every relation touching it in the same transaction.
+
+**Expansion.** Pass `"expand_links": true` to `memory_search` or
+`memory_list` and every result gains a `related` list of trimmed 1-hop
+summaries, following relations in both directions:
+
+```json
+{ "id": 42, "content": "...", "type": "DECISION", "...": "...",
+  "related": [
+    { "id": 57, "kind": "superseded_by", "direction": "in",
+      "type": "DECISION", "snippet": "Maven group is io.github.unityinflow (Sonatype-verified).", "tags": ["maven"] }
+  ] }
+```
+
+- `direction` is `out` when the result is the relation's `from_id` and `in`
+  when it is the `to_id`; `kind` reads naturally from the result's side (the
+  table above).
+- `snippet` is the neighbor's content cut to 160 characters, with a trailing
+  `…` when cut. Fetch the neighbor by id if you need all of it.
+- At most `MAX_EXPANDED_LINKS = 10` neighbors per result; when a memory has
+  more, the most recently created relations win.
+- Expansion is strictly one hop and a pure read: neighbors are **not**
+  recency-bumped, so expanding never changes how anything decays.
+- A result with no relations gets `"related": []`. Without the flag there is no
+  `related` member at all — the response is exactly the v0.0.1 shape.
+
+#### Bounds
+
+| Bound | Value | Applies to |
+|-------|-------|------------|
+| `limit` | 1–200 (`MAX_LIMIT`) | `memory_search` (default 50), `memory_list` (default unlimited) |
+| `ttl_secs` | 1–3155760000 (~100 years) | `memory_store`, `memory_update` |
+| `MAX_EXPANDED_LINKS` | 10 neighbors per result, most recent first | `expand_links` on search and list |
+| snippet length | 160 characters (+ `…` when cut) | `related[].snippet` |
+
 ## Semantic search (optional Ollama)
 
 Out of the box, search uses SQLite FTS5 keyword ranking — fully offline, no
@@ -256,10 +328,12 @@ agent-memory serve-rest --addr 127.0.0.1:8080 # custom loopback bind
 | Method | Path | Purpose | Validated parameters |
 |--------|------|---------|----------------------|
 | `POST` | `/api/memories` | Store a memory (same fields as `memory_store`) | `ttl_secs`: 1–3155760000 when present; omitted = no expiry |
-| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit` query params | `limit`: 1–200 when present; omitted = unlimited. `tag`: exact tag (case-sensitive) |
-| `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope | `limit`: 1–200 when present; omitted defaults to 50. `tag`: exact tag (case-sensitive) |
+| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit`/`expand_links` query params | `limit`: 1–200 when present; omitted = unlimited. `tag`: exact tag (case-sensitive). `expand_links=true` attaches `related` summaries |
+| `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope | `limit`: 1–200 when present; omitted defaults to 50. `tag`: exact tag (case-sensitive). `"expand_links": true` attaches `related` summaries |
 | `PATCH` | `/api/memories/{id}` | Update in place — JSON merge-patch body with the same fields and semantics as `memory_update`; 200 returns the updated memory with `embedding_status` | as `memory_update`; 404 `{"id", "updated": false, "reason": "not_found"}` for unknown ids |
 | `DELETE` | `/api/memories/{id}` | Forget by id (404 with a structured body for unknown ids) | — |
+| `POST` | `/api/links` | Link — JSON body `{from_id, to_id, kind}`, same semantics as `memory_link`; 200 (also for a duplicate) | 400 for a self-link, an unknown `kind` or a bad body; 404 `{..., "linked": false, "reason": "not_found", "missing_id"}` for unknown ids |
+| `DELETE` | `/api/links/{from_id}/{to_id}/{kind}` | Unlink — same semantics as `memory_unlink` | 400 for an unknown `kind`; 404 `{..., "unlinked": false, "reason": "not_found"}` when no such edge exists |
 | `GET` | `/health` | Liveness + embedder reachability status | — |
 
 Out-of-bounds `limit`/`ttl_secs` values return **HTTP 400** with a JSON body
@@ -275,6 +349,12 @@ without `Content-Type: application/json` is also a 400 with the same
 curl -X PATCH localhost:7437/api/memories/42 \
   -H 'content-type: application/json' \
   -d '{"tags": ["maven"], "ttl_secs": null}'
+
+curl -X POST localhost:7437/api/links \
+  -H 'content-type: application/json' \
+  -d '{"from_id": 57, "to_id": 42, "kind": "supersedes"}'
+
+curl 'localhost:7437/api/memories?type=DECISION&expand_links=true'
 ```
 
 The REST daemon and the MCP stdio server can run concurrently against the same

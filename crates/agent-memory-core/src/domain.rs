@@ -147,6 +147,55 @@ pub enum LinkOutcome {
     NotFound { missing_id: i64 },
 }
 
+/// Which way a [`RelatedLink`] edge points, seen from the result it is
+/// attached to: `out` = the result is the edge's `from_id`, `in` = the
+/// result is its `to_id` (D-03 / D-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkDirection {
+    Out,
+    In,
+}
+
+/// A trimmed 1-hop neighbor summary attached to a search/list result when
+/// `expand_links` is set (MCP-07 / D-05) — enough for an agent to decide
+/// whether to fetch the neighbor, never the full view.
+///
+/// `kind` is the direction-aware natural label: the stored kind for an
+/// outgoing edge, [`LinkKind::reverse_label`] for an incoming one (so an
+/// incoming `supersedes` reads `superseded_by`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RelatedLink {
+    /// The neighbor memory's id.
+    pub id: i64,
+    /// Natural relation label from the anchor's point of view.
+    pub kind: String,
+    /// `out` (anchor → neighbor) or `in` (neighbor → anchor).
+    pub direction: LinkDirection,
+    /// The neighbor's memory type.
+    #[serde(rename = "type")]
+    pub mem_type: MemoryType,
+    /// The neighbor's content, cut to [`RELATED_SNIPPET_CHARS`] characters
+    /// (with a trailing `…` when cut).
+    pub snippet: String,
+    /// The neighbor's tags.
+    pub tags: Vec<String>,
+}
+
+/// Maximum characters of neighbor content carried in a [`RelatedLink`]
+/// snippet (D-05). Counted in Unicode scalar values, so a cut never splits a
+/// UTF-8 codepoint.
+pub const RELATED_SNIPPET_CHARS: usize = 160;
+
+/// Cut `content` to [`RELATED_SNIPPET_CHARS`] characters on a char boundary,
+/// appending `…` only when something was cut.
+pub fn snippet(content: &str) -> String {
+    match content.char_indices().nth(RELATED_SNIPPET_CHARS) {
+        Some((byte_idx, _)) => format!("{}…", &content[..byte_idx]),
+        None => content.to_string(),
+    }
+}
+
 /// Input shape for storing a new memory (D-05).
 ///
 /// Only `content` and `mem_type` are conceptually required at the service boundary;
@@ -180,6 +229,11 @@ pub struct Memory {
 }
 
 /// The read/return shape exposed over the tool boundary (D-06).
+///
+/// INVARIANT — field order is wire order: serde emits members in declaration
+/// order, and the v1.0 envelope (`id`, `content`, `type`, `tags`, `scope`,
+/// `decay_score`, `created_at`, `last_accessed`) is a golden-tested contract.
+/// New fields append at the end and must be skipped when absent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MemoryView {
     pub id: i64,
@@ -191,6 +245,13 @@ pub struct MemoryView {
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed: i64,
+    /// 1-hop relation summaries (MCP-07 / D-04, D-05): `Some` only when the
+    /// caller asked for `expand_links` (an explicit `[]` when the memory has
+    /// no edges), `None` otherwise. `None` is SKIPPED on the wire, so a
+    /// flag-less search/list envelope stays byte-identical to v1.0
+    /// (RESEARCH Pitfall 7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related: Option<Vec<RelatedLink>>,
 }
 
 /// A JSON-merge-patch for `memory_update` (MCP-06 / D-08).
@@ -251,6 +312,13 @@ pub const MIN_TTL_SECS: i64 = 1;
 /// Keeps `now + ttl_secs` far below `i64::MAX`, so the `expires_at`
 /// arithmetic can never overflow (RESEARCH Pitfall 1).
 pub const MAX_TTL_SECS: i64 = 3_155_760_000;
+
+/// Hard cap on the 1-hop neighbors attached to ONE search/list result when
+/// `expand_links` is set (MCP-07 / D-07). Overflow keeps the most recent
+/// edges (`memory_links.created_at` descending). Fixed — there is no
+/// caller-tunable knob in v0.1.0. Together with [`MAX_LIMIT`] it bounds an
+/// expanded response at `200 × 10` summaries (T-04-11).
+pub const MAX_EXPANDED_LINKS: usize = 10;
 
 /// The library's typed error. `thiserror` per the ecosystem rule (libraries use
 /// `thiserror`; the binary uses `anyhow` at its edges).

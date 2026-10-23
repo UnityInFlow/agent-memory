@@ -95,6 +95,14 @@ pub struct ListArgs {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Attach up to 10 one-hop related memories to each result as
+    /// `related: [{id, kind, direction, type, snippet, tags}]`. `direction` is
+    /// `out` (this memory -> neighbor) or `in` (neighbor -> this memory);
+    /// `kind` reads naturally from this memory's side (an incoming supersedes
+    /// is `superseded_by`, an incoming caused_by is `caused`). Most recent
+    /// links first. Defaults to false (no `related` member at all).
+    #[serde(default)]
+    pub expand_links: bool,
 }
 
 /// Arguments for `memory_search` (D-04/D-06). `query` is the FTS5 keyword string;
@@ -115,6 +123,14 @@ pub struct SearchArgs {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Attach up to 10 one-hop related memories to each result as
+    /// `related: [{id, kind, direction, type, snippet, tags}]`. `direction` is
+    /// `out` (this memory -> neighbor) or `in` (neighbor -> this memory);
+    /// `kind` reads naturally from this memory's side (an incoming supersedes
+    /// is `superseded_by`, an incoming caused_by is `caused`). Most recent
+    /// links first. Defaults to false (no `related` member at all).
+    #[serde(default)]
+    pub expand_links: bool,
 }
 
 /// Arguments for `memory_forget` (D-06).
@@ -258,7 +274,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "List stored memories newest-first, with optional type/tag/scope/limit filters."
+        description = "List stored memories newest-first, with optional type/tag/scope/limit filters. Set expand_links=true to attach each memory's linked memories as trimmed related summaries."
     )]
     async fn memory_list(
         &self,
@@ -280,6 +296,7 @@ impl MemoryMcp {
                 tag: args.tag,
                 scope: args.scope,
                 limit: args.limit,
+                expand_links: args.expand_links,
             })
             .await
             .map_err(map_mcp_error)?;
@@ -290,7 +307,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Search stored memories by semantic similarity (local Ollama embeddings) blended with decay, falling back to keyword/FTS5 search when the embedder is unavailable. Returns {search_mode: 'semantic'|'keyword', results: [...]}; results is empty when nothing matches."
+        description = "Search stored memories by semantic similarity (local Ollama embeddings) blended with decay, falling back to keyword/FTS5 search when the embedder is unavailable. Returns {search_mode: 'semantic'|'keyword', results: [...]}; results is empty when nothing matches. Set expand_links=true to attach each result's linked memories as trimmed related summaries."
     )]
     async fn memory_search(
         &self,
@@ -315,6 +332,7 @@ impl MemoryMcp {
                 tag: args.tag,
                 scope: args.scope,
                 limit: args.limit,
+                expand_links: args.expand_links,
             })
             .await
             .map_err(map_mcp_error)?;
@@ -685,6 +703,7 @@ mod tests {
                         tag: None,
                         scope: None,
                         limit: None,
+                        expand_links: false,
                     }))
                     .await
                     .expect("list");
@@ -907,6 +926,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn expand_links_from_raw_args_attaches_related_on_search_and_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let anchor = store_one(&server, "quasar anchor").await;
+        let long_neighbor = format!("{} end", "neighbor ".repeat(40));
+        let neighbor = store_one(&server, &long_neighbor).await;
+        link_raw(
+            &server,
+            &format!(r#"{{"from_id": {neighbor}, "to_id": {anchor}, "kind": "supersedes"}}"#),
+        )
+        .await
+        .expect("link");
+
+        // memory_search, flag on — raw wire JSON through the real DTO.
+        let args: SearchArgs =
+            serde_json::from_str(r#"{"query": "quasar", "expand_links": true}"#).expect("args");
+        let body = result_json(
+            &server
+                .memory_search(Parameters(args))
+                .await
+                .expect("search"),
+        );
+        let related = &body["results"][0]["related"];
+        assert_eq!(related[0]["id"], neighbor);
+        assert_eq!(related[0]["kind"], "superseded_by");
+        assert_eq!(related[0]["direction"], "in");
+        assert_eq!(related[0]["type"], "PATTERN");
+        let snippet = related[0]["snippet"].as_str().expect("snippet");
+        assert!(snippet.ends_with('…'), "long content is cut: {snippet}");
+        assert_eq!(snippet.chars().count(), 161);
+
+        // memory_search, flag absent — no related member anywhere.
+        let args: SearchArgs = serde_json::from_str(r#"{"query": "quasar"}"#).expect("args");
+        let result = server
+            .memory_search(Parameters(args))
+            .await
+            .expect("search");
+        let text = serde_json::to_value(&result).expect("serializes")["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_string();
+        assert!(!text.contains("related"), "{text}");
+
+        // memory_list, flag on and off.
+        let args: ListArgs = serde_json::from_str(r#"{"expand_links": true}"#).expect("args");
+        let body = result_json(&server.memory_list(Parameters(args)).await.expect("list"));
+        let rows = body.as_array().expect("array");
+        let anchor_row = rows.iter().find(|r| r["id"] == anchor).expect("anchor");
+        assert_eq!(anchor_row["related"][0]["id"], neighbor);
+        let neighbor_row = rows.iter().find(|r| r["id"] == neighbor).expect("neighbor");
+        assert_eq!(neighbor_row["related"][0]["kind"], "supersedes");
+        assert_eq!(neighbor_row["related"][0]["direction"], "out");
+
+        let args: ListArgs = serde_json::from_str("{}").expect("args");
+        let body = result_json(&server.memory_list(Parameters(args)).await.expect("list"));
+        assert!(body
+            .as_array()
+            .expect("array")
+            .iter()
+            .all(|r| r.get("related").is_none()));
+    }
+
+    #[test]
+    fn expand_links_is_an_optional_boolean_in_both_tool_schemas() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(SearchArgs)).expect("schema"),
+            serde_json::to_value(schemars::schema_for!(ListArgs)).expect("schema"),
+        ] {
+            let property = &schema["properties"]["expand_links"];
+            assert_eq!(property["type"], "boolean", "{schema}");
+            assert_eq!(property["default"], false, "{schema}");
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !required.contains(&serde_json::json!("expand_links")),
+                "{schema}"
+            );
+        }
+        // A non-boolean is rejected by deserialization (the typed seam).
+        assert!(
+            serde_json::from_str::<SearchArgs>(r#"{"query": "q", "expand_links": "yes"}"#).is_err()
+        );
     }
 
     #[test]
