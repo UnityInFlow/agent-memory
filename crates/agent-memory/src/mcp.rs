@@ -23,12 +23,13 @@ use agent_memory_core::service::{
 /// (closes review WR-04): client input (`InvalidType`, `InvalidQuery`,
 /// `InvalidArgument`) reports
 /// as `invalid_params`; internal failures (`Sqlite`, `Pool`, `Join`,
-/// `Migration`, `NotFound`) report as `internal_error`, so agents never enter
+/// `Migration`, `Internal`) report as `internal_error`, so agents never enter
 /// argument-repair loops over a DB fault (T-02G-03).
 ///
-/// `NotFound` as an *error* only arises from internal store conditions (e.g. a
-/// poisoned writer mutex) — MCP's clean not-found is the `Ok(false)` forget
-/// result, unchanged.
+/// `Internal` covers server faults with no client cause, e.g. a poisoned writer
+/// mutex (WR-02). MCP's clean not-found is data — the `Ok(false)` forget
+/// result — never an error variant. No catch-all arm: a new `MemoryError`
+/// variant must be classified here at compile time.
 fn map_mcp_error(e: MemoryError) -> McpError {
     match &e {
         MemoryError::InvalidType(_)
@@ -38,7 +39,7 @@ fn map_mcp_error(e: MemoryError) -> McpError {
         | MemoryError::Pool(_)
         | MemoryError::Join(_)
         | MemoryError::Migration(_)
-        | MemoryError::NotFound => McpError::internal_error(e.to_string(), None),
+        | MemoryError::Internal(_) => McpError::internal_error(e.to_string(), None),
     }
 }
 
@@ -297,9 +298,14 @@ mod tests {
             "an out-of-bounds argument is client input → invalid_params"
         );
         assert_eq!(
-            map_mcp_error(MemoryError::NotFound).code,
+            map_mcp_error(MemoryError::Internal("writer lock poisoned".into())).code,
             internal_error_code,
-            "NotFound-as-error only arises from internal store conditions → internal_error"
+            "a poisoned writer lock is a server fault → internal_error (WR-02)"
+        );
+        assert_ne!(
+            map_mcp_error(MemoryError::Internal("writer lock poisoned".into())).code,
+            invalid_params_code,
+            "a server fault must never read as client input"
         );
     }
 }

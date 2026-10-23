@@ -282,8 +282,9 @@ impl MemoryService {
                 let mut fresh = Vec::new();
                 let mut duplicates = 0usize;
                 for draft in drafts {
-                    let source = draft.source.as_deref().unwrap_or("");
-                    if store.exists(source, draft.mem_type, &draft.content)? {
+                    // Pass the source through as-is: a `None` must probe for
+                    // NULL, exactly what the insert stores (CR-01).
+                    if store.exists(draft.source.as_deref(), draft.mem_type, &draft.content)? {
                         duplicates += 1;
                     } else {
                         fresh.push(draft);

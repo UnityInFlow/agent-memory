@@ -50,9 +50,11 @@ pub trait Store: Send + Sync {
     /// The INTEROP-01 idempotency probe: does a row with exactly this
     /// `(source, mem_type, content)` key already exist? `MemoryService::import`
     /// checks it before every insert so re-importing the same file is a no-op.
+    /// `source` is `Option` and compared NULL-safely: a `None` source matches a
+    /// stored NULL source, never an empty string (CR-01).
     fn exists(
         &self,
-        source: &str,
+        source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
     ) -> Result<bool, MemoryError>;

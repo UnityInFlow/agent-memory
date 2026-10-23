@@ -28,11 +28,14 @@ use crate::store::{migrations::migrations, Store};
 /// the semantic candidate set.
 pub const DEFAULT_SEARCH_LIMIT: i64 = 50;
 
-/// Hard cap on the KNN oversample size `k` (T-02-03: a huge `limit` must not
-/// turn into an unbounded vector scan). Defined via the D-01 validation bound
-/// so a valid limit can never exceed what the KNN leg honors (D-03, single
-/// source of truth).
-const MAX_KNN_K: i64 = crate::domain::MAX_LIMIT;
+/// Hard cap on the KNN/keyword candidate oversample size `k` (T-02-03: a huge
+/// `limit` must not turn into an unbounded vector scan). Defined as 4x the D-01
+/// validation bound so the `limit * 4` oversample holds at EVERY valid limit,
+/// including `MAX_LIMIT` itself (03-REVIEW WR-01: at `MAX_LIMIT` the old cap
+/// collapsed the oversample factor to 1). Still derived from the single source
+/// of truth (D-03). This is a candidate-count cap only — it is unrelated to the
+/// RRF smoothing constant (`k = 60`) used by hybrid fusion.
+const MAX_KNN_K: i64 = crate::domain::MAX_LIMIT * 4;
 
 /// Register the sqlite-vec `vec0` extension process-globally. Idempotent: a
 /// `OnceLock` captures the FIRST result (success or error) so repeated calls
@@ -223,7 +226,10 @@ impl Store for SqliteStore {
         // ONE writer transaction covers the memories row, the vector row, and
         // the status flag, so `vec_memories` can never hold a vector for a row
         // that failed to insert (T-02-05).
-        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO memories \
@@ -303,7 +309,10 @@ impl Store for SqliteStore {
     }
 
     fn insert_embedding(&self, memory_id: i64, embedding: Vec<f32>) -> Result<(), MemoryError> {
-        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
         let blob: &[u8] = bytemuck::cast_slice(&embedding);
         // DELETE + INSERT instead of INSERT OR REPLACE: conflict-resolution
@@ -343,17 +352,20 @@ impl Store for SqliteStore {
 
     fn exists(
         &self,
-        source: &str,
+        source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
     ) -> Result<bool, MemoryError> {
         let conn = self.reads.get().map_err(MemoryError::Pool)?;
         // The INTEROP-01 dedup probe: all three key values bound, never
-        // formatted into the SQL (T-02-20).
+        // formatted into the SQL (T-02-20). `source IS ?1` is SQLite's
+        // NULL-safe equality: a `None` source binds NULL and matches the NULL
+        // the insert stored (`source = ?1` would be NULL = NULL → never true,
+        // which made every source-less re-import a duplicate — CR-01).
         let found = conn
             .query_row(
                 "SELECT 1 FROM memories \
-                 WHERE source = ?1 AND mem_type = ?2 AND content = ?3 LIMIT 1",
+                 WHERE source IS ?1 AND mem_type = ?2 AND content = ?3 LIMIT 1",
                 params![source, mem_type.as_wire_str(), content],
                 |_| Ok(()),
             )
@@ -464,7 +476,10 @@ impl Store for SqliteStore {
     }
 
     fn forget(&self, id: i64) -> Result<bool, MemoryError> {
-        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
         // Parameterized DELETEs. The FTS5 delete trigger syncs memories_fts,
         // but that is true for FTS ONLY — vec0 virtual tables ignore triggers,
@@ -480,7 +495,10 @@ impl Store for SqliteStore {
         if ids.is_empty() {
             return Ok(());
         }
-        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         // Build a parameterized IN-list (?2, ?3, …); ?1 is `now`. The ids are
         // bound, never string-formatted into the SQL (T-02-01).
         let placeholders: String = (0..ids.len())
@@ -501,7 +519,10 @@ impl Store for SqliteStore {
     }
 
     fn sweep_expired(&self, now: i64) -> Result<usize, MemoryError> {
-        let mut conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
         // The ONLY memories delete the sweep performs (STORE-04). Bound
         // predicate: NULL `expires_at` rows are never matched, so a no-TTL
@@ -522,7 +543,10 @@ impl Store for SqliteStore {
     }
 
     fn materialize_decay(&self, now: i64, cfg: &DecayConfig) -> Result<usize, MemoryError> {
-        let conn = self.writer.lock().map_err(|_| MemoryError::NotFound)?;
+        let conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let pinned_hl = cfg.half_life_secs * PINNED_HALF_LIFE_MULTIPLIER;
         // UPDATE-only: recompute decay_score inline from last_accessed at `now`,
         // using the SAME exp/half-life math as the on-read search blend so the
@@ -538,5 +562,19 @@ impl Store for SqliteStore {
             params![now, cfg.half_life_secs, pinned_hl],
         )?;
         Ok(updated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_knn_k_keeps_four_x_oversample_at_max_limit() {
+        // WR-01: the oversample must stay 4x even at the largest valid limit.
+        assert_eq!(MAX_KNN_K, crate::domain::MAX_LIMIT * 4);
+        assert_eq!(MAX_KNN_K, 800);
+        let k_at_max = (crate::domain::MAX_LIMIT * 4).min(MAX_KNN_K);
+        assert_eq!(k_at_max, crate::domain::MAX_LIMIT * 4);
     }
 }
