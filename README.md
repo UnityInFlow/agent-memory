@@ -242,14 +242,19 @@ returns — plus `embedding_status`:
   ranking (in hybrid and keyword mode alike) already sees the new content.
 - **An update counts as a use.** It refreshes `last_accessed` (and the access
   count), so an edited memory ranks as current rather than decayed.
+- **Expired but not yet swept still counts as present.** An update to a memory
+  whose TTL has already passed, but which the background sweep
+  has not yet removed, still succeeds, just as `memory_list` and
+  `memory_search` still show it until the sweep runs. A `ttl_secs` patch can
+  extend or clear its expiry.
 
 For an unknown id the result is `{ "id": 42, "updated": false, "reason": "not_found" }`
 — a normal tool result, not an error.
 
 ### Relations (`memory_link` / `memory_unlink`)
 
-Connect memories with flat, typed relations — no graph model, just one directed
-edge `from_id -[kind]-> to_id` per link:
+Connect memories with flat, typed relations — no graph model, just one edge
+`from_id -[kind]-> to_id` per relation:
 
 | `kind` | Reads as | Seen from `to_id` (expansion) |
 |--------|----------|-------------------------------|
@@ -265,7 +270,12 @@ edge `from_id -[kind]-> to_id` per link:
 
 - **Idempotent.** Linking the same `(from_id, to_id, kind)` again is a no-op
   success — safe to retry. A different `kind` between the same pair is a
-  separate relation.
+  separate relation. `relates_to` is symmetric, so linking `b → a` after
+  `a → b` is the same relation and also a no-op success. `supersedes` and
+  `caused_by` are directed: `a → b` and `b → a` are two relations.
+- **Responses echo your request.** `memory_link` / `memory_unlink` (and the
+  REST link bodies) always report the `from_id` and `to_id` you sent, even
+  though a `relates_to` relation is stored as (smaller id, larger id).
 - **Rejected as `invalid_params`:** a self-link (`from_id and to_id must differ
   (got 57)`) and an unknown kind (`kind must be one of relates_to, supersedes,
   caused_by (got 'blocks')`).
@@ -273,9 +283,10 @@ edge `from_id -[kind]-> to_id` per link:
   "not_found", "missing_id": 42 }` names the id that does not exist. Nothing is
   written.
 
-`memory_unlink` takes the same three fields; direction and kind must match the
-stored edge. It returns `"unlinked": true`, or `"unlinked": false, "reason":
-"not_found"` when no such edge exists.
+`memory_unlink` takes the same three fields. For `supersedes` and `caused_by`,
+direction and kind must match the stored edge; a `relates_to` relation is
+symmetric and can be removed from either end. It returns `"unlinked": true`,
+or `"unlinked": false, "reason": "not_found"` when no such edge exists.
 
 **Relations never outlive their memories.** Forgetting a memory, or its TTL
 expiring, removes every relation touching it in the same transaction.
@@ -294,11 +305,16 @@ summaries, following relations in both directions:
 
 - `direction` is `out` when the result is the relation's `from_id` and `in`
   when it is the `to_id`; `kind` reads naturally from the result's side (the
-  table above).
+  table above). For `relates_to` the reported `direction` carries no meaning:
+  the relation is symmetric and stored with the smaller id first.
 - `snippet` is the neighbor's content cut to 160 characters, with a trailing
-  `…` when cut. Fetch the neighbor by id if you need all of it.
+  `…` when cut. Fetch the neighbor by id if you need all of it. The cut counts
+  characters, not visual glyphs, so it may split a combined emoji or accent
+  sequence.
 - At most `MAX_EXPANDED_LINKS = 10` neighbors per result; when a memory has
   more, the most recently created relations win.
+- `memory_list` with `expand_links` and no `limit` returns every memory, each
+  with up to 10 neighbors, so pass a `limit` on large stores.
 - Expansion is strictly one hop and a pure read: neighbors are **not**
   recency-bumped, so expanding never changes how anything decays.
 - A result with no relations gets `"related": []`. Without the flag there is no
