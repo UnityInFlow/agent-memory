@@ -639,6 +639,36 @@ async fn queries_fts5_cannot_parse_succeed_identically_in_both_modes() {
 }
 
 #[tokio::test]
+async fn a_not_chain_past_the_fts5_depth_limit_is_answered_in_both_modes() {
+    // Re-review WR-01. FTS5 never flattens NOT, so 257+ chained NOTs exceed
+    // SQLITE_FTS5_MAX_EXPR_DEPTH (256) and fail with "fts5 expression tree is
+    // too large". That is client input: it takes the single sanitized retry
+    // (quoted tokens OR-ed, a flat node) and is answered, never a 500. The
+    // retry's `"auth"` terms recall M2 in both modes, which proves it ran.
+    for nots in [257_usize, 300] {
+        let input = format!("auth{}", " NOT auth".repeat(nots));
+        for (expected_mode, embedder) in both_modes() {
+            let h = harness(embedder);
+            let corpus = store_corpus(&h).await;
+            let outcome = h
+                .service
+                .search(query(&input, None))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{expected_mode:?} mode: a {nots}-NOT chain must be answered, got {e:?}")
+                });
+            assert_eq!(outcome.search_mode, expected_mode, "{nots} NOTs");
+            assert_eq!(
+                ids(&outcome.results).first(),
+                Some(&corpus[1]),
+                "{expected_mode:?} mode: the {nots}-NOT chain's retry must recall M2 first, got {:?}",
+                ids(&outcome.results)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn structured_fts5_syntax_still_runs_raw() {
     // The raw query always runs first, so valid FTS5 keeps its exact meaning.
     // Each expected set differs from what a sanitized OR-of-words retry would
