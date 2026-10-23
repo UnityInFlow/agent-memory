@@ -492,11 +492,16 @@ fn corrupt_column(what: &str, value: &str) -> rusqlite::Error {
 ///   (`sqlite-vec` → column `vec`), which fails on the one-column table.
 /// - `unknown special query`: a leading `*`.
 /// - `expected integer`: a non-numeric `NEAR(…, x)` distance.
+/// - `fts5 expression tree is too large`: the query exceeds
+///   `SQLITE_FTS5_MAX_EXPR_DEPTH` (256), e.g. 257+ chained `NOT`s, which FTS5
+///   never flattens. The message has no `fts5: ` prefix. The sanitized retry
+///   cannot hit it: quoted tokens joined by `OR` form one flat node.
 ///
 /// Only FTS5 query-parse messages belong here, never a generic SQLite message
 /// (T-04-22): a marker match is what licenses the sanitized retry.
-const FTS5_QUERY_PARSE_MARKERS: [&str; 5] = [
+const FTS5_QUERY_PARSE_MARKERS: [&str; 6] = [
     "fts5: ",
+    "fts5 expression tree is too large",
     "unterminated string",
     "no such column",
     "unknown special query",
@@ -1541,9 +1546,19 @@ mod tests {
         format!("{}a{}", "(".repeat(3000), ")".repeat(3000))
     }
 
-    /// Candidate probes from the planning table that FTS5 rejects. All nine
-    /// error in the bundled SQLite 3.51.3 exactly as in the sqlite3 3.46 CLI
-    /// probe (the empty string included), so none moved to the valid-raw group.
+    /// `a NOT a NOT a …` with `nots` chained `NOT`s. FTS5 never flattens `NOT`
+    /// nodes, so the chain is a left-deep tree; past
+    /// `SQLITE_FTS5_MAX_EXPR_DEPTH` (256) it fails at step time with
+    /// `fts5 expression tree is too large (maximum depth 256)` (re-review WR-01).
+    fn deep_not_chain(nots: usize) -> String {
+        format!("a{}", " NOT a".repeat(nots))
+    }
+
+    /// Candidate probes from the planning table that FTS5 rejects. The first
+    /// nine error in the bundled SQLite 3.51.3 exactly as in the sqlite3 3.46
+    /// CLI probe (the empty string included), so none moved to the valid-raw
+    /// group. The two `NOT` chains (re-review WR-01) pin the expression-depth
+    /// limit at its boundary (257) and past it (300).
     fn erroring_probes() -> Vec<String> {
         vec![
             String::new(),
@@ -1555,6 +1570,8 @@ mod tests {
             "*".to_string(),
             "NEAR(a b, x)".to_string(),
             deep_parens(),
+            deep_not_chain(257),
+            deep_not_chain(300),
         ]
     }
 
@@ -1617,6 +1634,33 @@ mod tests {
         // The fallback finds the row through a hyphenated query's words.
         let fallback = sanitize_fts_query("sqlite-vec").expect("has words");
         assert_eq!(probe(&mut stmt, &fallback).expect("parses"), 1);
+    }
+
+    #[test]
+    fn the_depth_limit_is_exactly_256_nots_and_the_fallback_of_any_chain_parses() {
+        // re-review WR-01. 256 chained NOTs is the deepest tree FTS5 accepts;
+        // one more is the depth error, which must be classified as client input.
+        let conn = fts_probe_conn();
+        let mut stmt = conn
+            .prepare("SELECT count(*) FROM t WHERE t MATCH ?1")
+            .expect("static statement prepares");
+        probe(&mut stmt, &deep_not_chain(256)).expect("256 NOTs is within the depth limit");
+        let err = probe(&mut stmt, &deep_not_chain(257)).expect_err("257 NOTs exceeds it");
+        assert!(
+            err.to_string()
+                .contains("fts5 expression tree is too large"),
+            "unexpected bundled-SQLite message: {err}"
+        );
+        assert!(is_match_input_error(&err), "got: {err}");
+        // The retry cannot hit the same limit: it quotes every token (so `NOT`
+        // is a string, not an operator) and joins them with OR, which FTS5
+        // flattens into one n-ary node. Even a 3000-NOT chain (6001 terms)
+        // parses once sanitized.
+        let fallback = sanitize_fts_query(&deep_not_chain(3000)).expect("has words");
+        assert_eq!(
+            probe(&mut stmt, &fallback).expect("flat OR chain parses"),
+            0
+        );
     }
 
     #[test]
