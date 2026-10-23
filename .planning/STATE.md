@@ -2,16 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
+current_phase: 04
+current_phase_name: Memory Update, Relations & Hybrid Search
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-07-13T13:42:43.486Z"
-last_activity: 2026-10-09 -- Completed quick task 261009-hc1 (hosted release pipeline, closes #1)
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-10-23T17:58:30.378Z"
+last_activity: 2026-10-23
+last_activity_desc: Phase 04 execution started
+state_head: 2088a143bd9124cd863f653703a4c66f309befb0
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 25
+  total_plans: 6
+  completed_plans: 3
 ---
 
 # Project State
@@ -21,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 04 — memory-update-relations-hybrid-search
+**Current focus:** Phase 04 — Memory Update, Relations & Hybrid Search
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
+Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-10-09 - Completed quick task 261009-hc1: hosted release pipeline with SLSA provenance (closes #1)
+Last activity: 2026-10-23 — Phase 04 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -61,6 +64,11 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 02 P05 | 8 min | 2 tasks | 6 files |
 | Phase 03 P01 | 12 min | 3 tasks | 11 files |
 | Phase 03 P02 | 30 min | 3 tasks | 2 files |
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 04 P01 | 9 min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -84,6 +92,11 @@ Recent decisions affecting current work:
 - [03-01]: import() validates ttl per draft through the shared helper — the store() bypass is closed structurally for Phase 5 JSONL import
 - [03-02]: Phase 6 toolchain verdict (D-11): all 4 spike legs GREEN in one dispatch — Windows = cargo-xwin 0.23.0 / x86_64-pc-windows-msvc (gnu mingw-w64 proven fallback); musl = zigbuild 0.23.0 + target-suffixed CFLAGS -Du_int*_t shim (both legs green, no DIST-05 blocker)
 - [03-02]: CI revived on GitHub-hosted ubuntu-latest, secretless contents: read (D-12/D-10, ecosystem D-02 exception) — supersedes inner CLAUDE.md 'never ubuntu-latest' for this public repo; release.yml runner decision stays with Phase 6
+- [Phase 04]: [04-01]: MemoryError::Internal(String) is the 500/internal_error tier for server faults (poisoned writer lock); MemoryError::NotFound and ApiError::NotFound deleted — not-found is data (Ok(false)/Ok(None)) only (WR-02)
+- [Phase 04]: [04-01]: Store::exists takes Option<&str> with NULL-safe 'source IS ?1' — source:None re-imports are idempotent (CR-01)
+- [Phase 04]: [04-01]: MAX_KNN_K = MAX_LIMIT * 4 (800) — candidate oversample cap, distinct from RRF k=60 (WR-01 partial; full filter-aware fix deferred)
+- [Phase 04]: [04-01]: SqliteStore::open order is probe user_version (before any PRAGMA, so a refused DB is byte-untouched) -> SchemaTooNew refusal -> pragmas -> sibling online backup {db}.backup-pre-{NNNN}-{YYYYMMDD} (one per target version, failure aborts) -> to_latest; LATEST_SCHEMA_VERSION=3 must be bumped with every new migration
+- [Phase 04]: [04-01]: tests/fixtures/v0.0.1.db is a committed binary fixture generated once from tag-identical 0001+0002 — never regenerate it; it is gitignored locally by *.db so stage with git add -f
 
 ### Pending Todos
 
@@ -124,9 +137,9 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-12T20:49:51.528Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-memory-update-relations-hybrid-search/04-CONTEXT.md
+Last session: 2026-10-23T17:58:30.334Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
