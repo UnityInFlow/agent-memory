@@ -40,6 +40,10 @@ fn map_mcp_error(e: MemoryError) -> McpError {
         | MemoryError::Join(_)
         | MemoryError::Migration(_)
         | MemoryError::Internal(_) => McpError::internal_error(e.to_string(), None),
+        // Startup-only (D-13): raised by SqliteStore::open before the server
+        // starts, so no tool call can produce it. Classified internal for
+        // exhaustiveness; the refusal itself reaches stderr via main.rs.
+        MemoryError::SchemaTooNew { .. } => McpError::internal_error(e.to_string(), None),
     }
 }
 

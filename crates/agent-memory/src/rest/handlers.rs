@@ -97,6 +97,10 @@ fn map_memory_error(e: MemoryError) -> ApiError {
         | MemoryError::Join(_)
         | MemoryError::Migration(_)
         | MemoryError::Internal(_) => ApiError::Internal(e.to_string()),
+        // Startup-only (D-13): raised by SqliteStore::open before the REST
+        // server binds, so no request can produce it. Classified 500 for
+        // exhaustiveness; the refusal itself reaches stderr via main.rs.
+        MemoryError::SchemaTooNew { .. } => ApiError::Internal(e.to_string()),
     }
 }
 

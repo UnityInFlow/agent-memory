@@ -161,6 +161,22 @@ pub enum MemoryError {
     /// (`Ok(false)` / `Ok(None)`), not an error variant.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// The database was written by a NEWER agent-memory: its schema version is
+    /// ahead of what this binary can migrate to (D-13). Startup-only — raised by
+    /// `SqliteStore::open` before any write and before serving, so it never
+    /// crosses a transport; the binary reports it on stderr and exits. The
+    /// message names only the two version integers and the public upgrade
+    /// command (T-04-05).
+    #[error(
+        "database schema is version {db_version} but this binary supports up to version \
+         {binary_version} — upgrade agent-memory (brew upgrade unityinflow/tap/agent-memory) \
+         or point --db at a different file"
+    )]
+    SchemaTooNew {
+        db_version: i64,
+        binary_version: i64,
+    },
 }
 
 /// Validate an optional `limit` against the D-01 bounds. `None` always passes
