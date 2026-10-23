@@ -18,7 +18,10 @@ rmcp = { version = "1.8", features = ["server", "transport-io", "macros"] }
 # 0.40 pulls libsqlite3-sys 0.38, producing a `links = "sqlite3"` conflict.
 # `functions` enables create_scalar_function — the bundled SQLite is not built
 # with SQLITE_ENABLE_MATH_FUNCTIONS, so we register `exp` for the decay blend.
-rusqlite = { version = "0.39", features = ["bundled", "functions"] }
+# `backup` exposes the SQLite Online Backup API (rusqlite::backup) for the
+# pre-migration backup (STORE-05 / D-11). Feature flag only — the 0.39 pin and
+# the libsqlite3-sys 0.37 triangle are unchanged (AR-03-01).
+rusqlite = { version = "0.39", features = ["bundled", "functions", "backup"] }
 # rusqlite_migration 2.5 tracks rusqlite ^0.39 (2.6 jumps to ^0.40); pinning 2.5
 # keeps the whole graph on one `libsqlite3-sys` (0.37) — see rusqlite note above.
 rusqlite_migration = "2.5"

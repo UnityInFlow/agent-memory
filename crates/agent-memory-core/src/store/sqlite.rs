@@ -9,18 +9,21 @@
 //! All SQL is parameterized; user input is never formatted into a query string
 //! (threat T-01-01).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::backup::Backup;
 use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
 use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
 use crate::service::{ListArgs, SearchArgs};
-use crate::store::{migrations::migrations, Store};
+use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
+use crate::store::Store;
 
 /// Default cap on returned search rows when the caller omits `limit` (T-02-04).
 /// `pub` because it is part of the documented API contract (D-03: the README
@@ -108,6 +111,80 @@ fn prepare_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
     register_functions(conn)
 }
 
+/// Today's UTC date as `YYYYMMDD`, for the backup file name. UTC only — `Local`
+/// time must never be reintroduced (chrono is trimmed to the `now` feature for
+/// the darwin cross-link; `Datelike` needs no extra feature).
+fn utc_yyyymmdd() -> String {
+    use chrono::Datelike;
+    let today = chrono::Utc::now().date_naive();
+    format!("{:04}{:02}{:02}", today.year(), today.month(), today.day())
+}
+
+/// Write the pre-migration backup of `src` (the open DB at `db_path`) to the
+/// sibling file `{db}.backup-pre-{NNNN}-{YYYYMMDD}`, where `NNNN` is the
+/// zero-padded schema version about to be migrated to (D-11). Generic over the
+/// target version, so every future migration inherits it (D-12).
+///
+/// Retention is one backup per target schema version: every existing
+/// `{db}.backup-pre-{NNNN}-*` entry is removed first; other versions' backups
+/// are never touched. The copy uses the SQLite Online Backup API, which is
+/// WAL-correct by construction (a raw file copy of a live WAL database is not).
+/// The backup sits beside the DB, in the same directory and trust domain —
+/// never a shared temp dir (T-04-03).
+///
+/// Any failure is returned as an error and ABORTS the open: a machine that
+/// cannot write a backup must not run an unattended migration (T-04-02).
+fn pre_migration_backup(src: &Connection, db_path: &Path) -> Result<PathBuf, MemoryError> {
+    let fail = |what: String| {
+        MemoryError::Internal(format!(
+            "pre-migration backup failed ({what}); refusing to migrate {}",
+            db_path.display()
+        ))
+    };
+
+    let file_name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| fail("database path has no UTF-8 file name".to_string()))?;
+    let dir = match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let prefix = format!("{file_name}.backup-pre-{LATEST_SCHEMA_VERSION:04}-");
+
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| fail(format!("cannot read directory {}: {e}", dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| fail(format!("cannot read directory entry: {e}")))?;
+        let matches = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix));
+        if matches {
+            let stale = entry.path();
+            std::fs::remove_file(&stale).map_err(|e| {
+                fail(format!(
+                    "cannot remove previous backup {}: {e}",
+                    stale.display()
+                ))
+            })?;
+        }
+    }
+
+    let backup_path = dir.join(format!("{prefix}{}", utc_yyyymmdd()));
+    let mut dst = Connection::open(&backup_path)
+        .map_err(|e| fail(format!("cannot create {}: {e}", backup_path.display())))?;
+    Backup::new(src, &mut dst)
+        .and_then(|backup| backup.run_to_completion(64, Duration::from_millis(50), None))
+        .map_err(|e| fail(format!("copy to {} failed: {e}", backup_path.display())))?;
+    tracing::info!(
+        backup = %backup_path.display(),
+        target_schema_version = LATEST_SCHEMA_VERSION,
+        "pre-migration backup written"
+    );
+    Ok(backup_path)
+}
+
 /// A pool customizer that runs [`apply_pragmas`] on each pooled read connection.
 #[derive(Debug)]
 struct PragmaCustomizer;
@@ -127,6 +204,20 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open (creating if absent) the database at `path`, run migrations on the
     /// writer, and build the read pool. Confirms FTS5 is compiled in.
+    ///
+    /// Migration hygiene (STORE-05), in this order — the probe and the backup
+    /// MUST precede `to_latest` (RESEARCH Pitfall 8):
+    ///
+    /// 1. Probe `PRAGMA user_version`. A DB AHEAD of [`LATEST_SCHEMA_VERSION`]
+    ///    is refused with [`MemoryError::SchemaTooNew`] (D-13). The probe runs
+    ///    before even the per-connection PRAGMAs, because switching a non-WAL
+    ///    file to WAL rewrites its header — a refused DB stays byte-for-byte
+    ///    untouched.
+    /// 2. If migrations are pending on a non-empty DB (`0 < user_version <
+    ///    LATEST`, D-12), write a sibling online backup first (D-11). A backup
+    ///    failure aborts the open; no migration runs. A brand-new file
+    ///    (`user_version == 0`) has nothing to back up.
+    /// 3. Migrate to latest.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
         // vec0 registration MUST precede Connection::open: auto-extensions only
         // apply to connections opened after registration (this also covers every
@@ -134,8 +225,26 @@ impl SqliteStore {
         register_vec_extension()?;
 
         let mut writer = Connection::open(path)?;
+
+        // (1) D-13 newer-schema refusal — read-only, before any write.
+        let db_version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if db_version > LATEST_SCHEMA_VERSION {
+            return Err(MemoryError::SchemaTooNew {
+                db_version,
+                binary_version: LATEST_SCHEMA_VERSION,
+            });
+        }
+
         prepare_connection(&writer)?;
 
+        // (2) D-11/D-12 pre-migration backup. open() runs before serving, so
+        // the writer is the only connection and can be the backup source.
+        if db_version > 0 && db_version < LATEST_SCHEMA_VERSION {
+            pre_migration_backup(&writer, path)?;
+        }
+
+        // (3) Migrate. rusqlite_migration's own DatabaseTooFarAhead check stays
+        // as a backstop should the probe above ever be bypassed.
         let migrations: Migrations<'static> = migrations();
         migrations.to_latest(&mut writer)?;
 
