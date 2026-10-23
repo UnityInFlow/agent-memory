@@ -1332,6 +1332,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relates_to_link_and_unlink_bodies_echo_the_request_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "first see-also").await;
+        let b = stored_id(&state, "second see-also").await;
+        assert!(b > a, "b sorts after a, so canonical storage is (a, b)");
+
+        let resp = link_raw(
+            &state,
+            &format!(r#"{{"from_id": {b}, "to_id": {a}, "kind": "relates_to"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({
+                "from_id": b, "to_id": a, "kind": "relates_to", "linked": true
+            })
+        );
+
+        let resp = unlink_path(&state, b, a, "relates_to").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({
+                "from_id": b, "to_id": a, "kind": "relates_to", "unlinked": true
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn post_links_to_a_missing_memory_is_404_naming_it_never_500() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = test_state(&dir);

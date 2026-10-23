@@ -735,3 +735,203 @@ async fn expansion_also_applies_on_the_semantic_path() {
         .expect("search");
     assert!(plain.results.iter().all(|v| v.related.is_none()));
 }
+
+// ---------------------------------------------------------------------------
+// 04-06 / REVIEW WR-03 — relates_to is ONE symmetric relation
+// ---------------------------------------------------------------------------
+
+/// Every `(from_id, to_id)` row stored for `kind`, ordered by endpoints
+/// (`memory_links` is `WITHOUT ROWID`).
+fn stored_pairs(db_path: &Path, kind: &str) -> Vec<(i64, i64)> {
+    let conn = raw_conn(db_path);
+    let mut stmt = conn
+        .prepare("SELECT from_id, to_id FROM memory_links WHERE kind = ?1 ORDER BY from_id, to_id")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([kind], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query pairs");
+    rows.map(|row| row.expect("pair row")).collect()
+}
+
+#[test]
+fn canonical_endpoints_order_relates_to_and_leave_directed_kinds_alone() {
+    assert_eq!(LinkKind::RelatesTo.canonical_endpoints(5, 2), (2, 5));
+    assert_eq!(LinkKind::RelatesTo.canonical_endpoints(2, 5), (2, 5));
+    assert_eq!(LinkKind::Supersedes.canonical_endpoints(5, 2), (5, 2));
+    assert_eq!(LinkKind::CausedBy.canonical_endpoints(5, 2), (5, 2));
+}
+
+#[test]
+fn only_relates_to_is_symmetric() {
+    assert!(LinkKind::RelatesTo.is_symmetric());
+    assert!(!LinkKind::Supersedes.is_symmetric());
+    assert!(!LinkKind::CausedBy.is_symmetric());
+}
+
+#[tokio::test]
+async fn relates_to_linked_both_ways_is_one_relation_listed_once_from_each_side() {
+    let h = harness();
+    let a = store(&h, "see also one").await;
+    let b = store(&h, "see also two").await;
+
+    let forward = h
+        .service
+        .link(a, b, LinkKind::RelatesTo)
+        .await
+        .expect("a -> b");
+    let backward = h
+        .service
+        .link(b, a, LinkKind::RelatesTo)
+        .await
+        .expect("b -> a");
+    assert_eq!(forward, LinkOutcome::Linked);
+    assert_eq!(
+        backward,
+        LinkOutcome::Linked,
+        "the reverse is the same relation: a D-02 no-op success"
+    );
+    assert_eq!(edge_count(&h.db_path), 1, "one symmetric relation, one row");
+
+    let views = h.service.list(list_args(true)).await.expect("list");
+    let from_a = related_of(&views, a);
+    let from_b = related_of(&views, b);
+    assert_eq!(from_a.len(), 1, "a lists b exactly once: {from_a:?}");
+    assert_eq!(from_a[0].id, b);
+    assert_eq!(from_a[0].kind, "relates_to");
+    assert_eq!(from_b.len(), 1, "b lists a exactly once: {from_b:?}");
+    assert_eq!(from_b[0].id, a);
+    assert_eq!(from_b[0].kind, "relates_to");
+}
+
+#[tokio::test]
+async fn relates_to_is_stored_with_the_smaller_id_first() {
+    let h = harness();
+    let a = store(&h, "lower id").await;
+    let b = store(&h, "higher id").await;
+    assert!(b > a);
+
+    h.service
+        .link(b, a, LinkKind::RelatesTo)
+        .await
+        .expect("link b -> a");
+    assert_eq!(stored_pairs(&h.db_path, "relates_to"), vec![(a, b)]);
+}
+
+#[tokio::test]
+async fn relates_to_unlinks_from_either_end() {
+    let h = harness();
+    let a = store(&h, "left").await;
+    let b = store(&h, "right").await;
+    h.service
+        .link(a, b, LinkKind::RelatesTo)
+        .await
+        .expect("link a -> b");
+
+    let removed = h
+        .service
+        .unlink(b, a, LinkKind::RelatesTo)
+        .await
+        .expect("unlink b -> a");
+    assert!(
+        removed,
+        "the symmetric relation is removable from the far end"
+    );
+    assert_eq!(edge_count(&h.db_path), 0);
+
+    let again = h
+        .service
+        .unlink(b, a, LinkKind::RelatesTo)
+        .await
+        .expect("a second unlink is not an error");
+    assert!(!again, "nothing left: the clean not-found");
+}
+
+#[tokio::test]
+async fn unlink_removes_a_relates_to_row_a_pre_fix_build_stored_in_reverse() {
+    let h = harness();
+    let a = store(&h, "older id").await;
+    let b = store(&h, "newer id").await;
+    assert!(b > a);
+    // A pre-fix dev build of the unreleased 0003 stored request order.
+    raw_conn(&h.db_path)
+        .execute(
+            "INSERT INTO memory_links (from_id, to_id, kind, created_at) \
+             VALUES (?1, ?2, 'relates_to', 1000)",
+            [b, a],
+        )
+        .expect("plant a reversed relates_to row");
+    assert_eq!(stored_pairs(&h.db_path, "relates_to"), vec![(b, a)]);
+
+    let removed = h
+        .service
+        .unlink(a, b, LinkKind::RelatesTo)
+        .await
+        .expect("unlink a -> b");
+    assert!(removed);
+    assert_eq!(edge_count(&h.db_path), 0);
+}
+
+#[tokio::test]
+async fn directed_kinds_keep_two_distinct_relations_per_pair() {
+    let h = harness();
+    let a = store(&h, "version a").await;
+    let b = store(&h, "version b").await;
+    h.service
+        .link(a, b, LinkKind::Supersedes)
+        .await
+        .expect("a supersedes b");
+    h.service
+        .link(b, a, LinkKind::Supersedes)
+        .await
+        .expect("b supersedes a");
+    assert_eq!(edge_count(&h.db_path), 2, "direction is identity (D-03)");
+
+    let removed = h
+        .service
+        .unlink(b, a, LinkKind::Supersedes)
+        .await
+        .expect("unlink b -> a");
+    assert!(removed);
+    assert_eq!(
+        stored_pairs(&h.db_path, "supersedes"),
+        vec![(a, b)],
+        "only the requested direction went"
+    );
+
+    // The reverse of a directed edge is not that edge.
+    let wrong_way = h
+        .service
+        .unlink(b, a, LinkKind::Supersedes)
+        .await
+        .expect("unlink b -> a again");
+    assert!(!wrong_way);
+    assert_eq!(edge_count(&h.db_path), 1);
+}
+
+#[tokio::test]
+async fn a_missing_relates_to_endpoint_is_named_in_request_order() {
+    let h = harness();
+    let a = store(&h, "present").await;
+
+    let cases = [
+        (999_999, a, 999_999),
+        (a, 999_999, 999_999),
+        // Both missing: the request's from_id, even though it is the larger.
+        (999_998, 999_997, 999_998),
+    ];
+    for (from_id, to_id, expected) in cases {
+        let outcome = h
+            .service
+            .link(from_id, to_id, LinkKind::RelatesTo)
+            .await
+            .expect("a missing endpoint is data, never an error");
+        assert_eq!(
+            outcome,
+            LinkOutcome::NotFound {
+                missing_id: expected
+            },
+            "link({from_id}, {to_id})"
+        );
+    }
+    assert_eq!(edge_count(&h.db_path), 0);
+}
