@@ -357,8 +357,17 @@ pub const MAX_TTL_SECS: i64 = 3_155_760_000;
 /// Hard cap on the 1-hop neighbors attached to ONE search/list result when
 /// `expand_links` is set (MCP-07 / D-07). Overflow keeps the most recent
 /// edges (`memory_links.created_at` descending). Fixed — there is no
-/// caller-tunable knob in v0.1.0. Together with [`MAX_LIMIT`] it bounds an
-/// expanded response at `200 × 10` summaries (T-04-11).
+/// caller-tunable knob in v0.1.0.
+///
+/// What this bounds (REVIEW WR-04 doc correction): each result carries at most
+/// `MAX_EXPANDED_LINKS` neighbours. Search is always bounded by its limit
+/// (1–[`MAX_LIMIT`], default 50), so an expanded search returns at most
+/// `200 × 10` summaries. A list without a limit returns every row (v1.0
+/// behaviour, RESEARCH Pitfall 6), and each row is expanded up to
+/// `MAX_EXPANDED_LINKS`, so an unlimited expanded list grows with the corpus.
+/// T-04-11's `200 × 10` bound therefore covers search and list-with-limit
+/// only; changing unlimited expanded-list behaviour is a deferred API-contract
+/// decision.
 pub const MAX_EXPANDED_LINKS: usize = 10;
 
 /// The library's typed error. `thiserror` per the ecosystem rule (libraries use
