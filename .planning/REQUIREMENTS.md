@@ -25,7 +25,7 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Storage & Migration Hygiene (STORE)
 
-- [ ] **STORE-05**: Schema migration 0003 (relations) ships with migration hygiene: shipped 0001/0002 SQL frozen (fixture divergence test against a v0.0.1 database), pre-migration backup, and a friendly error when a newer DB meets an older binary
+- [x] **STORE-05**: Schema migration 0003 (relations) ships with migration hygiene: shipped 0001/0002 SQL frozen (fixture divergence test against a v0.0.1 database), pre-migration backup, and a friendly error when a newer DB meets an older binary
 
 ### Portability (DIST / INTEROP)
 
@@ -66,7 +66,7 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 | API-03 | Phase 3 | Complete |
 | MCP-06 | Phase 4 | Pending |
 | MCP-07 | Phase 4 | Pending |
-| STORE-05 | Phase 4 | Pending |
+| STORE-05 | Phase 4 | Complete |
 | SEARCH-04 | Phase 4 | Pending |
 | SEARCH-05 | Phase 4 | Pending |
 | DIST-04 | Phase 5 | Pending |
