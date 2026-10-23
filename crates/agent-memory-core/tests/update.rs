@@ -517,3 +517,158 @@ async fn an_invalid_patch_is_rejected_before_the_embedder_is_called() {
     assert_eq!(listed[0].content, OLD_CONTENT);
     assert_eq!(raw_row(&h.db_path, id).access_count, 0);
 }
+
+/// Store a memory carrying a 60 s TTL (expires at 1_060 on the harness clock).
+async fn store_with_ttl(h: &Harness, content: &str) -> i64 {
+    let mut new = new_memory(content);
+    new.ttl_secs = Some(60);
+    h.service.store(new).await.expect("store")
+}
+
+async fn listed_ids(h: &Harness) -> Vec<i64> {
+    h.service
+        .list(ListArgs::default())
+        .await
+        .expect("list")
+        .iter()
+        .map(|v| v.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn ttl_patch_matrix_absent_keeps_null_clears_value_resets_from_patch_time() {
+    let h = harness(HashMap::new());
+    let absent = store_with_ttl(&h, "ttl absent").await;
+    let cleared = store_with_ttl(&h, "ttl cleared").await;
+    let reset = store_with_ttl(&h, "ttl reset").await;
+
+    h.clock.advance(30); // now = 1_030, before the old 1_060 expiry
+    for (id, patch) in [
+        (
+            absent,
+            MemoryPatch {
+                tags: Some(Some(vec!["x".to_string()])),
+                ..Default::default()
+            },
+        ),
+        (
+            cleared,
+            MemoryPatch {
+                ttl_secs: Some(None),
+                ..Default::default()
+            },
+        ),
+        (
+            reset,
+            MemoryPatch {
+                ttl_secs: Some(Some(600)),
+                ..Default::default()
+            },
+        ),
+    ] {
+        h.service
+            .update(id, patch)
+            .await
+            .expect("update")
+            .expect("id exists");
+    }
+    assert_eq!(raw_row(&h.db_path, absent).expires_at, Some(1_060));
+    assert_eq!(raw_row(&h.db_path, cleared).expires_at, None);
+    assert_eq!(
+        raw_row(&h.db_path, reset).expires_at,
+        Some(1_630),
+        "a new TTL counts from patch time"
+    );
+
+    // Advance past the OLD TTL and sweep.
+    h.clock.advance(100); // now = 1_130
+    h.service.sweep(h.clock.now()).await.expect("sweep");
+    let ids = listed_ids(&h).await;
+    assert!(
+        !ids.contains(&absent),
+        "absent ttl_secs keeps the old expiry"
+    );
+    assert!(ids.contains(&cleared), "ttl_secs: null removes the expiry");
+    assert!(ids.contains(&reset), "the reset TTL outlives the old one");
+
+    // Past the reset TTL too: only the cleared one is left.
+    h.clock.advance(1_000); // now = 2_130
+    h.service.sweep(h.clock.now()).await.expect("sweep");
+    assert_eq!(listed_ids(&h).await, vec![cleared]);
+}
+
+#[tokio::test]
+async fn tags_and_scope_patch_matrix_absent_null_value() {
+    let h = harness(HashMap::new());
+    let id = h.service.store(new_memory("matrix")).await.expect("store");
+
+    // absent → unchanged (another field carries the patch)
+    let u = h
+        .service
+        .update(
+            id,
+            MemoryPatch {
+                ttl_secs: Some(Some(120)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update")
+        .expect("id exists");
+    assert_eq!(u.view.tags, vec!["original".to_string()]);
+    assert_eq!(u.view.scope.as_deref(), Some("project-a"));
+
+    // value → set
+    let u = h
+        .service
+        .update(
+            id,
+            MemoryPatch {
+                tags: Some(Some(vec!["n1".to_string(), "n2".to_string()])),
+                scope: Some(Some("project-z".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update")
+        .expect("id exists");
+    assert_eq!(u.view.tags, vec!["n1".to_string(), "n2".to_string()]);
+    assert_eq!(u.view.scope.as_deref(), Some("project-z"));
+
+    // null → cleared: tags empty, scope global (NULL — the insert default)
+    let u = h
+        .service
+        .update(
+            id,
+            MemoryPatch {
+                tags: Some(None),
+                scope: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update")
+        .expect("id exists");
+    assert!(u.view.tags.is_empty());
+    assert_eq!(u.view.scope, None);
+
+    // The cleared row is visible to the scope/tag filters as cleared.
+    let in_old_scope = h
+        .service
+        .list(ListArgs {
+            scope: Some("project-z".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list");
+    assert!(in_old_scope.is_empty(), "the row left its old scope");
+    let with_old_tag = h
+        .service
+        .list(ListArgs {
+            tag: Some("n1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list");
+    assert!(with_old_tag.is_empty(), "the row lost its old tags");
+}

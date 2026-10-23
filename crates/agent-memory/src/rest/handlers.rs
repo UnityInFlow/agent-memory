@@ -1,20 +1,22 @@
-//! The five REST handlers — thin adapters with ZERO business logic.
+//! The six REST handlers — thin adapters with ZERO business logic.
 //!
 //! Each handler copies the `mcp.rs` per-tool shape: validate the wire type via
 //! `MemoryType::try_from` up front, build the exact core service arg structs,
 //! make ONE service call, and map the error. The request DTOs mirror the MCP
 //! tool argument structs field-for-field (`content`, `type`, `tags`, `source`,
-//! `scope`, `ttl_secs`, `query`, `limit`) so both transports speak one dialect.
-//! serde only — no schemars on REST DTOs.
+//! `scope`, `ttl_secs`, `query`, `limit`, `id`) so both transports speak one
+//! dialect. serde only — REST DTOs never derive a JSON Schema (that is the
+//! MCP tool-schema concern).
 
 use std::sync::Arc;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use agent_memory_core::domain::{MemoryError, MemoryType, NewMemory};
+use agent_memory_core::domain::{MemoryError, MemoryPatch, MemoryType, NewMemory};
 use agent_memory_core::embed::EmbedderHealth;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, SearchArgs as ServiceSearchArgs, SearchOutcome,
@@ -78,6 +80,51 @@ pub struct ListQuery {
     /// Cap the number of returned rows.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+/// Body for `PATCH /api/memories/{id}` — mirrors `mcp::UpdateArgs` field for
+/// field (the id comes from the path). A JSON-merge-patch: an absent member
+/// keeps the field, `null` clears it (`tags` → `[]`, `scope` → global,
+/// `ttl_secs` → no expiry), a value sets it. `content` is never clearable.
+/// Uses the SAME explicit-null helper as the MCP DTO, so the two transports
+/// cannot drift on null-vs-absent.
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateBody {
+    /// New content (re-indexed and re-embedded). Never null or empty.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub content: Option<Option<String>>,
+    /// Replacement tag list; `null` clears to an empty list.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub tags: Option<Option<Vec<String>>>,
+    /// New logical scope; `null` resets to global.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub scope: Option<Option<String>>,
+    /// New time-to-live in seconds from now; `null` removes the expiry.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub ttl_secs: Option<Option<i64>>,
+}
+
+impl From<UpdateBody> for MemoryPatch {
+    fn from(body: UpdateBody) -> Self {
+        MemoryPatch {
+            content: body.content,
+            tags: body.tags,
+            scope: body.scope,
+            ttl_secs: body.ttl_secs,
+        }
+    }
 }
 
 /// Two-tier [`MemoryError`] → HTTP mapping, mirroring `mcp.rs`'s
@@ -198,6 +245,41 @@ pub async fn forget_handler(
             Json(serde_json::json!({ "id": id, "deleted": false, "reason": "not_found" })),
         )
             .into_response())
+    }
+}
+
+/// `PATCH /api/memories/{id}` → 200 [`UpdatedMemory`] (the full post-update
+/// memory plus `embedding_status`), or 404 `{"id", "updated": false,
+/// "reason": "not_found"}` — the exact JSON the `mcp.rs` update tool returns,
+/// with HTTP-native status codes.
+///
+/// The body extractor's rejection is taken explicitly and reported as a 400
+/// with the usual `{"error": ...}` body: a malformed or wrongly-typed patch is
+/// client input, whatever axum's default status for it would be. Invalid
+/// patch VALUES (null/empty content, out-of-bounds TTL, an empty patch) are
+/// rejected by the service seam and map to 400 through [`map_memory_error`].
+///
+/// [`UpdatedMemory`]: agent_memory_core::domain::UpdatedMemory
+pub async fn update_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    body: Result<Json<UpdateBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
+
+    let updated = state
+        .service
+        .update(id, MemoryPatch::from(body))
+        .await
+        .map_err(map_memory_error)?;
+
+    match updated {
+        Some(updated) => Ok(Json(updated).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "id": id, "updated": false, "reason": "not_found" })),
+        )
+            .into_response()),
     }
 }
 
@@ -577,6 +659,268 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["embedder"], "unreachable");
+    }
+
+    // ---- PATCH /api/memories/{id} (MCP-06 / D-08) -------------------------
+    //
+    // Every patch below is a RAW JSON string pushed through axum's own `Json`
+    // extractor (`FromRequest`), so the explicit-null deserializer and the
+    // rejection mapping are under test — not a hand-built Rust struct.
+
+    use agent_memory_core::clock::Clock;
+    use agent_memory_core::domain::MAX_TTL_SECS;
+    use axum::extract::FromRequest;
+
+    async fn patch_raw(state: &Arc<AppState>, id: i64, raw: &str) -> Response {
+        patch_request(state, id, raw, Some("application/json")).await
+    }
+
+    async fn patch_request(
+        state: &Arc<AppState>,
+        id: i64,
+        raw: &str,
+        content_type: Option<&str>,
+    ) -> Response {
+        let mut builder = axum::http::Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/memories/{id}"));
+        if let Some(ct) = content_type {
+            builder = builder.header(axum::http::header::CONTENT_TYPE, ct);
+        }
+        let req = builder
+            .body(axum::body::Body::from(raw.to_string()))
+            .expect("request builds");
+        let body = Json::<UpdateBody>::from_request(req, &()).await;
+        match update_handler(State(state.clone()), Path(id), body).await {
+            Ok(resp) => resp,
+            Err(err) => err.into_response(),
+        }
+    }
+
+    /// Store a memory with tags `["rest"]`, scope `"unit"` and the given TTL.
+    async fn store_with_ttl(state: &Arc<AppState>, ttl_secs: Option<i64>) -> i64 {
+        let mut req = store_request("patch target", "PATTERN");
+        req.ttl_secs = ttl_secs;
+        let resp = store_handler(State(state.clone()), Json(req))
+            .await
+            .expect("store succeeds")
+            .into_response();
+        body_json(resp).await["id"].as_i64().expect("id")
+    }
+
+    /// Run a sweep at `at` and report whether `id` survived it.
+    async fn survives_sweep_at(state: &Arc<AppState>, id: i64, at: i64) -> bool {
+        state.service.sweep(at).await.expect("sweep runs");
+        state
+            .service
+            .list(ServiceListArgs::default())
+            .await
+            .expect("list")
+            .iter()
+            .any(|v| v.id == id)
+    }
+
+    async fn ok_body(resp: Response) -> serde_json::Value {
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200");
+        body_json(resp).await
+    }
+
+    async fn assert_400_containing(resp: Response, needle: &str) {
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 (never 500) for a patch that should contain {needle:?}"
+        );
+        let body = body_json(resp).await;
+        let message = body["error"]
+            .as_str()
+            .expect("400 body has an error string");
+        assert!(
+            message.contains(needle),
+            "error {message:?} should contain {needle:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_tags_matrix_absent_null_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        // absent → unchanged
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"scope": "elsewhere"}"#).await).await;
+        assert_eq!(body["tags"], serde_json::json!(["rest"]));
+        assert_eq!(
+            body["content"], "patch target",
+            "absent content is unchanged"
+        );
+
+        // null → cleared to an empty list
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"tags": null}"#).await).await;
+        assert_eq!(body["tags"], serde_json::json!([]));
+        assert_eq!(body["scope"], "unit", "an unrelated field is unchanged");
+
+        // value → set
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"tags": ["x", "y"]}"#).await).await;
+        assert_eq!(body["tags"], serde_json::json!(["x", "y"]));
+    }
+
+    #[tokio::test]
+    async fn patch_scope_matrix_absent_null_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"tags": ["t"]}"#).await).await;
+        assert_eq!(body["scope"], "unit", "absent scope is unchanged");
+
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"scope": null}"#).await).await;
+        assert_eq!(
+            body["scope"],
+            serde_json::Value::Null,
+            "null resets to global"
+        );
+
+        let id = store_with_ttl(&state, None).await;
+        let body = ok_body(patch_raw(&state, id, r#"{"scope": "other"}"#).await).await;
+        assert_eq!(body["scope"], "other");
+    }
+
+    #[tokio::test]
+    async fn patch_ttl_matrix_absent_null_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let now = SystemClock.now();
+        let past_old_ttl = now + 3_600; // well past the stored 60 s TTL
+
+        // absent → the 60 s expiry still applies
+        let id = store_with_ttl(&state, Some(60)).await;
+        ok_body(patch_raw(&state, id, r#"{"tags": ["keep-ttl"]}"#).await).await;
+        assert!(
+            !survives_sweep_at(&state, id, past_old_ttl).await,
+            "an absent ttl_secs leaves the expiry in place"
+        );
+
+        // null → no expiry: survives a sweep far past the old TTL
+        let id = store_with_ttl(&state, Some(60)).await;
+        ok_body(patch_raw(&state, id, r#"{"ttl_secs": null}"#).await).await;
+        assert!(
+            survives_sweep_at(&state, id, past_old_ttl).await,
+            "ttl_secs: null removes the expiry"
+        );
+
+        // value → a new TTL counted from patch time
+        let id = store_with_ttl(&state, Some(60)).await;
+        ok_body(patch_raw(&state, id, r#"{"ttl_secs": 86400}"#).await).await;
+        assert!(
+            survives_sweep_at(&state, id, past_old_ttl).await,
+            "the new 1-day TTL replaced the 60 s one"
+        );
+        assert!(
+            !survives_sweep_at(&state, id, now + 2 * 86_400).await,
+            "the new TTL itself still expires"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_content_null_or_empty_is_400_and_a_content_update_is_200() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let id = store_with_ttl(&state, None).await;
+
+        for raw in [
+            r#"{"content": null}"#,
+            r#"{"content": ""}"#,
+            r#"{"content": "   "}"#,
+        ] {
+            assert_400_containing(
+                patch_raw(&state, id, raw).await,
+                "content must be a non-empty string",
+            )
+            .await;
+        }
+
+        let body = ok_body(patch_raw(&state, id, r#"{"content": "rewritten"}"#).await).await;
+        assert_eq!(body["id"], id);
+        assert_eq!(body["content"], "rewritten");
+        assert_eq!(body["type"], "PATTERN");
+        // Dead embedder → the re-embed is pending, and the response says so.
+        assert_eq!(body["embedding_status"], 0);
+    }
+
+    #[tokio::test]
+    async fn patch_out_of_bounds_ttl_is_400_never_500_never_clamped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let id = store_with_ttl(&state, None).await;
+
+        let too_big = MAX_TTL_SECS + 1;
+        for raw in [
+            r#"{"ttl_secs": 0}"#.to_string(),
+            r#"{"ttl_secs": -1}"#.to_string(),
+            format!(r#"{{"ttl_secs": {too_big}}}"#),
+        ] {
+            assert_400_containing(
+                patch_raw(&state, id, &raw).await,
+                "ttl_secs must be between",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_of_an_unknown_id_is_404_with_the_not_found_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+
+        let resp = patch_raw(&state, 777, r#"{"content": "nobody home"}"#).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({ "id": 777, "updated": false, "reason": "not_found" })
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_or_empty_patches_are_400_never_500() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let id = store_with_ttl(&state, None).await;
+
+        // An empty patch is a client error, not a silent no-op.
+        assert_400_containing(patch_raw(&state, id, "{}").await, "at least one of").await;
+
+        // Extractor rejections — syntax, type, missing content type — are all
+        // reported as 400 with the standard error body.
+        for (raw, content_type) in [
+            (r#"{"tags": ["#, Some("application/json")),
+            (r#"{"ttl_secs": "soon"}"#, Some("application/json")),
+            (r#"{"tags": "not-a-list"}"#, Some("application/json")),
+            (r#"{"tags": ["x"]}"#, None),
+        ] {
+            let resp = patch_request(&state, id, raw, content_type).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "patch {raw:?} (content-type {content_type:?}) must be a 400"
+            );
+            let body = body_json(resp).await;
+            assert!(
+                !body["error"].as_str().expect("error string").is_empty(),
+                "the 400 carries a message: {body}"
+            );
+        }
+
+        // None of the rejected patches touched the row.
+        let rows = state
+            .service
+            .list(ServiceListArgs::default())
+            .await
+            .expect("list");
+        assert_eq!(rows[0].tags, vec!["rest".to_string()]);
     }
 
     #[test]

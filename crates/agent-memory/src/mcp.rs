@@ -476,6 +476,186 @@ mod tests {
         assert!(err.message.contains("content must be a non-empty string"));
     }
 
+    /// Raw JSON text → `UpdateArgs` → core patch: the deserializer under test.
+    fn patch_from_raw(raw: &str) -> MemoryPatch {
+        serde_json::from_str::<UpdateArgs>(raw)
+            .expect("raw update args deserialize")
+            .into_patch()
+            .1
+    }
+
+    #[test]
+    fn raw_update_args_carry_all_three_wire_states_into_the_patch() {
+        // D-08 / RESEARCH Pitfall 4: absent → None, null → Some(None),
+        // value → Some(Some(v)) — for each clearable field.
+        assert_eq!(patch_from_raw(r#"{"id": 1}"#), MemoryPatch::default());
+
+        let p = patch_from_raw(r#"{"id": 1, "ttl_secs": null, "tags": null, "scope": null}"#);
+        assert_eq!(p.ttl_secs, Some(None));
+        assert_eq!(p.tags, Some(None));
+        assert_eq!(p.scope, Some(None));
+        assert_eq!(p.content, None, "content stays absent");
+
+        let p = patch_from_raw(
+            r#"{"id": 1, "ttl_secs": 90, "tags": ["a"], "scope": "s", "content": "c"}"#,
+        );
+        assert_eq!(p.ttl_secs, Some(Some(90)));
+        assert_eq!(p.tags, Some(Some(vec!["a".to_string()])));
+        assert_eq!(p.scope, Some(Some("s".to_string())));
+        assert_eq!(p.content, Some(Some("c".to_string())));
+
+        // content: null survives deserialization as an explicit null, so the
+        // service can reject it (it must never collapse into "absent").
+        assert_eq!(
+            patch_from_raw(r#"{"id": 1, "content": null}"#).content,
+            Some(None)
+        );
+
+        let (id, _) = serde_json::from_str::<UpdateArgs>(r#"{"id": 42, "tags": []}"#)
+            .expect("deserializes")
+            .into_patch();
+        assert_eq!(id, 42);
+    }
+
+    async fn update_raw(server: &MemoryMcp, raw: &str) -> Result<CallToolResult, McpError> {
+        let args: UpdateArgs = serde_json::from_str(raw).expect("raw update args deserialize");
+        server.memory_update(Parameters(args)).await
+    }
+
+    async fn update_ok(server: &MemoryMcp, raw: &str) -> serde_json::Value {
+        result_json(&update_raw(server, raw).await.expect("update succeeds"))
+    }
+
+    #[tokio::test]
+    async fn memory_update_tags_and_scope_matrix_absent_null_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+
+        // tags
+        let id = store_one(&server, "t1").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "scope": "x"}}"#)).await;
+        assert_eq!(
+            body["tags"],
+            serde_json::json!(["before"]),
+            "absent → unchanged"
+        );
+        let id = store_one(&server, "t2").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "tags": null}}"#)).await;
+        assert_eq!(body["tags"], serde_json::json!([]), "null → empty");
+        let id = store_one(&server, "t3").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "tags": ["n"]}}"#)).await;
+        assert_eq!(body["tags"], serde_json::json!(["n"]), "value → set");
+
+        // scope
+        let id = store_one(&server, "s1").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "tags": ["k"]}}"#)).await;
+        assert_eq!(body["scope"], "project-a", "absent → unchanged");
+        let id = store_one(&server, "s2").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "scope": null}}"#)).await;
+        assert_eq!(body["scope"], serde_json::Value::Null, "null → global");
+        let id = store_one(&server, "s3").await;
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "scope": "project-b"}}"#)).await;
+        assert_eq!(body["scope"], "project-b", "value → set");
+    }
+
+    #[tokio::test]
+    async fn memory_update_ttl_matrix_absent_null_value() {
+        use agent_memory_core::clock::Clock;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let now = SystemClock.now();
+        // store_one sets a 3600 s TTL; this is well past it.
+        let past_old_ttl = now + 7_200;
+
+        let survives = |id: i64, at: i64| {
+            let server = server.clone();
+            async move {
+                server.state.service.sweep(at).await.expect("sweep");
+                let listed = server
+                    .memory_list(Parameters(ListArgs {
+                        r#type: None,
+                        tag: None,
+                        scope: None,
+                        limit: None,
+                    }))
+                    .await
+                    .expect("list");
+                result_json(&listed)
+                    .as_array()
+                    .expect("list is an array")
+                    .iter()
+                    .any(|v| v["id"] == id)
+            }
+        };
+
+        let id = store_one(&server, "ttl absent").await;
+        update_ok(&server, &format!(r#"{{"id": {id}, "tags": ["x"]}}"#)).await;
+        assert!(
+            !survives(id, past_old_ttl).await,
+            "absent → the old TTL still applies"
+        );
+
+        let id = store_one(&server, "ttl null").await;
+        update_ok(&server, &format!(r#"{{"id": {id}, "ttl_secs": null}}"#)).await;
+        assert!(survives(id, past_old_ttl).await, "null → no expiry");
+
+        let id = store_one(&server, "ttl value").await;
+        update_ok(&server, &format!(r#"{{"id": {id}, "ttl_secs": 86400}}"#)).await;
+        assert!(
+            survives(id, past_old_ttl).await,
+            "value → the new TTL replaced the old"
+        );
+        assert!(!survives(id, now + 2 * 86_400).await, "…and still expires");
+    }
+
+    #[tokio::test]
+    async fn memory_update_invalid_patches_are_invalid_params_never_internal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let id = store_one(&server, "untouched").await;
+        let invalid_params = McpError::invalid_params("x", None).code;
+        let too_big = agent_memory_core::domain::MAX_TTL_SECS + 1;
+
+        for (raw, needle) in [
+            (format!(r#"{{"id": {id}}}"#), "at least one of"),
+            (
+                format!(r#"{{"id": {id}, "content": null}}"#),
+                "content must be a non-empty string",
+            ),
+            (
+                format!(r#"{{"id": {id}, "content": ""}}"#),
+                "content must be a non-empty string",
+            ),
+            (
+                format!(r#"{{"id": {id}, "ttl_secs": 0}}"#),
+                "ttl_secs must be between",
+            ),
+            (
+                format!(r#"{{"id": {id}, "ttl_secs": -3}}"#),
+                "ttl_secs must be between",
+            ),
+            (
+                format!(r#"{{"id": {id}, "ttl_secs": {too_big}}}"#),
+                "ttl_secs must be between",
+            ),
+        ] {
+            let err = update_raw(&server, &raw)
+                .await
+                .expect_err("invalid patch is rejected");
+            assert_eq!(
+                err.code, invalid_params,
+                "{raw}: client tier, never internal_error"
+            );
+            assert!(err.message.contains(needle), "{raw}: got {:?}", err.message);
+        }
+
+        // Still exactly as stored.
+        let body = update_ok(&server, &format!(r#"{{"id": {id}, "scope": "probe"}}"#)).await;
+        assert_eq!(body["content"], "untouched");
+        assert_eq!(body["tags"], serde_json::json!(["before"]));
+    }
+
     #[test]
     fn update_args_schema_makes_only_id_required() {
         let schema =
