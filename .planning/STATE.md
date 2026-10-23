@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 04
 current_phase_name: Memory Update, Relations & Hybrid Search
 status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-10-23T17:58:30.378Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-10-23T18:11:23.164Z"
 last_activity: 2026-10-23
 last_activity_desc: Phase 04 execution started
-state_head: 2088a143bd9124cd863f653703a4c66f309befb0
+state_head: a49b6c6f5763bae94df3c1d219398cd4989f4455
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-23 — Phase 04 execution started
 
@@ -69,6 +69,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 04 P01 | 9 min | 2 tasks | 13 files |
+| Phase 04 P02 | 10min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,11 @@ Recent decisions affecting current work:
 - [Phase 04]: [04-01]: MAX_KNN_K = MAX_LIMIT * 4 (800) — candidate oversample cap, distinct from RRF k=60 (WR-01 partial; full filter-aware fix deferred)
 - [Phase 04]: [04-01]: SqliteStore::open order is probe user_version (before any PRAGMA, so a refused DB is byte-untouched) -> SchemaTooNew refusal -> pragmas -> sibling online backup {db}.backup-pre-{NNNN}-{YYYYMMDD} (one per target version, failure aborts) -> to_latest; LATEST_SCHEMA_VERSION=3 must be bumped with every new migration
 - [Phase 04]: [04-01]: tests/fixtures/v0.0.1.db is a committed binary fixture generated once from tag-identical 0001+0002 — never regenerate it; it is gitignored locally by *.db so stage with git add -f
+- [Phase 04]: 04-02: memory_update returns a dedicated UpdatedMemory (flattened MemoryView + embedding_status); MemoryView untouched so list/search envelopes stay byte-identical (D-10)
+- [Phase 04]: 04-02: an all-fields-absent patch is InvalidArgument, not a no-op; content null/empty rejected at the seam; TTL patches reuse validate_ttl (D-08)
+- [Phase 04]: 04-02: update is UPDATE-in-place (never delete+insert), folds the D-09 freshness bump and decay_score = 1.0 into the same statement, and swaps the vector in the same writer tx
+- [Phase 04]: 04-02: patch DTO fields carry skip_serializing_if so the MCP tool schema never advertises default: null (null means clear in a merge-patch)
+- [Phase 04]: 04-02: PATCH /api/memories/{id} maps every Json extractor rejection to 400 {error}; other REST handlers keep axum defaults
 
 ### Pending Todos
 
@@ -137,8 +143,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-23T17:58:30.334Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-10-23T18:11:16.057Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

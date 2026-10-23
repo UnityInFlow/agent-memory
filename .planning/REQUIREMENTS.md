@@ -15,7 +15,7 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### MCP Interface (MCP)
 
-- [ ] **MCP-06**: Agent can call `memory_update` to patch an existing memory (content, tags, scope, TTL) by id; a content update re-mirrors FTS and invalidates/re-embeds the vector **in the same writer transaction** (embed-outage falls back to `embedding_status = 0` + existing sweep backfill); unknown id returns the clean not-found shape
+- [x] **MCP-06**: Agent can call `memory_update` to patch an existing memory (content, tags, scope, TTL) by id; a content update re-mirrors FTS and invalidates/re-embeds the vector **in the same writer transaction** (embed-outage falls back to `embedding_status = 0` + existing sweep backfill); unknown id returns the clean not-found shape
 - [ ] **MCP-07**: Agent can link two memories with a flat typed relation (`memory_link` / `memory_unlink`: from_id, to_id, kind) and search/list results can expand 1-hop related memories; forgetting a memory cascades its links (no orphan edges, no graph/entity model)
 
 ### REST & Input Hardening (API)
@@ -64,7 +64,7 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 |-------------|-------|--------|
 | API-02 | Phase 3 | Complete |
 | API-03 | Phase 3 | Complete |
-| MCP-06 | Phase 4 | Pending |
+| MCP-06 | Phase 4 | Complete |
 | MCP-07 | Phase 4 | Pending |
 | STORE-05 | Phase 4 | Complete |
 | SEARCH-04 | Phase 4 | Pending |

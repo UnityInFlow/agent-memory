@@ -67,7 +67,7 @@ Plans:
   4. Hybrid ranking stays decay-aware — a fresh memory outranks a stale one at equal fused rank — and access bumps apply only to post-truncation returned ids.
   5. Upgrading a real v0.0.1 database applies migration 0003 only after a pre-migration backup; shipped 0001/0002 SQL is provably unchanged (fixture divergence test against a v0.0.1 database), and a newer-schema DB met by an older binary yields a friendly error, not a crash.
 
-**Plans**: 1/4 plans executed
+**Plans**: 2/4 plans executed
 Plans:
 **Wave 1**
 
@@ -75,7 +75,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-02-PLAN.md — memory_update end-to-end: merge-patch semantics, same-tx FTS+vector re-embed, PATCH /api/memories/{id} (MCP-06)
+- [x] 04-02-PLAN.md — memory_update end-to-end: merge-patch semantics, same-tx FTS+vector re-embed, PATCH /api/memories/{id} (MCP-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -124,6 +124,6 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 1. Core Memory Foundation | v1.0 | 3/3 | Complete | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
-| 4. Memory Update, Relations & Hybrid Search | v1.1 | 1/4 | In Progress|  |
+| 4. Memory Update, Relations & Hybrid Search | v1.1 | 2/4 | In Progress|  |
 | 5. Portable Export & Import | v1.1 | 0/? | Not started | - |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
