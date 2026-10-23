@@ -12,7 +12,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
-use agent_memory_core::domain::{MemoryError, MemoryPatch, MemoryType, NewMemory};
+use agent_memory_core::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, NewMemory,
+};
 use agent_memory_core::embed::Embedder;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, MemoryService, SearchArgs as ServiceSearchArgs,
@@ -182,6 +184,37 @@ impl UpdateArgs {
     }
 }
 
+/// Arguments for `memory_link` (MCP-07): create the directed edge
+/// `from_id -[kind]-> to_id`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkArgs {
+    /// The id of the memory the edge starts at.
+    pub from_id: i64,
+    /// The id of the memory the edge points to. Must differ from `from_id`.
+    pub to_id: i64,
+    /// One of: relates_to (symmetric "see also"), supersedes (from replaces
+    /// to), caused_by (from was caused by to).
+    pub kind: String,
+}
+
+/// Arguments for `memory_unlink` (MCP-07): remove the directed edge
+/// `from_id -[kind]-> to_id`. Direction and kind must match the stored edge.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UnlinkArgs {
+    /// The id the edge starts at.
+    pub from_id: i64,
+    /// The id the edge points to.
+    pub to_id: i64,
+    /// One of: relates_to, supersedes, caused_by.
+    pub kind: String,
+}
+
+/// Parse a wire `kind` up front (the `MemoryType` precedent): an unknown kind
+/// is `invalid_params` naming the allowed set, and never reaches the service.
+fn parse_link_kind(wire: &str) -> Result<LinkKind, McpError> {
+    LinkKind::try_from(wire).map_err(map_mcp_error)
+}
+
 /// The MCP server. Holds shared state and the generated tool router.
 #[derive(Clone)]
 pub struct MemoryMcp {
@@ -342,6 +375,80 @@ impl MemoryMcp {
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Link two memories with a typed, directed relation from_id -[kind]-> to_id. kind is one of: relates_to (symmetric see-also), supersedes (from_id replaces the older to_id), caused_by (from_id was caused by to_id). Linking an existing edge again is a no-op success; from_id and to_id must differ. Returns {from_id, to_id, kind, linked: true}, or {linked: false, reason: 'not_found', missing_id} when either memory does not exist."
+    )]
+    async fn memory_link(
+        &self,
+        Parameters(args): Parameters<LinkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let kind = parse_link_kind(&args.kind)?;
+        let outcome = self
+            .state
+            .service
+            .link(args.from_id, args.to_id, kind)
+            .await
+            .map_err(map_mcp_error)?;
+
+        // A missing endpoint is a clean not-found, NOT an error — the
+        // memory_forget shape, plus the id that was missing (D-02).
+        let status = match outcome {
+            LinkOutcome::Linked => serde_json::json!({
+                "from_id": args.from_id,
+                "to_id": args.to_id,
+                "kind": kind,
+                "linked": true
+            }),
+            LinkOutcome::NotFound { missing_id } => serde_json::json!({
+                "from_id": args.from_id,
+                "to_id": args.to_id,
+                "kind": kind,
+                "linked": false,
+                "reason": "not_found",
+                "missing_id": missing_id
+            }),
+        };
+        let json = serde_json::to_string(&status)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Remove the directed relation from_id -[kind]-> to_id (direction and kind must match the stored edge; kind is relates_to, supersedes or caused_by). Returns {from_id, to_id, kind, unlinked: true}, or a clean {unlinked: false, reason: 'not_found'} result when no such edge exists."
+    )]
+    async fn memory_unlink(
+        &self,
+        Parameters(args): Parameters<UnlinkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let kind = parse_link_kind(&args.kind)?;
+        let removed = self
+            .state
+            .service
+            .unlink(args.from_id, args.to_id, kind)
+            .await
+            .map_err(map_mcp_error)?;
+
+        let status = if removed {
+            serde_json::json!({
+                "from_id": args.from_id,
+                "to_id": args.to_id,
+                "kind": kind,
+                "unlinked": true
+            })
+        } else {
+            serde_json::json!({
+                "from_id": args.from_id,
+                "to_id": args.to_id,
+                "kind": kind,
+                "unlinked": false,
+                "reason": "not_found"
+            })
+        };
+        let json = serde_json::to_string(&status)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -353,7 +460,7 @@ impl ServerHandler for MemoryMcp {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
-            "Persistent typed agent memory: store, list, search, update, and forget typed memories."
+            "Persistent typed agent memory: store, list, search, update, link/unlink, and forget typed memories."
                 .to_string(),
         );
         info
@@ -677,6 +784,128 @@ mod tests {
                 property.get("default").is_none(),
                 "{field} must not advertise a default: {property}"
             );
+        }
+    }
+
+    async fn link_raw(server: &MemoryMcp, raw: &str) -> Result<CallToolResult, McpError> {
+        let args: LinkArgs = serde_json::from_str(raw).expect("raw link args deserialize");
+        server.memory_link(Parameters(args)).await
+    }
+
+    async fn unlink_raw(server: &MemoryMcp, raw: &str) -> Result<CallToolResult, McpError> {
+        let args: UnlinkArgs = serde_json::from_str(raw).expect("raw unlink args deserialize");
+        server.memory_unlink(Parameters(args)).await
+    }
+
+    #[tokio::test]
+    async fn memory_link_and_unlink_round_trip_with_idempotent_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let a = store_one(&server, "newer decision").await;
+        let b = store_one(&server, "older decision").await;
+        let raw = format!(r#"{{"from_id": {a}, "to_id": {b}, "kind": "supersedes"}}"#);
+        let linked = serde_json::json!({
+            "from_id": a, "to_id": b, "kind": "supersedes", "linked": true
+        });
+
+        let first = link_raw(&server, &raw).await.expect("link succeeds");
+        assert_eq!(result_json(&first), linked);
+        // D-02: the identical link again is the same success, not an error.
+        let again = link_raw(&server, &raw).await.expect("duplicate is a no-op");
+        assert_eq!(result_json(&again), linked);
+
+        let removed = unlink_raw(&server, &raw).await.expect("unlink succeeds");
+        assert_eq!(
+            result_json(&removed),
+            serde_json::json!({
+                "from_id": a, "to_id": b, "kind": "supersedes", "unlinked": true
+            })
+        );
+        let missing = unlink_raw(&server, &raw)
+            .await
+            .expect("a missing edge is a successful tool call");
+        assert_eq!(
+            result_json(&missing),
+            serde_json::json!({
+                "from_id": a, "to_id": b, "kind": "supersedes",
+                "unlinked": false, "reason": "not_found"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_link_to_a_missing_memory_is_a_clean_not_found_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let a = store_one(&server, "present").await;
+
+        let result = link_raw(
+            &server,
+            &format!(r#"{{"from_id": {a}, "to_id": 999999, "kind": "caused_by"}}"#),
+        )
+        .await
+        .expect("a missing endpoint is a successful tool call, never internal_error");
+        assert_eq!(
+            result_json(&result),
+            serde_json::json!({
+                "from_id": a, "to_id": 999_999, "kind": "caused_by",
+                "linked": false, "reason": "not_found", "missing_id": 999_999
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_link_self_links_and_unknown_kinds_are_invalid_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let a = store_one(&server, "solo").await;
+        let invalid_params = McpError::invalid_params("x", None).code;
+
+        let err = link_raw(
+            &server,
+            &format!(r#"{{"from_id": {a}, "to_id": {a}, "kind": "relates_to"}}"#),
+        )
+        .await
+        .expect_err("self-link is rejected");
+        assert_eq!(err.code, invalid_params);
+        assert_eq!(
+            err.message,
+            format!("invalid argument: from_id and to_id must differ (got {a})")
+        );
+
+        for call in ["link", "unlink"] {
+            let raw = format!(r#"{{"from_id": {a}, "to_id": 7, "kind": "blocks"}}"#);
+            let err = match call {
+                "link" => link_raw(&server, &raw).await,
+                _ => unlink_raw(&server, &raw).await,
+            }
+            .expect_err("unknown kind is rejected");
+            assert_eq!(err.code, invalid_params, "{call}: client tier");
+            assert_eq!(
+                err.message,
+                "invalid argument: kind must be one of relates_to, supersedes, caused_by (got 'blocks')",
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_args_schemas_require_all_three_fields_and_advertise_no_defaults() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(LinkArgs)).expect("schema"),
+            serde_json::to_value(schemars::schema_for!(UnlinkArgs)).expect("schema"),
+        ] {
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["from_id", "to_id", "kind"]),
+                "{schema}"
+            );
+            for field in ["from_id", "to_id", "kind"] {
+                assert!(
+                    schema["properties"][field].get("default").is_none(),
+                    "{field} must not advertise a default: {schema}"
+                );
+            }
         }
     }
 

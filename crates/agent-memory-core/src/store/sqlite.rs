@@ -20,7 +20,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
-use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
+use crate::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
+    UpdatedMemory,
+};
 use crate::service::{ListArgs, SearchArgs};
 use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
 use crate::store::Store;
@@ -596,8 +599,74 @@ impl Store for SqliteStore {
         // / T-02-05: a forgotten memory must never resurface semantically).
         tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])?;
         let changed = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        // Relation edges: `ON DELETE CASCADE` (foreign_keys = ON on every
+        // connection, apply_pragmas) already removed this row's edges. The
+        // explicit sweep below is the belt-and-braces backstop for any
+        // connection that ever skipped the pragma — it also heals orphans such
+        // a connection may have left behind (MCP-07 / T-04-12, milestone
+        // Pitfall 9) and is what stops a recycled rowid from ever re-attaching
+        // an old edge to an unrelated memory. Mirrors the vec_memories orphan
+        // idiom in sweep_expired.
+        tx.execute(
+            "DELETE FROM memory_links WHERE from_id NOT IN (SELECT id FROM memories) \
+             OR to_id NOT IN (SELECT id FROM memories)",
+            [],
+        )?;
         tx.commit()?;
         Ok(changed > 0)
+    }
+
+    fn link(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+        now: i64,
+    ) -> Result<LinkOutcome, MemoryError> {
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
+        let tx = conn.transaction()?;
+
+        // Pre-check BOTH endpoints inside the writer tx and report the first
+        // missing id as data. Never rely on the FK violation: parsing a
+        // SqliteFailure would surface a client mistake as a 500 (T-04-13).
+        for id in [from_id, to_id] {
+            let exists = tx
+                .query_row("SELECT 1 FROM memories WHERE id = ?1", params![id], |_| {
+                    Ok(())
+                })
+                .optional()?
+                .is_some();
+            if !exists {
+                // The tx rolls back on drop; nothing was written.
+                return Ok(LinkOutcome::NotFound { missing_id: id });
+            }
+        }
+
+        // The (from_id, to_id, kind) primary key makes a duplicate an
+        // idempotent no-op: changes() == 0 is still Linked (D-02). The kind
+        // binds only the closed enum's wire form (T-04-10).
+        tx.execute(
+            "INSERT OR IGNORE INTO memory_links (from_id, to_id, kind, created_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![from_id, to_id, kind.as_wire_str(), now],
+        )?;
+        tx.commit()?;
+        Ok(LinkOutcome::Linked)
+    }
+
+    fn unlink(&self, from_id: i64, to_id: i64, kind: LinkKind) -> Result<bool, MemoryError> {
+        let conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
+        let removed = conn.execute(
+            "DELETE FROM memory_links WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
+            params![from_id, to_id, kind.as_wire_str()],
+        )?;
+        Ok(removed > 0)
     }
 
     fn update(
@@ -770,6 +839,13 @@ impl Store for SqliteStore {
         )?;
         tx.execute(
             "DELETE FROM vec_memories WHERE memory_id NOT IN (SELECT id FROM memories)",
+            [],
+        )?;
+        // Edges of the expired rows: cascaded by the FK, with the same
+        // explicit backstop as forget() (MCP-07 / T-04-12).
+        tx.execute(
+            "DELETE FROM memory_links WHERE from_id NOT IN (SELECT id FROM memories) \
+             OR to_id NOT IN (SELECT id FROM memories)",
             [],
         )?;
         tx.commit()?;

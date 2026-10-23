@@ -68,6 +68,85 @@ impl std::convert::TryFrom<&str> for MemoryType {
     }
 }
 
+/// The closed vocabulary of typed relations between two memories (MCP-07 /
+/// D-01). Exactly three kinds ship in v0.1.0; adding one later is additive,
+/// removing one is a contract break.
+///
+/// Edges are stored DIRECTED (D-03), and each kind reads `from <kind> to`:
+///
+/// - `relates_to` — a symmetric "see also"; the direction carries no meaning.
+/// - `supersedes` — `from` replaces `to` (the newer memory points at the older).
+/// - `caused_by` — `from` was caused by `to` (the effect points at its cause).
+///
+/// The wire form is snake_case (`relates_to`, `supersedes`, `caused_by`).
+/// Parse untrusted input with [`LinkKind::try_from`], which rejects anything
+/// else with [`MemoryError::InvalidArgument`] naming the allowed set — so a
+/// free-form kind string never reaches SQL (T-04-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKind {
+    RelatesTo,
+    Supersedes,
+    CausedBy,
+}
+
+impl LinkKind {
+    /// The snake_case wire form, matching the serde representation. This is
+    /// also the exact value stored in `memory_links.kind`.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            LinkKind::RelatesTo => "relates_to",
+            LinkKind::Supersedes => "supersedes",
+            LinkKind::CausedBy => "caused_by",
+        }
+    }
+
+    /// The natural label of this kind read from the TARGET's side of the edge
+    /// (D-03): `relates_to` is symmetric and stays `relates_to`; an incoming
+    /// `supersedes` reads `superseded_by`; an incoming `caused_by` reads
+    /// `caused`. Used by 1-hop expansion for `direction: "in"` entries.
+    pub fn reverse_label(self) -> &'static str {
+        match self {
+            LinkKind::RelatesTo => "relates_to",
+            LinkKind::Supersedes => "superseded_by",
+            LinkKind::CausedBy => "caused",
+        }
+    }
+}
+
+impl std::fmt::Display for LinkKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
+
+impl std::convert::TryFrom<&str> for LinkKind {
+    type Error = MemoryError;
+
+    fn try_from(s: &str) -> Result<Self, MemoryError> {
+        match s {
+            "relates_to" => Ok(LinkKind::RelatesTo),
+            "supersedes" => Ok(LinkKind::Supersedes),
+            "caused_by" => Ok(LinkKind::CausedBy),
+            other => Err(MemoryError::InvalidArgument(format!(
+                "kind must be one of relates_to, supersedes, caused_by (got '{other}')"
+            ))),
+        }
+    }
+}
+
+/// Outcome of a link request (MCP-07 / D-02). A missing endpoint is DATA, not
+/// an error: it names the first id that does not exist (`from_id` is checked
+/// before `to_id`), so a client never sees a foreign-key failure (T-04-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkOutcome {
+    /// The edge exists now — freshly created, or already present (a duplicate
+    /// link is an idempotent no-op success).
+    Linked,
+    /// No memory with `missing_id` exists; nothing was written.
+    NotFound { missing_id: i64 },
+}
+
 /// Input shape for storing a new memory (D-05).
 ///
 /// Only `content` and `mem_type` are conceptually required at the service boundary;
@@ -278,6 +357,19 @@ pub(crate) fn validate_patch(patch: &MemoryPatch) -> Result<(), MemoryError> {
     // Only a present value is bounds-checked: absent (keep) and null (clear
     // the expiry) both flatten to None, which validate_ttl always accepts.
     validate_ttl(patch.ttl_secs.flatten())
+}
+
+/// Validate a link's endpoints at the service seam (MCP-07 / D-02): a memory
+/// cannot be linked to itself. Runs before any store hop, so a self-link is
+/// the client tier even when the id does not exist. (The 0003 `CHECK` is the
+/// belt-and-braces backstop; it is never what a client observes.)
+pub(crate) fn validate_link_endpoints(from_id: i64, to_id: i64) -> Result<(), MemoryError> {
+    if from_id == to_id {
+        return Err(MemoryError::InvalidArgument(format!(
+            "from_id and to_id must differ (got {from_id})"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
