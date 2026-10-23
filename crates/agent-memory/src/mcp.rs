@@ -152,11 +152,21 @@ pub struct ForgetArgs {
 /// can be replaced but never cleared or emptied. At least one field besides
 /// `id` is required. `type` and `source` cannot be changed.
 ///
+/// Unknown keys are rejected (`deny_unknown_fields`, REVIEW WR-02): that covers
+/// the immutable `type`/`source` and typos such as `ttl_sec`. In a merge-patch a
+/// silently dropped member is a silent partial write, so the whole call fails
+/// naming the field and nothing is written. rmcp deserializes the tool
+/// `arguments` object straight into this type and reports the failure as a
+/// tool error result (`isError: true`, "failed to deserialize parameters:
+/// unknown field ...") before the handler runs. MCP `_meta` travels outside
+/// `arguments`, so no legitimate key is lost.
+///
 /// `skip_serializing_if` on the patch fields is for the SCHEMA, not the wire:
 /// it stops schemars from advertising `"default": null`. A client that fills
 /// in schema defaults would otherwise send explicit nulls — and null means
 /// "clear" here, so every patch would wipe tags/scope/ttl.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateArgs {
     /// The numeric id of the memory to update.
     pub id: i64,
@@ -379,7 +389,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Update a memory in place by id (JSON merge-patch): omit a field to keep it, send null to clear it (tags -> [], scope -> global, ttl_secs -> no expiry), send a value to set it. content can be replaced but never cleared; a new content is re-indexed and re-embedded. Returns the full updated memory including embedding_status (0 = re-embed pending), or a clean not-found result for an unknown id."
+        description = "Update a memory in place by id (JSON merge-patch): omit a field to keep it, send null to clear it (tags -> [], scope -> global, ttl_secs -> no expiry), send a value to set it. content can be replaced but never cleared; a new content is re-indexed and re-embedded. Unknown or immutable fields (such as type and source, or a misspelled field) are rejected with an error naming the field and nothing is written. Returns the full updated memory including embedding_status (0 = re-embed pending), or a clean not-found result for an unknown id."
     )]
     async fn memory_update(
         &self,
@@ -826,6 +836,30 @@ mod tests {
             assert!(
                 property.get("default").is_none(),
                 "{field} must not advertise a default: {property}"
+            );
+        }
+        // deny_unknown_fields is advertised, so a schema-driven client knows
+        // that type/source and misspelled keys are refused (REVIEW WR-02).
+        assert_eq!(
+            schema["additionalProperties"],
+            serde_json::json!(false),
+            "unknown fields are refused in the tool schema: {schema}"
+        );
+    }
+
+    #[test]
+    fn update_args_reject_unknown_and_immutable_fields() {
+        for (raw, field) in [
+            (r#"{"id": 1, "content": "x", "type": "DECISION"}"#, "type"),
+            (r#"{"id": 1, "source": "y"}"#, "source"),
+            (r#"{"id": 1, "ttl_sec": 60}"#, "ttl_sec"),
+        ] {
+            let err = serde_json::from_str::<UpdateArgs>(raw)
+                .expect_err("an unknown or immutable field is refused");
+            let message = err.to_string();
+            assert!(
+                message.contains("unknown field") && message.contains(field),
+                "{raw}: got {message:?}"
             );
         }
     }
