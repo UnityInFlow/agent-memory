@@ -1,181 +1,230 @@
 ---
 phase: 04-memory-update-relations-hybrid-search
-verified: 2026-10-23T18:52:00Z
-status: gaps_found
-score: 13/15 must-haves verified
+verified: 2026-10-23T20:19:46Z
+status: passed
+score: 28/28 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
-gaps:
-  - truth: "A malformed MATCH query is a 400/invalid_params in hybrid mode exactly as in keyword mode — the keyword leg's InvalidQuery propagates (plan 04-04 must-have #3; Phase 3 taxonomy: client input is never a 500)"
-    status: failed
-    reason: >-
-      map_fts_query_error only recognises the substrings "fts5: syntax error" and "unterminated string".
-      FTS5 reports column-filter-shaped input (a hyphen or a colon: `sqlite-vec`, `auth: tokens`) as
-      "no such column: <x>", which falls through to MemoryError::Sqlite, so the result is MCP -32603
-      internal_error / REST 500 and the raw SQLite message ("sqlite error: no such column: vec") leaks to the
-      client. Keyword mode has had this since v1.0, but this phase sends every Ollama-up search through the
-      keyword leg. v0.0.1 answered these queries semantically; HEAD returns a server fault. Observed live on
-      both v0.0.1 (/opt/homebrew/bin/agent-memory) and the HEAD binary with a real Ollama.
-    artifacts:
-      - path: "crates/agent-memory-core/src/store/sqlite.rs"
-        issue: "map_fts_query_error (line ~333) marker list misses the step-time 'no such column' FTS5 parse failure; it is used by keyword_candidates (hybrid leg) and search (keyword path)"
-      - path: "crates/agent-memory-core/tests/hybrid.rs"
-        issue: "a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword_mode covers only '\"unbalanced', 'AND', 'what is the plan?', with no hyphen or colon case"
-    missing:
-      - "Classify the step-time FTS5 'no such column' failure (the SQL is static, so at step time it can only come from the MATCH string) as MemoryError::InvalidQuery, or resolve it through the sanitisation option in the decision item below"
-      - "Add 'sqlite-vec' and 'auth: tokens' to the malformed-query table test for both hybrid and keyword modes, plus a REST and MCP assertion that the tier is 400 / invalid_params with no 'sqlite error' text in the body"
-human_verification:
-  - test: "Decide the contract for natural-language queries when Ollama is up. Run memory_search with 'what vector store do we use?' (or any query containing ? , ' - :) against a store holding 'We chose sqlite-vec for local vector similarity search'"
-    expected: "Developer decision. Today it returns invalid_params (400). v0.0.1 returned the right memory semantically. This was a deliberate planner decision (T-04-15), documented in README 'Behavioral changes in v0.1.0' item 3, but it cuts against the phase outcome 'I find the right memory even when the phrasing differs'. Options: (a) accept it as is and record an override; (b) sanitise or quote the keyword leg's input (e.g. tokenise into quoted OR'd terms) so natural-language punctuation can never fail the leg, which also fixes the gap above; (c) serve the KNN leg alone on a keyword-leg parse error (the plan rejected this as mode-probing)"
-    why_human: "Two locked contracts conflict: the plan's T-04-15 classification parity against the roadmap goal's paraphrase-recall outcome. This is a product decision, not a code defect a grep can settle"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 13/15
+  gaps_closed:
+    - "Truth #14: hyphen/colon queries (sqlite-vec, auth: tokens) no longer produce a 500 / internal_error with leaked SQLite text. They now return results in both modes. The original wording ('a malformed MATCH is 400 in hybrid mode') is superseded by user decision option-a, which is recorded in the 04-05 plan and in STATE.md [04-05]"
+    - "Truth #15: the human-decision item is resolved by option-a. Natural-language and punctuated queries succeed in hybrid and keyword mode, identically with Ollama up or down. Verified live over MCP and REST"
+  gaps_remaining: []
+  regressions: []
+  superseded_must_haves:
+    - must_have: "A malformed MATCH query is a 400/invalid_params in hybrid mode exactly as in keyword mode (04-04 must-have #3)"
+      superseded_by: "User decision option-a, 2026-10-23"
+      recorded_in:
+        - ".planning/phases/04-memory-update-relations-hybrid-search/04-05-PLAN.md section 'Locked user decision'"
+        - ".planning/STATE.md decision [Phase 04] 04-05 (line 118)"
 ---
 
-# Phase 4: Memory Update, Relations & Hybrid Search — Verification Report
+# Phase 4: Memory Update, Relations & Hybrid Search Verification Report
 
-**Phase Goal:** As an agent, I want to update existing memories, link related ones, and get hybrid keyword+semantic recall, so that my memory stays current and connected and I find the right memory even when the phrasing differs.
-**Verified:** 2026-10-23T18:52:00Z
-**Status:** gaps_found
-**Re-verification:** No, initial verification
+**Phase goal:** As an agent, I want to update existing memories, link related ones, and get hybrid keyword+semantic recall, so that my memory stays current and connected and I find the right memory even when the phrasing differs.
+**Verified:** 2026-10-23T20:19:46Z
+**Status:** passed
+**Re-verification:** Yes. This follows gap-closure plans 04-05, 04-06 and 04-07. The previous run was gaps_found at 13/15.
 
-Evidence sources:
-- Code read at HEAD `bff047f`, with a clean working tree under `crates/`.
-- The phase test binaries (`update`, `relations`, `hybrid`, `migration_hygiene`, `import`): 56 passed, 0 failed, 1 ignored (the one-shot fixture generator).
-- Orchestrator gates: fmt, clippy `-D warnings`, build, and `cargo test --workspace` (170 passed / 0 failed / 2 ignored).
-- **Live sessions** of the HEAD binary over MCP stdio against a real local Ollama (`nomic-embed-text`) and against an unreachable URL.
-- A **real v0.0.1 database** written by the installed Homebrew `agent-memory 0.0.1`, then upgraded by HEAD.
+## Evidence
 
-All scratch data lives in `/tmp/v04live-data` and `/tmp/v04real-data`. Nothing in the repo was modified.
+- **Code:** read at HEAD `8b2c762`. The working tree under `crates/` and `README.md` is clean.
+- **Build:** the binary was rebuilt from HEAD (`cargo build -p agent-memory`).
+- **Tests I ran myself:**
+  - phase test binaries `hybrid` 21, `backfill_race` 7, `relations` 27, `migration_hygiene` 8 (+1 ignored generator), `update` 9: all pass;
+  - `agent-memory-core --lib store::sqlite`: 12 pass;
+  - the stdio e2e `tools`: 6 pass;
+  - the named MCP tests `memory_update_*` and `memory_search_storage_failure_is_internal_error_without_sqlite_text`: pass.
+- **Orchestrator gates at HEAD:** fmt, clippy `-D warnings`, `cargo test --workspace` (211 passed / 0 failed / 2 ignored).
+- **Live sessions:** the HEAD binary over MCP stdio and REST, against the real local Ollama (`nomic-embed-text`) and against an unreachable URL (`http://127.0.0.1:9`).
+- **Scratch data:** all under `/tmp/v04re-data` and `/tmp/v04re-scripts`. Nothing in the repo was modified.
 
-## Goal Achievement
+## Goal Achievement — User Flow Coverage (MVP mode)
+
+| Story step | Expected | Evidence | Status |
+|---|---|---|---|
+| Update an existing memory | Patch changes it in place; the old meaning stops matching; unknown or immutable fields are refused | Live: `memory_update {id:4, content}` returned the full view with `embedding_status:1`. `{type}`, `{ttl_sec}` and `{source}` were refused, naming the field, and the row was unchanged. Unknown id 999 gave a clean not_found | ✓ |
+| Link related memories | Typed link; symmetric `relates_to`; 1-hop expansion; cascade on forget | Live: link(5,2) followed by link(2,5) `relates_to` produced one edge. Expansion listed it once from each side. unlink(2,5) removed it, and the response echoed the request order. A pair of directed `supersedes` edges (6→1 and 1→6) stayed two edges. forget(6) left 0 edges | ✓ |
+| Find the right memory even when phrasing differs | Hybrid recall with punctuation-tolerant queries, Ollama up or down | Live, 25-query table (below): every query succeeded in both modes, with 0 errors and no SQLite text in any body or log | ✓ |
 
 ### Observable Truths
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | SC1: `memory_update` partial patch (content/tags/scope/TTL) changes the memory in place; a content update re-mirrors FTS and invalidates/re-embeds the vector in the same writer tx; an outage gives `embedding_status=0` plus sweep backfill; the old meaning stops matching; an unknown id gets a clean not-found | ✓ VERIFIED | `SqliteStore::update` (sqlite.rs:731-854) does one lock and one tx. It runs `UPDATE memories SET ...` in place (never DELETE+INSERT); the `memories_au` trigger re-mirrors FTS; `DELETE FROM vec_memories` plus a re-insert, or status 0, happens in the same tx. Tests pass: `content_update_re_embeds_so_the_old_meaning_stops_matching` (it uses 4 distractors and also checks that the FTS old word is gone), `embed_outage_during_update_falls_back_to_pending_and_sweep_backfills`, `updating_an_unknown_id_is_a_clean_not_found`. Live: the update returned the full view with `embedding_status:1`. A paraphrase query that ranked id 1 first fell to rank 3 after its content changed. id 999 returned `{"id":999,"reason":"not_found","updated":false}` |
-| 2 | SC2: `memory_link`/`memory_unlink` handle flat typed relations; search and list can expand 1-hop; forget and TTL expiry cascade links with no orphans; no graph model | ✓ VERIFIED | 0003 `memory_links` has a PK of (from,to,kind), FK `ON DELETE CASCADE` on both columns, `CHECK from!=to`, and `idx_links_to`. `related()` is a single non-recursive 1-hop SQL query. Explicit orphan deletes exist in both `forget` and `sweep_expired` (lines 669, 956). There are 19 relations tests, including pragma-less orphan healing. Live: a link of 1→2 `supersedes` expanded with `superseded_by`/`in` on id 2. After `forget(1)`, the DB held 0 orphan edges |
-| 3 | SC3: with Ollama available, search returns RRF-fused results (k=60, duplicate ids sum) labelled `hybrid`; with Ollama unreachable, it degrades to keyword exactly as v1.0 with an unchanged envelope | ✓ VERIFIED (fusion and degrade mechanics; see #15 for the query-class caveat) | `RRF_K = 60.0` and `rrf_fuse` (service.rs:78-105) use 1-based ranks with summed contributions. The goldens pass (2/62 beats 1/61, duplicate ids sum, id tie-break). Public `fn search` is **byte-identical** to the pre-phase `907161c` (diffed), and the service keyword arm differs only by opt-in expansion. Live with Ollama up: `search_mode: hybrid`, keys `[results, search_mode]`. Live with Ollama down on the same DB: `search_mode: keyword` with the same keys and one fallback warning per search |
-| 4 | SC4: hybrid ranking is decay-aware (fresh beats stale at equal fused rank); access bumps go only to post-truncation returned ids | ✓ VERIFIED | Decay is multiplicative and applied once after fusion (service.rs:437-455). `at_equal_fused_rank_the_fresh_memory_outranks_the_stale_one` uses a genuine cross-rank tie (1/61 + 1/62 each), in both orientations, so id order cannot win. `only_the_returned_ids_are_bumped_never_the_fusion_candidates` uses 20 candidates in both legs at limit 5 and finds exactly the 5 returned rows bumped. `spawn_bump` is called after `take(limit)` and before expansion |
-| 5 | SC5: upgrading a real v0.0.1 DB applies 0003 only after a pre-migration backup; 0001/0002 SQL provably unchanged; a newer-schema DB gets a friendly error, not a crash | ✓ VERIFIED | Probe, then refuse, then pragmas, then backup, then migrate (sqlite.rs:224-252). `git diff v0.0.1` on 0001/0002 is empty. The fixture is committed, and the divergence test compares normalized `sqlite_master`. **Live with the real v0.0.1 binary:** the DB written by Homebrew 0.0.1 was opened by HEAD and produced `real.db.backup-pre-0003-20261023` (user_version=2, 2 rows, no memory_links); the live DB went to user_version=3 with data intact, and hybrid search, link and update all worked. **Live too-new:** `user_version=99` gave exit 1, 0 bytes on stdout, and the D-13 message on stderr naming 99, 3 and the brew command. The DB's shasum was unchanged |
-| 6 | Re-importing a `source: None` draft is idempotent (CR-01) | ✓ VERIFIED | `source IS ?1` (sqlite.rs:496); `.as_deref()` in service import; test `reimporting_a_sourceless_draft_is_idempotent` passes |
-| 7 | A poisoned writer lock is 500/internal_error, never 404 (WR-02) | ✓ VERIFIED | 9 `Internal("writer lock poisoned")` sites, including the new link/unlink/update writers. `MemoryError::NotFound`/`ApiError::NotFound` have 0 references. Mapper tier unit tests pass (full suite) |
-| 8 | Merge-patch semantics: absent = unchanged, null = clear (ttl/tags/scope), content null or empty = 400 | ✓ VERIFIED | `validate_patch` runs before the embed. Matrix tests at core (`tags_and_scope_patch_matrix_absent_null_value`, `ttl_patch_matrix_...`) and on both transports from raw JSON (mcp.rs:669/701/753, handlers.rs PATCH tests). Patch DTOs set `skip_serializing_if`, so the schema carries no `default: null` |
-| 9 | The update response is the full post-update view plus `embedding_status`, and the update bumps `last_accessed` | ✓ VERIFIED | `UpdatedMemory` flattens `MemoryView` and adds `embedding_status`. The UPDATE statement folds in `last_accessed = now, access_count + 1`. Tests: `update_bumps_freshness_by_exactly_one_access`, `update_returns_the_full_post_update_view_with_embedding_status`. Live response included `embedding_status` |
-| 10 | Link edge cases: a duplicate is an idempotent no-op; a self-link is 400; an unknown kind is 400 listing the allowed values; a missing endpoint is a not-found naming the id | ✓ VERIFIED | `INSERT OR IGNORE`; endpoint pre-check inside the tx (no FK-violation 500); `validate_link_endpoints` at the seam. Relations tests and MCP/REST transport tests pass |
-| 11 | Expansion covers both directions with natural reverse labels and a cap of `MAX_EXPANDED_LINKS = 10`, most recent first | ✓ VERIFIED | `related()` uses `ORDER BY l.created_at DESC ... LIMIT ?2`. Tests: `expansion_is_capped_and_the_most_recent_edges_win`, `expansion_follows_one_edge_both_ways_with_natural_labels`. Live: `supersedes`/`out` and `superseded_by`/`in` |
-| 12 | With `expand_links` absent, the search and list JSON is byte-identical to v1.0 (no `related` key) | ✓ VERIFIED | `#[serde(skip_serializing_if = "Option::is_none")]` on `related`. Golden test `flag_less_envelopes_are_byte_identical_to_v1_and_never_mention_related`. Live: flag-less results carried no `related` |
-| 13 | Expanded neighbors never receive access bumps | ✓ VERIFIED | Expansion runs after `spawn_bump(returned ids)`. Tests `expanded_neighbors_are_never_access_bumped` and `hybrid_expansion_runs_after_the_bump_and_never_bumps_neighbors` pass |
-| 14 | A malformed MATCH is 400/invalid_params in hybrid mode exactly as in keyword mode (plan 04-04 must-have) | ✗ FAILED | Holds for the `fts5: syntax error` / `unterminated string` class only. **Live HEAD with Ollama up:** `memory_search {"query":"sqlite-vec"}` returned `-32603 internal_error "sqlite error: no such column: vec"`. The REST mapper sends `MemoryError::Sqlite` to 500. Classification parity with keyword mode holds (both modes give 500), but the 400 tier does not, and the SQL detail leaks. **Live v0.0.1 with Ollama up:** the same query returned the right memory (`search_mode: semantic`), so on the Ollama-up path this is a regression |
-| 15 | Goal outcome: "I find the right memory even when the phrasing differs" (derived from the user story's so-that clause) | ? UNCERTAIN (decision needed) | Paraphrases without punctuation work live (for example, "which datastore keeps client information" finds "Postgres is our primary relational database for customer records" at rank 1 with no keyword overlap). Paraphrases with ordinary punctuation fail: `what vector store do we use?` gives invalid_params at HEAD, while v0.0.1 found the right memory. This is deliberate (T-04-15) and documented in the README, but it conflicts with the outcome clause. See Human Verification |
+| 1 | SC1: `memory_update` partial patch changes the memory in place. A content change re-mirrors FTS and re-embeds in the same writer tx. An embed outage gives status 0 plus backfill. The old meaning stops matching. An unknown id gets a clean not-found | ✓ VERIFIED (regression) | `update.rs` 9/9 pass. Live update returned `embedding_status:1`. Live id 999 returned `{"id":999,"reason":"not_found","updated":false}` on MCP, and 404 with the same body on REST |
+| 2 | SC2: link/unlink handle flat typed relations; search/list can expand 1-hop; forget and TTL cascade with no orphans | ✓ VERIFIED (regression) | `relations.rs` 27/27 pass, including the forget/TTL cascade and orphan-healing tests. Live forget(6) left `memory_links` count = 0 |
+| 3 | SC3: with Ollama up, RRF k=60 hybrid labelled `hybrid`; with Ollama down, keyword exactly as v1.0 with an unchanged envelope | ✓ VERIFIED (regression) | Live: up gave `search_mode:"hybrid"`, down gave `"keyword"`, both with keys `{search_mode, results}`. `hybrid.rs` RRF goldens pass |
+| 4 | SC4: decay-aware hybrid ranking; bumps go only to post-truncation returned ids | ✓ VERIFIED (regression) | `hybrid.rs` passes (equal-fused-rank fresh-vs-stale, returned-ids-only bump). The service still bumps after `take(limit)` and before expansion |
+| 5 | SC5: real v0.0.1 upgrade only after a pre-migration backup; 0001/0002 frozen; newer schema gives a friendly error | ✓ VERIFIED (regression) | `git diff v0.0.1 -- sql/0001* sql/0002*` is empty. The fixture upgrade live produced a backup with user_version=2 and 2 rows. Live `user_version=99`: exit 1, empty stdout, D-13 message on stderr naming 99/3 and the brew command, shasum unchanged |
+| 6 | Re-importing a sourceless draft is idempotent (CR-01, old) | ✓ VERIFIED (regression) | `source IS ?1` unchanged; covered by the workspace suite |
+| 7 | A poisoned writer lock is 500/internal, never 404 | ✓ VERIFIED (regression) | `Internal("writer lock poisoned")` at every writer, including the rewritten `insert_embedding`. Mapper tests pass |
+| 8 | Merge-patch: absent = unchanged, null = clear, null or empty content = 400 | ✓ VERIFIED (regression) | MCP matrix tests (`memory_update_tags_and_scope_matrix_absent_null_value`, `..._ttl_matrix...`) pass |
+| 9 | The update response is the full post-update view plus `embedding_status`; the update bumps freshness | ✓ VERIFIED (regression) | Live response carried `embedding_status` and a new `last_accessed` |
+| 10 | Link edge cases: duplicate is a no-op, self-link is 400, unknown kind is 400, missing endpoint is a not-found naming the id | ✓ VERIFIED (regression) | Live: link(5,99) returned `missing_id:99`. REST link(9,1) returned 404 with `missing_id:9` (request's from_id first). REST unlink with `bogus` kind returned 400 listing the allowed kinds |
+| 11 | Expansion goes both directions with natural reverse labels, a cap of 10, most recent first | ✓ VERIFIED (regression) | Live: `supersedes`/`out` and `superseded_by`/`in` |
+| 12 | With the flag absent, the JSON is byte-identical to v1.0 (no `related` key) | ✓ VERIFIED (regression) | Live flag-less search results carried no `related` member |
+| 13 | Expanded neighbours are never access-bumped | ✓ VERIFIED (regression) | relations/hybrid tests pass |
+| 14 | **(previously FAILED)** Hyphenated or colon-bearing queries (`sqlite-vec`, `auth: tokens`, `re-embed`) succeed in both modes. Never a 500 / internal_error, and no SQLite text leaks. The original 400 wording is superseded by option-a | ✓ VERIFIED | `is_match_input_error` (sqlite.rs:519) now classifies the step-time `no such column` FTS5 class. `match_with_sanitized_retry` (sqlite.rs:569) is used by both `search` (:866) and `keyword_candidates` (:908). **Live MCP, Ollama up:** `sqlite-vec` → hybrid [1,…]; `auth: tokens` → hybrid [3,…]. **Ollama down:** `sqlite-vec` → keyword [1]; `auth: tokens` → keyword [3]. **Live REST:** 200 in both modes. `grep "sqlite error\|no such column"` over every serve log returned 0 |
+| 15 | **(previously UNCERTAIN)** Goal outcome under option-a: natural-language queries with punctuation succeed in both modes and return the matching memory first | ✓ VERIFIED | **Live, both modes, correct memory at rank 1:** `what vector store do we use?` → 1, `don't retry` → 4, `auth, tokens` → 3, `C++` → 5, `how often do credentials get rotated?` → 3. Pure paraphrase with no keyword overlap: `which datastore keeps client information` → hybrid [2,…] (keyword mode returns [] as expected; the recall comes from the semantic leg) |
+| 16 | Valid structured FTS5 syntax still runs exactly as written (raw first) | ✓ VERIFIED | `structured_fts5_syntax_still_runs_raw` passes. Live: `sqlite AND vec`, `"vector similarity"`, `vec*` → [1] in keyword mode. `content: sqlite` ran raw as a real column filter → [1] |
+| 17 | A tokenless query: hybrid answers semantic-only, keyword mode returns an empty list, never an error | ✓ VERIFIED | `sanitize_fts_query` returns `None` → `Ok(vec![])`. Live: `""`, `"`, `?!`, `*`, `^` → hybrid returned 3 results (KNN only); keyword returned `[]` with HTTP 200 |
+| 18 | Keyword-leg classification is identical with Ollama up or down (one shared helper) | ✓ VERIFIED | Both store paths call `match_with_sanitized_retry(&args.query, run)`. `queries_fts5_cannot_parse_succeed_identically_in_both_modes` passes. Live: no query errored in either mode |
+| 19 | No MCP or REST search body ever carries raw SQLite text. A storage failure is a generic `SEARCH_STORAGE_FAILURE` (500 / internal_error), with the detail only in stderr | ✓ VERIFIED | `pub async fn search` → `.map_err(redact_search_error)` (service.rs:283). The redaction match has no catch-all arm and covers Sqlite/Pool/Join/Migration. Tests pass: `memory_search_storage_failure_is_internal_error_without_sqlite_text` (MCP, both modes, FTS table renamed away underneath a live server), the REST `search_storage_failure_is_500_without_sqlite_text`, and the hybrid.rs redaction rows. *A live induced-failure run was blocked by the project's DROP-statement hook, so the evidence here is test-based* |
+| 20 | CR-03: a sweep backfill whose row changed, was forgotten, or was claimed by a racing sweep writes nothing. A failed racing update leaves the row pending for its NEW text | ✓ VERIFIED | `insert_embedding` (sqlite.rs:687) first runs a guarded `UPDATE … WHERE id=?1 AND embedding_status=0 AND content=?2` in the same tx as the vector write, and returns `false` with no write when 0 rows match. `service.sweep` passes the exact embedded `&content` (service.rs:698) and counts `skipped_stale`. `backfill_race.rs` 7/7 pass, deterministic: embedded update, unembedded update, forget, double backfill, gated-embedder mid-backfill update, and a failed update followed by the next sweep |
+| 21 | `relates_to` is one symmetric relation: stored canonically, listed once per side, unlinkable from either end, with the request order echoed on the wire | ✓ VERIFIED | `canonical_endpoints`/`is_symmetric` (domain.rs:127-149). link stores `(min,max)`; unlink matches both orientations when `?4=1`. Live: link(5,2) and link(2,5) each echoed their own request order. Expansion showed id 2 once on 5's side. unlink(2,5) removed the edge (REST and MCP). Tests pass: `relates_to_linked_both_ways_is_one_relation_listed_once_from_each_side` and `relates_to_is_stored_with_the_smaller_id_first` |
+| 22 | `supersedes`/`caused_by` keep directed identity; a missing endpoint is named in request order | ✓ VERIFIED | Live: 6→1 and 1→6 `supersedes` were both stored and both listed on id 6 (`supersedes` out, `superseded_by` in). unlink(1,6) removed only that one. REST link(9,1) named 9 |
+| 23 | The `MAX_EXPANDED_LINKS` doc and the README state the real expanded bound (WR-04 doc correction) | ✓ VERIFIED | domain.rs:363-369 ("A list without a limit returns every row … deferred API-contract"), and a matching README note |
+| 24 | `memory_update` / `PATCH` with an unknown or immutable field is rejected, naming the field, and nothing is written | ✓ VERIFIED (protocol-tier note) | `#[serde(deny_unknown_fields)]` on `UpdateArgs` (mcp.rs:169) and `UpdateBody` (handlers.rs:107). Live REST: `{type}`, `{ttl_sec}`, `{source,content}` → 400 `{"error":"… unknown field \`ttl_sec\`, expected one of …"}`, and row 2's content and type were unchanged. Live MCP: rejected as a tool error result (`isError:true`, "failed to deserialize parameters: unknown field `type` …") rather than a JSON-RPC -32602. That is rmcp 1.8's design; it is recorded in STATE.md [04-07] and the 04-07 SUMMARY. The intent (never silently drop a member, name the field, write nothing) holds |
+| 25 | Malformed REST path or query params return a JSON `{"error"}` body with the extractor's status | ✓ VERIFIED | Live: `PATCH /api/memories/abc`, `DELETE /api/memories/abc`, `DELETE /api/links/x/2/relates_to`, `GET /api/memories?expand_links=1`, `?limit=abc` all returned 400 `application/json` `{"error":…}` |
+| 26 | Two processes opening the same pre-0003 DB at once both start, and exactly one valid pre-migration backup with the OLD schema version survives | ✓ VERIFIED | `pre_migration_backup(&writer, path, db_version)` (sqlite.rs:409) writes a temp file, checks the version, renames, then prunes. `migrate_tolerating_concurrent_upgrade` re-probes the version on failure. **Live:** 3 rounds of two simultaneous `serve-rest` processes on a copy of the v0.0.1 fixture. Every round, both returned `/health` 200; the live DB reached uv=3; exactly one `m.db.backup-pre-0003-*` existed with uv=2, 2 rows and no `memory_links`. The log showed "another process completed the schema upgrade first". `two_concurrent_first_opens_of_a_v0_0_1_database_both_succeed_with_one_genuine_backup` and `a_real_lost_migration_race_is_absorbed` pass |
+| 27 | A failed backup write never removes the previous valid backup (replace, then prune) | ✓ VERIFIED | Pruning happens only after a successful rename. Unit tests pass: `a_failed_backup_write_never_removes_the_previous_backup`, `a_backup_that_cannot_be_moved_into_place_keeps_the_previous_one`, `a_valid_backup_replaces_then_prunes_the_stale_one`, `a_backup_of_an_already_migrated_database_is_discarded_and_keeps_the_valid_one` |
+| 28 | The README documents backup location, restore and the newer-schema refusal (IN-01) | ✓ VERIFIED | README `## Upgrading` (line 84): `memory.db.backup-pre-NNNN-YYYYMMDD`, the `cp` restore step, WAL/SHM notes, and the brew-upgrade message |
 
-**Score:** 13/15 truths verified (0 present-but-behavior-unverified, 1 failed, 1 uncertain)
+**Score:** 28/28 truths verified. None are present-but-behavior-unverified: every behaviour-dependent truth (20, 26, 27) has a passing deterministic test, and 26 was also exercised live.
 
-### Required Artifacts
+### Live search decision table (MCP stdio, 25 queries, `limit: 3`)
+
+| Query | Ollama up | Ollama down |
+|---|---|---|
+| `sqlite-vec` | hybrid [1,2,3] | keyword [1] |
+| `auth: tokens` | hybrid [3,4,2] | keyword [3] |
+| `re-embed` | hybrid [2,1,4] | keyword [] |
+| `what vector store do we use?` | hybrid [1,2,5] | keyword [1] |
+| `don't retry` | hybrid [4,3,6] | keyword [4] |
+| `auth, tokens` | hybrid [3,4,2] | keyword [3] |
+| `C++` | hybrid [5,2,1] | keyword [5] |
+| `"unbalanced` / `AND` / `foo OR` / `NEAR(` / `(sqlite` | hybrid (all ok) | keyword [] / [5] / [] / [] / [1] |
+| `?!` / `*` / `` / `"` / `^` (tokenless) | hybrid, semantic-only | keyword [] |
+| `sqlite AND vec` / `"vector similarity"` / `vec*` | hybrid [1,…] | keyword [1] |
+| `which datastore keeps client information` | hybrid [2,1,3] | keyword [] |
+| `how often do credentials get rotated?` | hybrid [3,2,4] | keyword [3] |
+
+There were 0 RPC errors and 0 tool errors. REST gave 200 for every query sampled in both modes.
+
+### Required Artifacts (gap-closure plans)
 
 | Artifact | Expected | Status | Details |
-|----------|----------|--------|---------|
-| `crates/agent-memory-core/sql/0003_relations.sql` | memory_links schema | ✓ VERIFIED | PK(from,to,kind), 2× ON DELETE CASCADE, CHECK, WITHOUT ROWID, idx_links_to |
-| `crates/agent-memory-core/src/store/migrations.rs` | 0003 in chain + `LATEST_SCHEMA_VERSION` | ✓ VERIFIED | `= 3`, with a test that the const equals what `to_latest` writes |
-| `crates/agent-memory-core/tests/migration_hygiene.rs` | divergence/backup/too-new tests | ✓ VERIFIED | 357 lines, 7 tests plus an ignored generator; the generator refuses to overwrite an existing fixture |
-| `crates/agent-memory-core/tests/fixtures/v0.0.1.db` | committed fixture | ✓ VERIFIED | git-tracked, user_version=2, unmodified in the working tree |
-| `crates/agent-memory-core/src/domain.rs` | Internal, SchemaTooNew, MemoryPatch, UpdatedMemory, LinkKind, RelatedLink, MAX_EXPANDED_LINKS | ✓ VERIFIED | all present and used |
-| `crates/agent-memory-core/tests/update.rs` | MCP-06 tests | ✓ VERIFIED | 674 lines, 9 tests |
-| `crates/agent-memory/src/serde_util.rs` | explicit-null helper | ✓ VERIFIED | used by UpdateArgs and UpdateBody |
-| `crates/agent-memory-core/tests/relations.rs` | MCP-07 tests | ✓ VERIFIED | 737 lines, 19 tests |
-| `crates/agent-memory-core/tests/hybrid.rs` | SEARCH-04/05 tests | ✓ VERIFIED (coverage hole: no hyphen or colon query) | 719 lines, 19 tests |
-| `crates/agent-memory-core/src/store/sqlite.rs` | update / link / related / keyword_candidates / backup | ✓ VERIFIED (except the `map_fts_query_error` gap) | see truths 1, 2, 5, 14 |
+|---|---|---|---|
+| `crates/agent-memory-core/src/store/sqlite.rs` | `fn match_with_sanitized_retry`, `embedding_status = 0 AND content = ?2`, `fn migrate_tolerating_concurrent_upgrade` | ✓ VERIFIED | All present and called from the right sites |
+| `crates/agent-memory-core/src/service.rs` | `fn redact_search_error`, `SEARCH_STORAGE_FAILURE` | ✓ VERIFIED | Wired at `pub async fn search` |
+| `crates/agent-memory-core/src/domain.rs` | `fn canonical_endpoints`, `fn is_symmetric` | ✓ VERIFIED | Exhaustive matches, no `_` arm |
+| `crates/agent-memory-core/tests/hybrid.rs` | `queries_fts5_cannot_parse_succeed_identically_in_both_modes` | ✓ VERIFIED | Line 587, passes |
+| `crates/agent-memory-core/tests/backfill_race.rs` | ≥120 lines, deterministic race tests | ✓ VERIFIED | 7 tests, pass |
+| `crates/agent-memory/src/mcp.rs` | `deny_unknown_fields` on UpdateArgs | ✓ VERIFIED | Line 169 |
+| `crates/agent-memory/src/rest/handlers.rs` | `deny_unknown_fields` on UpdateBody; PathRejection/QueryRejection mapping | ✓ VERIFIED | Lines 107, 234, 285, 316, 395 |
+| `README.md` | "never rejected", `## Upgrading` | ✓ VERIFIED | Lines 205, 84 |
 
 ### Key Link Verification
 
-| From | To | Via | Status | Details |
-|------|----|-----|--------|---------|
-| migrations.rs | 0003_relations.sql | `M::up(include_str!)` | ✓ WIRED | line 24 |
-| sqlite.rs open() | rusqlite Backup API | `run_to_completion` | ✓ WIRED | line 181; feature `backup` on the pinned 0.39 |
-| sqlite.rs open() | PRAGMA user_version | probe before pragmas and migrations | ✓ WIRED | line 233 |
-| service.rs import | Store::exists | `draft.source.as_deref()` | ✓ WIRED | line 338 |
-| mcp.rs | MemoryService::update/link/unlink | tool arms | ✓ WIRED | mcp.rs:374/400/438; exercised live |
-| rest/mod.rs | update/link/unlink handlers | PATCH `/api/memories/{id}`, POST `/api/links`, DELETE `/api/links/{from}/{to}/{kind}` | ✓ WIRED | rest/mod.rs:77-85 |
-| service.rs | Store::related | `expand_related` after the bump | ✓ WIRED | search (both arms) and list |
-| sqlite.rs forget/sweep | memory_links | belt-and-braces orphan DELETE | ✓ WIRED | lines 669, 956 |
-| service.rs | Store::keyword_candidates + knn_search | `tokio::join!`, keyword error checked first | ✓ WIRED | lines 423-428 |
-| service.rs | decay_score | post-fusion multiplicative blend | ✓ WIRED | line 443 |
-| sqlite.rs keyword_candidates | map_fts_query_error | InvalidQuery propagation | ⚠️ PARTIAL | wired, but the mapper misclassifies the `no such column` FTS5 failure (gap 1) |
+| From | To | Via | Status |
+|---|---|---|---|
+| sqlite.rs `fn search` | `match_with_sanitized_retry` | keyword-degrade path | ✓ WIRED (:866) |
+| sqlite.rs `fn keyword_candidates` | `match_with_sanitized_retry` | hybrid keyword leg | ✓ WIRED (:908) |
+| service.rs `pub async fn search` | `redact_search_error` | `map_err` over both arms and expansion | ✓ WIRED (:283) |
+| service.rs `sweep` | `Store::insert_embedding` | `insert_embedding(id, &content, vector)` | ✓ WIRED (:698) |
+| sqlite.rs link/unlink | `canonical_endpoints` / `is_symmetric` | canonical storage; both-orientation unlink | ✓ WIRED (:977, :1002) |
+| sqlite.rs `SqliteStore::open` | `pre_migration_backup(&writer, path, db_version)` | probed version passed in | ✓ WIRED (:409) |
+| sqlite.rs `SqliteStore::open` | `migrate_tolerating_concurrent_upgrade` | wraps `to_latest` | ✓ WIRED |
 
 ### Data-Flow Trace (Level 4)
 
-| Artifact | Data Variable | Source | Produces Real Data | Status |
-|----------|---------------|--------|--------------------|--------|
-| `SearchOutcome.results` (hybrid) | fused views | `vec_memories` KNN plus `memories_fts` bm25, read pool | yes (live: real rows ranked) | ✓ FLOWING |
-| `MemoryView.related` | RelatedLink list | `memory_links JOIN memories` | yes (live) | ✓ FLOWING |
-| `UpdatedMemory` | post-update row | re-read inside the writer tx | yes (live) | ✓ FLOWING |
+| Artifact | Data | Source | Real data | Status |
+|---|---|---|---|---|
+| Hybrid `SearchOutcome.results` | fused views | `vec_memories` KNN plus `memories_fts` bm25 (raw or sanitized) | yes (live) | ✓ FLOWING |
+| Sweep backfill | vectors | Ollama batch embed, then guarded claim | yes (tests; live store gave status 1) | ✓ FLOWING |
+| `MemoryView.related` | edges | `memory_links JOIN memories` | yes (live) | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
-|----------|---------|--------|--------|
-| Phase test binaries | `cargo test -p agent-memory-core --test update --test relations --test hybrid --test migration_hygiene --test import` | 56 passed, 0 failed, 1 ignored | ✓ PASS |
-| Live hybrid with a real Ollama (executor human-check, part 1) | MCP stdio `serve` against `/tmp/v04live-data/live.db`, Ollama at localhost:11434 | paraphrase gives `search_mode: hybrid`, correct memory at rank 1 | ✓ PASS |
-| Live degrade (executor human-check, part 2) | same DB, `--ollama-url http://127.0.0.1:9` | `search_mode: keyword`, envelope keys identical, one fallback WARN per search | ✓ PASS |
-| Real v0.0.1 upgrade | Homebrew 0.0.1 writes 2 rows, then HEAD opens | backup user_version=2 with 2 rows; live DB user_version=3; link/update/hybrid OK | ✓ PASS |
-| Too-new refusal through the binary | `--db future.db` (user_version=99) | exit 1, empty stdout, D-13 message on stderr, shasum unchanged | ✓ PASS |
-| Hyphenated query, Ollama up | `memory_search {"query":"sqlite-vec"}` | `-32603 sqlite error: no such column: vec` (v0.0.1: correct semantic hit) | ✗ FAIL |
-| `?` query, Ollama up | `memory_search {"query":"what vector store do we use?"}` | `-32602 invalid_params` (v0.0.1: correct semantic hit) | ? decision |
-| Normal build excludes test-clock | `cargo tree -p agent-memory -e normal -i agent-memory-core -f '{p} {f}'` | no features | ✓ PASS |
-
-The executor's end-of-phase manual check (`<human-check>` in plan 04-04 Task 2) was performed by the verifier against a real local Ollama. The hybrid and degrade observations above satisfy it.
+|---|---|---|---|
+| Phase test binaries | `cargo test -p agent-memory-core --test hybrid --test backfill_race --test relations --test migration_hygiene --test update` | 72 passed, 0 failed, 1 ignored | ✓ PASS |
+| Store unit tests (backup, sanitizer, classifier) | `cargo test -p agent-memory-core --lib -- store::sqlite` | 12 passed | ✓ PASS |
+| Stdio e2e | `cargo test -p agent-memory --test tools` | 6 passed | ✓ PASS |
+| Live search table, Ollama up and down | MCP stdio driver, 25 queries × 2 modes | all succeed, no leaks | ✓ PASS |
+| Live REST search and error bodies | `serve-rest` + curl | 200 on queries; 400 JSON on malformed path, query and unknown field | ✓ PASS |
+| Live concurrent first open | 2 × `serve-rest` on a v0.0.1 fixture copy, 3 rounds | both up, one uv=2 backup | ✓ PASS |
+| Live too-new refusal | `--db` with user_version=99 | exit 1, friendly message, file untouched | ✓ PASS |
 
 ### Probe Execution
 
-None declared. No `scripts/*/tests/probe-*.sh` exists, and no phase artifact references a probe.
+None declared. There is no `scripts/*/tests/probe-*.sh`, and no phase artifact references a probe.
 
 ### Requirements Coverage
 
-| Requirement | Source Plan | Description | Status | Evidence |
-|-------------|-------------|-------------|--------|----------|
-| STORE-05 | 04-01 | 0003 with migration hygiene (frozen SQL, backup, newer-DB error) | ✓ SATISFIED | truth 5, live real-v0.0.1 upgrade |
-| MCP-06 | 04-02 | memory_update, same-tx re-mirror and re-embed, outage fallback, not-found | ✓ SATISFIED | truths 1, 8, 9 |
-| MCP-07 | 04-03 | link/unlink, 1-hop expansion, cascade, no graph model | ✓ SATISFIED | truths 2, 10-13 |
-| SEARCH-04 | 04-04 | RRF k=60 hybrid, keyword degrade unchanged | ⚠️ SATISFIED WITH GAP | fusion and degrade verified (truth 3); hybrid now exposes the pre-existing 500 misclassification (truth 14) and the punctuation decision (truth 15) |
-| SEARCH-05 | 04-04 | post-fusion decay, bumps on returned ids only | ✓ SATISFIED | truth 4 |
+| Requirement | Source Plan | Status | Evidence |
+|---|---|---|---|
+| MCP-06 | 04-02, 04-06, 04-07 | ✓ SATISFIED | Truths 1, 8, 9, 20, 24 |
+| MCP-07 | 04-03, 04-06, 04-07 | ✓ SATISFIED | Truths 2, 10-13, 21-23, 25 |
+| STORE-05 | 04-01, 04-07 | ✓ SATISFIED | Truths 5, 26-28 |
+| SEARCH-04 | 04-04, 04-05 | ✓ SATISFIED | Truths 3, 14-19. The previous gap is closed |
+| SEARCH-05 | 04-04 | ✓ SATISFIED | Truth 4 |
 
-There are no orphaned requirements. REQUIREMENTS.md maps exactly these 5 IDs to Phase 4, and each is claimed by a plan.
+No requirements are orphaned. REQUIREMENTS.md maps exactly these 5 IDs to Phase 4.
+
+### Supersession Check (04-04 must-have #3)
+
+The 04-04 must-have ("a malformed MATCH query is a 400/invalid_params in hybrid mode") is superseded, and the supersession is recorded explicitly in two places:
+
+- `04-05-PLAN.md` § "Locked user decision": "…the 04-04 must-have 'A malformed MATCH query is a 400/invalid_params in hybrid mode' are **superseded** by this decision."
+- `.planning/STATE.md` line 118 ([Phase 04] 04-05): "Supersedes the 04-04 decision that a malformed MATCH is InvalidQuery/400 in hybrid mode." The older line 117 is retained as history.
+
+The code matches the decision. The service doc states "Search never returns `MemoryError::InvalidQuery`", and the README "Behavioral changes in v0.1.0" item 3 is rewritten for the forgiving leg.
+
+### Deferred by Instruction (not gaps; confirmed recorded)
+
+| Item | Recorded in |
+|---|---|
+| WR-04: unbounded `memory_list` with `expand_links` and no `limit` (behaviour unchanged; doc corrected) | 04-06-PLAN Deferred table; 04-06-SUMMARY "Deferred"; 04-07-SUMMARY "Deferred"; STATE.md [04-06] line 121 ("open API-contract question for Phase 5/6"); domain.rs:363-369 doc |
+| WR-01 full cross-process exclusive lock | 04-07-PLAN Deferred table; 04-07-SUMMARY "Deferred"; STATE.md [04-07] line 124 |
+| 03-REVIEW WR-01: filters applied after the KNN cut | 04-05/06/07-PLAN Deferred tables ("still deferred (not re-opened)"); 04-05-SUMMARY line 236; STATE.md [04-01] line 103 |
+| 03-REVIEW WR-03: spawned REST test-harness hang | 04-05/06/07-PLAN Deferred tables; 04-05-SUMMARY line 236 |
+
+The plans also record these deferrals, which are out of scope for this phase goal:
+
+- internal-tier redaction on non-search surfaces;
+- `deny_unknown_fields` on the v0.0.1 and link DTOs, per [03-01];
+- stale `.backup-tmp-*` cleanup;
+- IN-05 and IN-06 behaviour changes, which were documented instead.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
-|------|------|---------|----------|--------|
-| crates/agent-memory-core/src/store/sqlite.rs | ~333 | FTS5 error classifier matches message substrings and misses `no such column` | 🛑 Blocker | client input reaches the 500 tier with SQL detail on the now-default Ollama-up path (gap 1) |
-
-The scan of all 19 phase-modified files found no unreferenced TBD/FIXME/XXX markers, no TODO/HACK/placeholder text, and no `unwrap()`/`expect()` in non-test source.
+|---|---|---|---|---|
+| (gap-closure files, 14) | — | TBD/FIXME/XXX | none | Every "TODO" hit is the `TODO` memory-type domain value, not a debt marker |
+| crates/agent-memory-core/src, crates/agent-memory/src | — | `unwrap()`/`expect()` before `#[cfg(test)]` | none | 0 hits |
+| crates/agent-memory/src/mcp.rs, rest/handlers.rs | 40-44, 170-174 | Non-search internal errors still use `e.to_string()` | ℹ️ Info | Search paths are redacted (the decision's scope). Update/link/forget internal errors can still carry SQLite text on the loopback API. This deferral is recorded in the 04-05 plan |
+| crates/agent-memory-core/src/store/sqlite.rs | 495-504 | FTS5 error classification matches message substrings | ℹ️ Info | Pinned by `every_bundled_fts5_parse_error_is_classified_as_match_input` against the bundled SQLite. A SQLite bump that rewords a message would fall to the redacted 500 tier, not leak, and the test would flag it |
 
 ### Human Verification Required
 
-#### 1. Natural-language punctuation in hybrid queries (decision)
-
-**Test:** With Ollama up, run `memory_search` with `what vector store do we use?` against a store containing "We chose sqlite-vec for local vector similarity search".
-**Expected:** A developer decision on the contract. Today the query returns invalid_params; v0.0.1 found the memory. Option (b), sanitising or quoting the keyword leg's input, would restore paraphrase recall and also close gap 1. Option (a) needs an override entry.
-**Why human:** Plan decision T-04-15 (identical classification in every mode, so the mode cannot be probed) conflicts with the roadmap outcome clause. That is a product call.
+None. The previous decision item was resolved by the user (option-a) and is verified live.
 
 ### Gaps Summary
 
-The phase is substantively delivered. Update, relations, RRF fusion, decay blending, bump scoping and migration hygiene are all real, wired, test-locked, and confirmed live. That includes an upgrade of a database written by the real v0.0.1 binary and a live hybrid-to-keyword degrade against a real Ollama.
+Both previous blockers are closed, and the code matches the user's option-a decision:
 
-One gap blocks a clean pass, and it shares a root cause with the decision item. Hybrid search now always parses the query through FTS5, even when Ollama is up. Two consequences follow:
+- **Gap #14:** the hyphen/colon 500 with leaked SQLite text is fixed.
+- **Item #15:** punctuated natural-language recall is resolved.
 
-1. **(Gap, fixable in one line plus tests.)** Hyphen- or colon-shaped queries (`sqlite-vec`, `auth: tokens`) produce FTS5's `no such column` error. `map_fts_query_error` does not recognise it, so it surfaces as a 500 / internal_error with the SQLite message. In v0.0.1 these queries worked whenever Ollama was up.
-2. **(Decision.)** Queries with `?`, `,` or `'` are classified correctly as client errors, but that means ordinary paraphrased questions no longer return results with Ollama up.
+How the fix works:
 
-Sanitising the keyword leg's input would resolve both at once. If the developer judges gap 1 pre-existing and out of scope, add this override to the frontmatter:
+- **Shared retry helper.** One store helper, used by both the keyword-degrade path and the hybrid keyword leg, runs the raw FTS5 query first. On any FTS5 parse-class error, including the `no such column` class, it retries once with OR-ed quoted words. A tokenless query becomes an empty keyword leg.
+- **Single redaction point.** Every search error is tiered at one point, so storage failures surface only as `SEARCH_STORAGE_FAILURE`.
+- **Live confirmation.** All of this was confirmed on MCP and REST, with Ollama up and down.
 
-```yaml
-overrides:
-  - must_have: "A malformed MATCH query is a 400/invalid_params in hybrid mode exactly as in keyword mode"
-    reason: "no-such-column misclassification is pre-existing v1.0 keyword-path behavior; tracked for a follow-up"
-    accepted_by: "<name>"
-    accepted_at: "<ISO timestamp>"
-```
+The other two gap-closure plans also hold:
+
+- **04-06:** the CR-03 conditional backfill and the symmetric `relates_to` behave as specified.
+- **04-07:** the strict update DTOs, the uniform REST rejection bodies and the race-safe backup with tolerant concurrent open behave as specified. The concurrent first open was confirmed live across three rounds.
+
+The regression checks on truths 1-13 found no regressions. The deferred items are each recorded explicitly.
+
+One protocol-tier note (truth 24): over MCP, an unknown update field is reported as a tool error result rather than JSON-RPC `invalid_params`. This is rmcp's deserialization path and is recorded in STATE.md. The field is named and nothing is written.
 
 ---
 
-_Verified: 2026-10-23T18:52:00Z_
+_Verified: 2026-10-23T20:19:46Z_
 _Verifier: Claude (gsd-verifier)_

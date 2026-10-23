@@ -1,364 +1,211 @@
 ---
 phase: 04-memory-update-relations-hybrid-search
-reviewed: 2026-10-23T00:00:00Z
+reviewed: 2026-10-23T21:00:00Z
 depth: standard
-files_reviewed: 20
+review_kind: re-review (gap closure 04-05..04-07, diff d3a4580..HEAD)
+files_reviewed: 14
 files_reviewed_list:
-  - Cargo.toml
   - README.md
-  - crates/agent-memory-core/sql/0003_relations.sql
   - crates/agent-memory-core/src/domain.rs
   - crates/agent-memory-core/src/service.rs
-  - crates/agent-memory-core/src/store/migrations.rs
   - crates/agent-memory-core/src/store/mod.rs
   - crates/agent-memory-core/src/store/sqlite.rs
+  - crates/agent-memory-core/tests/backfill_race.rs
+  - crates/agent-memory-core/tests/fallback.rs
   - crates/agent-memory-core/tests/hybrid.rs
-  - crates/agent-memory-core/tests/import.rs
   - crates/agent-memory-core/tests/migration_hygiene.rs
   - crates/agent-memory-core/tests/relations.rs
-  - crates/agent-memory-core/tests/semantic.rs
-  - crates/agent-memory-core/tests/update.rs
-  - crates/agent-memory/Cargo.toml
-  - crates/agent-memory/src/main.rs
   - crates/agent-memory/src/mcp.rs
   - crates/agent-memory/src/rest/handlers.rs
-  - crates/agent-memory/src/rest/mod.rs
-  - crates/agent-memory/src/serde_util.rs
+  - crates/agent-memory/tests/rest.rs
+  - crates/agent-memory/tests/tools.rs
 findings:
-  critical: 3
-  warning: 4
+  critical: 0
+  warning: 2
   info: 6
-  total: 13
+  total: 8
 status: issues_found
 ---
 
-# Phase 4: Code Review Report
+# Phase 4: Code Review Report (re-review after gap closure)
 
 **Reviewed:** 2026-10-23
-**Depth:** standard (diff `907161c..HEAD`)
-**Files Reviewed:** 20 (binary fixture `tests/fixtures/v0.0.1.db` skipped)
-**Status:** issues_found
+**Depth:** standard. Scope is the gap-closure diff `d3a4580..HEAD`, excluding `.planning/`.
+**Files Reviewed:** 14
+**Status:** issues_found (no blockers)
 
 ## Summary
 
-Phase 4 adds `memory_update` (merge-patch with an in-transaction vector swap), flat typed
-relations with 1-hop expansion, RRF hybrid search, and migration 0003 with a pre-migration
-backup and a newer-schema refusal. The code is careful in many places. SQL is parameterized
-everywhere. The `MemoryError` mappers are exhaustive. No `unwrap()` was added to production
-code. Clippy (`-D warnings`, all targets) is clean and all `agent-memory-core` tests pass
-(verified locally).
+Plans 04-05, 04-06 and 04-07 close every prior blocker:
 
-The main problems come from making hybrid the default search path, and from content becoming
-mutable:
+- **CR-01 / CR-02.** The keyword leg now runs the raw query first and retries once with a sanitized query. Natural-language and hyphenated queries are answered in both modes.
+- **CR-03.** The backfill write is a guarded compare-and-set.
+- **WR-01.** The backup is written to a temp file, its schema version is checked, and only then is it renamed into place. The migration tolerates a lost race by re-reading the schema version.
+- **WR-02.** `deny_unknown_fields` is now on both patch DTOs.
+- **WR-03.** `relates_to` is stored canonically.
 
-1. Hybrid sends the raw query to FTS5 on every search while Ollama is up. FTS5 reports
-   column-filter parse errors (`sqlite-vec`, `re-embed`, `note: x`) as `no such column`. The
-   classifier does not recognise that message, so these queries now return **HTTP 500 /
-   `internal_error`** on the primary path. v0.0.1 answered them.
-2. Natural-language punctuation (`?`, `,`, `'`) now returns 400 whenever Ollama is up. The
-   brief asked for an explicit assessment of this. The verdict is a **regression, not an
-   acceptable trade-off** (CR-02).
-3. Content can now change, so the sweep's embedding backfill can write a vector for *old*
-   content over a row that was updated meanwhile. That leaves a permanently wrong vector with
-   `embedding_status = 1`.
+Production code adds no `unwrap()`/`expect()`. The new matches are exhaustive: `redact_search_error`, `is_symmetric`, `canonical_endpoints`, and the migrate re-probe. All SQL is still bound.
 
-The FTS5 behaviour behind CR-01/CR-02 was checked against the bundled SQLite (3.51.3, via
-rusqlite 0.39):
+I checked the classifier against the **bundled** SQLite with a scratch crate in `/tmp`. It calls `SqliteStore::search` and `Store::keyword_candidates` directly. 13 of 15 adversarial probes return `Ok`: `{a b}: c`, `^a`, `-a`, `NEAR(a b, 99999999999999999999)`, `NEAR(a b, -1)`, `a + b`, `a.b`, `rank: auth`, an embedded NUL, `(`×300 nesting (parser stack overflow is classified), and others.
 
-| query | FTS5 result | mapped to | tier |
-|---|---|---|---|
-| `what is it?` | `fts5: syntax error near "?"` | `InvalidQuery` | 400 / invalid_params |
-| `sqlite-vec` | `no such column: vec` | `Sqlite` | **500 / internal_error** |
-| `re-embed` | `no such column: embed` | `Sqlite` | **500 / internal_error** |
-| `note: auth` | `no such column: note` | `Sqlite` | **500 / internal_error** |
+The other 2 probes fail. They are both cases of one FTS5 error class that the marker list misses (WR-01 below). That error is redacted, so no SQLite text leaks, but a client input still becomes a 500.
 
-Known, already-tracked items (WR-01 filter-after-KNN-cut, WR-03 REST harness hang) are not
-re-reported.
+The second warning is a README sentence added by 04-07. It promises a JSON error body for every REST client error, but two v0.0.1 routes still return axum's plain-text rejections.
 
-## Narrative Findings (AI reviewer)
+The workspace test suite was not re-run here, because a verifier runs in parallel. The 04-07 SUMMARY reports 211 passed / 0 failed / 2 ignored.
 
-## Critical Issues
+## Prior findings — resolution
 
-### CR-01: Hyphenated or colon-bearing queries are 500 / `internal_error` on the default (hybrid) search path
+| ID | Prior severity | Resolution | Evidence |
+|----|----------------|------------|----------|
+| CR-01 | BLOCKER | **Resolved** (one residual class, see new WR-01) | `sqlite.rs:498-504` adds `no such column`, `unknown special query` and `expected integer` to `FTS5_QUERY_PARSE_MARKERS`. `sqlite.rs:519-530` gates on primary code `SQLITE_ERROR`. `sqlite.rs:569-588` adds the raw-first retry, shared by `search` (`:866`) and `keyword_candidates` (`:908`). Tests: `tests/hybrid.rs` two-mode table, `tests/rest.rs` (`sqlite-vec` → 200), `tests/tools.rs` stdio e2e. |
+| CR-02 | BLOCKER | **Resolved** (user decision option-a) | `sqlite.rs:541-552` `sanitize_fts_query`; a tokenless query returns an empty leg (`:582`). The decision is recorded in `.planning/STATE.md:118`. The MCP description (`mcp.rs:330`) and README (`README.md:203-212`, `:482-488`) describe the forgiving contract. |
+| CR-03 | BLOCKER | **Resolved** | `sqlite.rs:706-713` adds a guarded claim (`embedding_status = 0 AND content = ?2`) as the first statement of the writer tx, with an `Ok(false)` rollback. `service.rs:697-703` passes the embedded content back. `tests/backfill_race.rs` has 7 interleavings, including a recycled rowid and a gated real sweep. |
+| WR-01 | WARNING | **Resolved** for both observable failure modes. The cross-process exclusive lock is **deferred-as-documented** | `sqlite.rs:235-301`: temp file, then version check, then rename, then prune. A post-migration copy is discarded (`:273-282`). `sqlite.rs:315-334` absorbs a failed migrate only when the re-read version is `LATEST`. `busy_timeout` is set before the probe (`:387`) and first in `apply_pragmas` (`:89`). Tests: `sqlite.rs` seam tests and `a_real_lost_migration_race_is_absorbed`, plus `migration_hygiene.rs` two-opener smoke. |
+| WR-02 | WARNING | **Resolved** | `mcp.rs:169` and `handlers.rs:107` add `#[serde(deny_unknown_fields)]`. The schema advertises `additionalProperties: false`. The MCP wire shape is rmcp's `isError: true` tool result, as documented at `README.md:265-269`. The rmcp interaction looks sound: `_meta` travels outside `arguments`, and the explicit-null deserializers still compose. |
+| WR-03 | WARNING | **Resolved** (stale wording remains, see IN-03) | `domain.rs:127-149` adds `is_symmetric` / `canonical_endpoints`. `sqlite.rs:977-982` inserts the canonical pair. `sqlite.rs:998-1003` makes symmetric unlink a single bound DELETE. Tests: 8 new in `tests/relations.rs`. The MCP and REST echo tests pass. |
+| WR-04 | WARNING | **Deferred-as-documented** (doc-only, by user instruction) | The `domain.rs:360-371` doc is corrected and `README.md:363` adds "pass a `limit` on large stores". Behaviour is unchanged (`service.rs:232-246`). Note: the `memory_list` **tool description** (`mcp.rs:297`), which is what agents read, still does not mention the unbounded case. |
+| IN-01 | INFO | **Resolved** | `README.md:84-121` adds the Upgrading section: backup name, retention, restore steps including `-wal`/`-shm`, and the newer-schema error text. |
+| IN-02 | INFO | **Resolved** for the `Path`/`Query` routes the finding named. README now overclaims, see new WR-02 | `handlers.rs:220-226` `extractor_rejection`. It is used at `:236`, `:287`, `:319` and `:397`, and keeps a 5xx for routing faults. |
+| IN-03 | INFO | **Resolved** | `sqlite.rs:265-293`: no backup is deleted before the new copy has been renamed into place. Tests: `a_failed_backup_write_never_removes_the_previous_backup` and `a_backup_that_cannot_be_moved_into_place_keeps_the_previous_one`. |
+| IN-04 | INFO | **Resolved** | `service.rs:345` now reads "Same order as the hybrid path". |
+| IN-05 | INFO | **Deferred-as-documented** (by user instruction) | `store/mod.rs:161-165` and `README.md:291-295`. |
+| IN-06 | INFO | **Deferred-as-documented** (by user instruction) | `domain.rs:220-232` doc on `RELATED_SNIPPET_CHARS` / `snippet`. |
 
-**File:** `crates/agent-memory-core/src/store/sqlite.rs:333-340` (classifier), `crates/agent-memory-core/src/service.rs:427` (hybrid propagates the keyword leg's error), `crates/agent-memory/src/mcp.rs:310`, `README.md:165-170`
-**Issue:** `map_fts_query_error` only treats `fts5: syntax error` and `unterminated string` as
-client input. FTS5 parses `a-b` and `a: b` as column filters and fails at *step* time with
-`no such column: b`. That error falls through to `MemoryError::Sqlite`, which both mappers send
-to the internal tier.
-
-Before Phase 4, this only affected keyword-fallback mode (Ollama down). Now every search with
-Ollama up runs `keyword_candidates`, and its error takes priority over the KNN leg
-(service.rs:427). So an ordinary query such as `sqlite-vec`, `re-embed`, `pre-migration
-backup`, `TODO: auth` or `x86-64`:
-
-- returned 200 (semantic) in v0.0.1;
-- now returns HTTP 500 / MCP `internal_error`.
-
-This breaks the project's core contract that bad client input never surfaces as a 500 (02-05,
-Phase 3 D-06). It also defeats agent error handling: an agent that sees `internal_error` assumes
-a server fault and will not rephrase. The README (L165-170) and the `memory_search` tool
-description promise `invalid_params` for queries FTS5 cannot parse, so both documents are wrong
-for this class of input. No test covers it: `hybrid.rs:538-570` only exercises `"unbalanced`,
-`AND` and `?`.
-
-**Fix:** Classify step-time column-filter failures as client input. The statement prepares
-successfully, so a `no such column` at step time can only come from the MATCH expression. Then
-add a regression row for `sqlite-vec` and `note: x` to the hybrid/keyword decision-table test.
-```rust
-fn map_fts_query_error(query: &str, e: rusqlite::Error) -> MemoryError {
-    let msg = e.to_string();
-    if msg.contains("fts5: syntax error")
-        || msg.contains("unterminated string")
-        // FTS5 column filters (`a-b`, `col: x`) on the single-column
-        // memories_fts table: only reachable from the bound MATCH string,
-        // because the statement itself prepared successfully.
-        || msg.contains("no such column")
-    {
-        MemoryError::InvalidQuery(query.to_string())
-    } else {
-        MemoryError::Sqlite(e)
-    }
-}
-```
-(CR-02's sanitising retry removes most of this input class altogether. This mapping is still
-the required backstop.)
-
-### CR-02: Assessment of the requested behaviour change — natural-language queries now fail with the embedder up (regression)
-
-**File:** `crates/agent-memory-core/src/service.rs:244-265, 412-428`, `crates/agent-memory-core/src/store/sqlite.rs:606-647`, `crates/agent-memory-core/tests/hybrid.rs:538-570`, `README.md:165-170, 407-414`
-**Issue:** With Ollama up, which is the recommended setup, every search now depends on the raw
-query being a valid FTS5 expression. Queries like `what did we decide about auth?`, `don't
-retry`, `auth, tokens`, `C++ build` and an empty string are rejected with 400 /
-`invalid_params`. v0.0.1 answered all of them semantically. Including CR-01's inputs, this
-covers most of what an LLM agent naturally sends: questions, sentences with commas or
-apostrophes, and hyphenated technical terms.
-
-Severity: **BLOCKER**. The degradation is documented (README L407-414, the tool description),
-but documenting it does not make it acceptable for an agent-facing tool.
-
-- **The semantic search value is lost.** The product's main promise is "semantic search via
-  local Ollama embeddings". In the configuration where that should work best, the query
-  embedding is now discarded whenever the query contains common punctuation.
-- **The T-04-15 rationale does not hold.** The plan's justification (04-04-PLAN T-04-15) is
-  that answering semantically in one mode and with a 400 in the other would let a caller probe
-  which mode is active. But every response already reports `search_mode`, so there is no hidden
-  mode to probe. The second reason, the error taxonomy, only requires the *same* classification
-  in both modes. It does not require that classification to be an error.
-- **Agents pay a retry cost.** An agent receiving `invalid_params` will rewrite and retry, which
-  costs tokens on every punctuated question. Agents rarely read the "use plain words" caveat in
-  the README.
-
-**Fix:** Keep exact FTS5 syntax available to power users, but stop rejecting natural language.
-Apply the same logic in both modes so the T-04-15 "same classification everywhere" property
-still holds:
-```rust
-// sqlite.rs: a fallback MATCH built from the query's word tokens, each
-// phrase-quoted (inner quotes doubled) and OR-joined. It always parses.
-fn sanitize_fts_query(raw: &str) -> Option<String> {
-    let terms: Vec<String> = raw
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    (!terms.is_empty()).then(|| terms.join(" OR "))
-}
-```
-In `keyword_candidates`, and in `search` for the fallback path: run the raw MATCH first. If it
-fails with `InvalidQuery`, rerun once with `sanitize_fts_query(&args.query)`. If no tokens are
-left, return an empty keyword leg so hybrid fuses KNN-only. Only report `InvalidQuery` when the
-caller clearly asked for FTS syntax (for example an unbalanced `"`), or never. Then update
-`a_malformed_match_is_invalid_query_in_hybrid_mode_exactly_as_in_keyword_mode`: `what is the
-plan?` should succeed in both modes. If the owners still choose to keep the 400, record that as
-an explicit decision in the CONTEXT decisions log, and fix CR-01 either way.
-
-### CR-03: The sweep backfill can overwrite an updated memory's vector with an embedding of its *old* content, permanently
-
-**File:** `crates/agent-memory-core/src/service.rs:612-637`, `crates/agent-memory-core/src/store/sqlite.rs:439-479`, `crates/agent-memory-core/src/store/sqlite.rs:812-836`
-**Issue:** The backfill has three steps:
-
-1. It reads `(id, content)` for pending rows (`pending_embeddings`).
-2. It `await`s a batch embed of up to 128 texts outside any lock. On a CPU Ollama that takes
-   seconds.
-3. `insert_embedding` then runs an unconditional `DELETE` + `INSERT` of the vector and
-   `embedding_status = 1`.
-
-Before Phase 4, content was immutable, so this was safe. `memory_update` breaks that
-assumption. Interleaving:
-
-1. Row 7 is pending (stored while Ollama was down).
-2. Ollama recovers. The sweep reads `(7, "old text")` and starts embedding it.
-3. A client PATCHes row 7 with `"new text"`. `update` embeds the new text successfully, swaps
-   the vector and sets status 1.
-4. The sweep finishes and `insert_embedding(7, vec("old text"))` deletes the fresh vector,
-   writes the stale one, and sets status 1.
-
-Row 7 now matches its old meaning semantically, forever: status is 1, so no later sweep repairs
-it. The same happens if the update's own embed fails (status 0, no vector), since the sweep
-"repairs" it with the stale vector. The race is wider than it looks. `main.rs` documents that
-several MCP stdio processes and the REST daemon share one DB file, each with its own sweep
-task, while the writer `Mutex` is only per-process.
-
-Separately, a sweep racing `forget` re-inserts a vector for a deleted id. That vector can then
-attach to a new memory that reuses the rowid (`INTEGER PRIMARY KEY` without `AUTOINCREMENT`).
-That race already existed, but the fix below closes it too.
-
-**Fix:** Make the backfill write conditional on the row still being the pending row whose
-content was embedded. Do it in the same writer transaction:
-```rust
-fn insert_embedding(&self, memory_id: i64, expected_content: &str, embedding: Vec<f32>)
-    -> Result<bool, MemoryError> {
-    let mut conn = self.writer.lock().map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
-    let tx = conn.transaction()?;
-    let claimed = tx.execute(
-        "UPDATE memories SET embedding_status = 1 \
-         WHERE id = ?1 AND embedding_status = 0 AND content = ?2",
-        params![memory_id, expected_content],
-    )?;
-    if claimed == 0 {
-        return Ok(false); // updated, already embedded, or forgotten: skip; tx rolls back
-    }
-    let blob: &[u8] = bytemuck::cast_slice(&embedding);
-    tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![memory_id])?;
-    tx.execute("INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)", params![memory_id, blob])?;
-    tx.commit()?;
-    Ok(true)
-}
-```
-Pass the content from `pending_embeddings` through `sweep()`. Add a test: pending row, then
-the sweep reads it, then `update` with new content, then the backfill completes. Assert that
-KNN on the new content's vector finds the row and KNN on the old content's vector does not.
+## New findings
 
 ## Warnings
 
-### WR-01: Concurrent first open after an upgrade can fail startup, or leave a "pre-0003" backup that is really schema v3
+### WR-01: A long FTS5 `NOT` chain still turns client input into a 500 / `internal_error`
 
-**File:** `crates/agent-memory-core/src/store/sqlite.rs:224-252`, `crates/agent-memory-core/src/store/sqlite.rs:140-189`
-**Issue:** `open()` has three unlocked steps: probe `user_version`, write the backup, then
-`to_latest()`. rusqlite_migration 2.5 reads `user_version` outside its deferred transaction
-(`goto` → `goto_up`, lib.rs:713-651). 0003 is the first migration ever applied to deployed
-v0.0.1 databases, and several processes share one DB by design (an MCP stdio server per editor
-session plus the REST daemon). That makes simultaneous first opens after `brew upgrade` a
-realistic scenario:
+**File:** `crates/agent-memory-core/src/store/sqlite.rs:498-504` (markers), `:519-530` (classifier), `:586` (unclassified error becomes `Sqlite`), `crates/agent-memory-core/src/service.rs:302-310` (redacted to the internal tier)
 
-- **Startup failure:** A and B both probe version 2. A migrates and commits. B's `CREATE TABLE
-  memory_links` then fails with `table memory_links already exists`, or `SQLITE_BUSY_SNAPSHOT`.
-  The transaction rolls back, but B's server fails to start.
-- **Silently wrong backup:** B probes 2, A migrates to 3, and only then does B run
-  `pre_migration_backup`. B deletes A's valid `*.backup-pre-0003-*` file and writes a copy of
-  the *already-migrated* v3 database under the "pre-0003" name. B's `to_latest` is then a
-  no-op. There are no down-migrations (migrations.rs:6-8), so the backup is the only rollback
-  path, and it is now wrong.
+**Issue:** FTS5 enforces `SQLITE_FTS5_MAX_EXPR_DEPTH` (256). `NOT` nodes are never flattened (`fts5ExprAddChildren` skips `FTS5_NOT`), so `a NOT a NOT a …` with more than 256 `NOT`s builds a left-deep tree. That tree fails at step time with:
 
-**Fix:** Run probe, backup and migrate under one exclusive lock, and re-read the version under
-it. For example: `BEGIN IMMEDIATE` on the writer, re-read `user_version`, skip the backup if it
-is no longer pending, then `COMMIT` and migrate. A cheaper alternative: write the backup to a
-temp name, open it, check that its `user_version == db_version`, then rename it into place and
-remove the stale backups. Treat a `to_latest` failure caused by the version having moved to
-`LATEST` as success.
+```
+fts5 expression tree is too large (maximum depth 256)
+```
 
-### WR-02: Patch DTOs silently ignore non-patchable or misspelled fields
+The message starts with `fts5 expression`, not `fts5: `. None of the five markers matches it, so `match_with_sanitized_retry` takes the `Err(e) => Err(MemoryError::Sqlite(e))` arm. `redact_search_error` then maps it to `SEARCH_STORAGE_FAILURE`, which means HTTP 500 / MCP `internal_error` plus an `ERROR` log line.
 
-**File:** `crates/agent-memory/src/mcp.rs:154-186`, `crates/agent-memory/src/rest/handlers.rs:101-127`
-**Issue:** Neither `UpdateArgs` nor `UpdateBody` uses `deny_unknown_fields`. Two cases:
+I verified this against the bundled SQLite with the scratch probe. Both `NOT`×257 and `NOT`×300 return `Err("sqlite error: fts5 expression tree is too large (maximum depth 256)")` from `search` **and** from `keyword_candidates`. The parser-stack-overflow class (deep parentheses) is classified correctly and returns `Ok`.
 
-- `{"content": "x", "type": "DECISION"}` returns 200 with the type unchanged. `type` and
-  `source` are documented as immutable, but the caller is told the update succeeded.
-- A typo such as `{"content": "x", "ttl_sec": 60}` updates the content and silently drops the
-  TTL.
+The input is contrived, but it breaks the contract this phase re-established in `README.md:203` ("a query is never rejected") and in D-06 (client input never surfaces as a 500). It also lets any client write `ERROR`-level log entries on demand. The sanitized form would parse: OR chains are flattened, and a 3000-term OR chain was verified to run.
 
-With merge-patch semantics, a silently dropped member is a silent partial write. This violates
-the seam's "bad input is always the client tier" rule.
+`every_bundled_fts5_parse_error_is_classified_as_match_input` does not cover this class, so the test suite cannot catch it.
 
-**Fix:** Add `#[serde(deny_unknown_fields)]` to both DTOs. On MCP, `id` is a declared field,
-so it is fine. On REST, the explicit `JsonRejection` handling already turns this into a 400.
-Add one test per transport for `{"content": "x", "type": "DECISION"}` returning
-`invalid_params` / 400.
+**Fix:** Add the marker, then add the probe to the bundled-SQLite classifier test and to the two-mode decision table.
+```rust
+const FTS5_QUERY_PARSE_MARKERS: [&str; 6] = [
+    "fts5: ",
+    "fts5 expression tree is too large", // SQLITE_FTS5_MAX_EXPR_DEPTH, e.g. 257+ chained NOTs
+    "unterminated string",
+    "no such column",
+    "unknown special query",
+    "expected integer",
+];
+// test probe: format!("a {}", "NOT a ".repeat(300)) -> Ok in both modes
+```
 
-### WR-03: `relates_to` is documented as symmetric but stored and deduplicated as directed
+### WR-02: README promises a JSON `{"error"}` body for every REST client error, but `POST /api/memories` and `POST /api/search` still return axum's plain-text rejections (and 422/415, not 400)
 
-**File:** `crates/agent-memory-core/src/store/sqlite.rs:710-714, 719-728, 856-905`, `crates/agent-memory-core/src/domain.rs:77`
-**Issue:** The primary key is `(from_id, to_id, kind)`, so `link(a, b, relates_to)` and
-`link(b, a, relates_to)` create two edges for one symmetric relation. Consequences:
+**File:** `README.md:436-438`, `crates/agent-memory/src/rest/handlers.rs:194-197` (`store_handler`), `:257-260` (`search_handler`)
 
-- Expansion lists the neighbor twice, once `out` and once `in`, and both copies count against
-  `MAX_EXPANDED_LINKS`.
-- `unlink(a, b, relates_to)` reports `unlinked: true` while `b -> a` keeps the "symmetric"
-  relation alive.
-- The D-02 idempotency promise ("duplicate link is a no-op") fails for the only kind whose
-  direction is meaningless.
+**Issue:** 04-07 added this sentence: "Every client error, including a malformed path segment … or query parameter …, returns a JSON `{"error": "..."}` body."
 
-**Fix:** Canonicalise `relates_to` endpoints at the service seam: store `(min(a,b), max(a,b))`
-for `link` and look it up the same way for `unlink`. Optionally, dedupe by neighbor id in
-`related()`. Document that the direction shown for `relates_to` is not meaningful.
+That is not true for the two POST routes that kept the bare `Json<T>` extractor:
 
-### WR-04: `memory_list` with `expand_links` and no `limit` is unbounded, contradicting the documented T-04-11 bound
+- `POST /api/memories` with `{}` (missing `content`) returns axum's `JsonRejection`: **422** `text/plain` "Failed to deserialize the JSON body into the target type: missing field `content`".
+- `POST /api/search` with a non-JSON body or no `Content-Type` returns **400/415** `text/plain`.
 
-**File:** `crates/agent-memory-core/src/service.rs:194-208`, `crates/agent-memory-core/src/domain.rs:316-321`
-**Issue:** The `MAX_EXPANDED_LINKS` doc claims that, together with `MAX_LIMIT`, it "bounds an
-expanded response at 200 × 10 summaries (T-04-11)". But `list` with an omitted `limit` stays
-unlimited (Pitfall 6). An expanded list therefore returns every memory plus up to 10 neighbors
-each, and runs one `related()` query per row inside a single `spawn_blocking`. So the threat
-mitigation the plan relies on does not hold for `GET /api/memories?expand_links=true`.
+A client that parses `error` from every non-2xx response, as the README now invites, fails on these routes. The status codes also contradict the README's 400-for-client-input story.
 
-**Fix:** When `expand_links` is set and `limit` is `None`, either apply `DEFAULT_SEARCH_LIMIT`
-(or `MAX_LIMIT`) or reject with `InvalidArgument` ("limit is required with expand_links").
-Correct the doc comment and the README accordingly.
+The handlers are v0.0.1 code, but the README claim is new in this gap closure. It turns a known inconsistency into a documented contract that does not hold.
+
+**Fix:** Take the rejection explicitly, as `update_handler` / `link_handler` already do. Add one real-HTTP row per route to `malformed_path_and_query_params_get_the_json_error_body`.
+```rust
+pub async fn store_handler(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<StoreRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(req) = body.map_err(|r| ApiError::BadRequest(r.body_text()))?;
+    // ...
+}
+// same for search_handler
+```
+Alternatively, narrow the README sentence to the routes that actually comply.
 
 ## Info
 
-### IN-01: The pre-migration backup and the newer-schema refusal are not documented for users
+### IN-01: Non-search surfaces still put raw SQLite text in client responses
 
-**File:** `README.md` (no section)
-**Issue:** The README never mentions `backup`, `migration` or `upgrade`. Users will find
-`memories.db.backup-pre-0003-YYYYMMDD` files next to their DB with no explanation, no
-restore procedure, and no note that a newer DB refuses an older binary (D-11 to D-13).
-**Fix:** Add a short "Upgrading" section covering the backup name pattern, the retention rule,
-how to restore (stop the servers, copy the backup over `memories.db`, delete `-wal`/`-shm`),
-and the newer-schema error message.
+**File:** `crates/agent-memory/src/rest/handlers.rs:165-180` (`ApiError::Internal(e.to_string())`), `crates/agent-memory/src/mcp.rs:35-50`
 
-### IN-02: Path and Query extractor rejections on the new routes return plain-text bodies, not `{"error": ...}`
+**Issue:** `redact_search_error` (`service.rs:46-60`) covers `search` only. A storage fault in `store`, `list` (including `expand_links` → `related()`), `update`, `link`, `unlink`, `forget` or `/health` still sends `sqlite error: …` to the client. That text includes table and column names and engine detail.
 
-**File:** `crates/agent-memory/src/rest/handlers.rs:287-291, 364-367, 209-211`
-**Issue:** `PATCH /api/memories/abc`, `DELETE /api/links/x/2/relates_to` and
-`GET /api/memories?expand_links=1` hit axum's default `Path`/`Query` rejection, which returns a
-plain-text body. The new handlers deliberately normalise `JsonRejection` to `{"error"}`, so the
-error body shape is now inconsistent between body and path failures.
-**Fix:** Take `Result<Path<_>, PathRejection>` / `Result<Query<_>, QueryRejection>` the same way
-`update_handler` takes the JSON body, and map them to `ApiError::BadRequest`.
+The README scopes its promise to search (`README.md:438-440`), and 04-05 lists this as deferred, so the code and docs agree. The risk is low: the server is loopback, single-user and unauthenticated by design. It is recorded here because this re-review was asked to look for remaining raw SQLite text.
 
-### IN-03: The backup step deletes the previous same-version backup before the new one is written
+**Fix:** When the deferral is picked up, move the redaction into the two transport mappers. On the `Sqlite | Pool | Join | Migration` arm: log the error, then return a generic message. Keep `Internal` / `SchemaTooNew` as they are.
 
-**File:** `crates/agent-memory-core/src/store/sqlite.rs:156-182`
-**Issue:** If the new backup then fails (disk full, permissions), the previous pre-0003 backup
-is already gone. The DB itself stays untouched because the open aborts, so this is low risk,
-but the retention step is not atomic.
-**Fix:** Write to `{prefix}{date}.tmp`, then rename it into place, and only then remove the
-other `{prefix}*` entries.
+### IN-02: Keyword mode: a punctuation-free question often finds nothing, while the same question with `?` finds results
 
-### IN-04: Stale comment refers to a "semantic leg" that no longer exists
+**File:** `crates/agent-memory-core/src/store/sqlite.rs:569-588`
 
-**File:** `crates/agent-memory-core/src/service.rs:289`
-**Issue:** "Same order as the semantic leg" — the semantic-only path was removed. The fallback
-warnings at L270-275 still say "semantic search unavailable", which is fine. The comment should
-say "the hybrid path".
-**Fix:** Reword the comment.
+**Issue:** The retry only fires when FTS5 fails to *parse*. `what vector store do we use` is valid FTS5, an implicit AND of six words, so it usually matches nothing and returns `[]` in keyword mode. `what vector store do we use?` fails to parse, takes the OR fallback, and returns results. Adding a question mark makes the query broader.
 
-### IN-05: `memory_update` can revive a row whose TTL has passed but which the sweep has not yet removed
+Hybrid mode hides this, because the semantic leg answers. With Ollama down, an agent that drops the `?` gets nothing. This follows from "valid FTS5 runs exactly as written", so it is a design consequence, not a regression from v0.0.1. It is still surprising, and the README example (`README.md:203-209`) implies the punctuation is incidental.
 
-**File:** `crates/agent-memory-core/src/store/sqlite.rs:747-791`
-**Issue:** `update` does not check `expires_at < now`. A patch with `ttl_secs: null` (or a new
-TTL) on an expired row that has not been swept yet brings it back. This matches list/search,
-which also show expired-but-unswept rows, but it should be a deliberate choice.
-**Fix:** Either treat `expires_at < now` as not-found in `update`, or document the behaviour.
+**Fix:** Either document it ("an unpunctuated multi-word query is an AND of all its words"), or also run the sanitized OR form when the raw query returned zero rows and contains no explicit FTS5 operators or quotes.
 
-### IN-06: Snippet truncation counts Unicode scalars, not grapheme clusters
+### IN-03: Stale "directed" wording after the WR-03 symmetric `relates_to` change
 
-**File:** `crates/agent-memory-core/src/domain.rs:192-197`
-**Issue:** The cut never splits a UTF-8 code point, but it can split a combining sequence or a
-ZWJ emoji, leaving a dangling modifier before the `…`. This is cosmetic.
-**Fix:** Accept and document it, or cut at the last whitespace before the limit (D-05 leaves
-the choice open).
+**File:** `README.md:154`, `crates/agent-memory-core/src/service.rs:561`, `crates/agent-memory-core/src/service.rs:587-590`, `crates/agent-memory/src/rest/handlers.rs:135-144`
+
+**Issue:** These still describe every relation as a directed edge whose direction must match:
+
+- the tools table: "Link two memories with a typed, directed relation";
+- the `MemoryService::link` / `unlink` docs;
+- the `LinkBody` doc and its `kind` field.
+
+The MCP descriptions, store-trait docs and README Relations section were updated, so the wording is now inconsistent.
+
+**Fix:** Reword them to "typed relation (`relates_to` is symmetric; `supersedes` / `caused_by` are directed)", matching `mcp.rs:418`.
+
+### IN-04: Backup edge cases: pid-only temp name, and a prune failure aborts startup after a valid backup is already in place
+
+**File:** `crates/agent-memory-core/src/store/sqlite.rs:140-145`, `crates/agent-memory-core/src/store/sqlite.rs:293`
+
+**Issue:**
+
+1. `backup_temp_path` makes the temp name unique by pid only. Two processes in different PID namespaces can both be pid 1. Example: the REST daemon in a container and another container sharing the same volume. Those two openers write Online Backups into the same temp file, and one renames it while the other is still writing. The result is a torn backup, or an `ENOENT` rename failure that aborts that opener. This case is rare for a Homebrew/binary tool.
+2. When the rename succeeds but `prune_other_backups` cannot remove an older same-version backup (permissions, or an entry that is not a file), `open()` refuses to start, even though the new genuine backup is already in place. Refusing to migrate without a backup is the T-04-02 rule. Refusing to start because an *old* backup could not be deleted goes further than that rule requires.
+
+**Fix:**
+
+1. Add a random suffix to the temp name, for example `{pid}-{nanos}`, or create it with `O_EXCL` / `tempfile::Builder::new().tempfile_in(dir)`.
+2. Log prune failures as warnings and return `Ok(Some(final_path))`.
+
+### IN-05: When a newer binary wins the upgrade race, the user gets a raw migration error instead of the `SchemaTooNew` message
+
+**File:** `crates/agent-memory-core/src/store/sqlite.rs:323-333`
+
+**Issue:** The scenario: a v3 binary probes 2 while a v4 binary migrates the same file to 4.
+
+- The v3 binary's backup copy is version 4, so it is discarded with `Ok(None)`.
+- Its `to_latest` then fails with rusqlite_migration's `DatabaseTooFarAhead`.
+- The re-probe reads 4, which is not `LATEST_SCHEMA_VERSION`, so the original migration error is returned.
+
+The user does not get the friendly D-13 text that names `brew upgrade`. The refusal itself is still correct.
+
+**Fix:** In the re-probe `match`, map `Ok(v) if v > LATEST_SCHEMA_VERSION` to `MemoryError::SchemaTooNew { db_version: v, binary_version: LATEST_SCHEMA_VERSION }`.
+
+### IN-06: Test name contradicts its assertion
+
+**File:** `crates/agent-memory/tests/tools.rs:418` (`memory_update_with_an_unknown_field_is_invalid_params_over_stdio`)
+
+**Issue:** The test asserts that there is **no** JSON-RPC `error` member and that `result.isError == true`. That is a tool error result, not `invalid_params`. 04-07 kept the plan's name on purpose, but anyone triaging a failure will be misled.
+
+**Fix:** Rename it to `memory_update_with_an_unknown_field_is_a_tool_error_over_stdio`.
 
 ---
 
