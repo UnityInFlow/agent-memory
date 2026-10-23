@@ -205,28 +205,33 @@ impl UpdateArgs {
     }
 }
 
-/// Arguments for `memory_link` (MCP-07): create the directed edge
-/// `from_id -[kind]-> to_id`.
+/// Arguments for `memory_link` (MCP-07): create the relation
+/// `from_id -[kind]-> to_id`. `relates_to` is symmetric (one relation however
+/// it is linked); `supersedes` and `caused_by` are directed.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LinkArgs {
     /// The id of the memory the edge starts at.
     pub from_id: i64,
     /// The id of the memory the edge points to. Must differ from `from_id`.
     pub to_id: i64,
-    /// One of: relates_to (symmetric "see also"), supersedes (from replaces
-    /// to), caused_by (from was caused by to).
+    /// One of: relates_to (symmetric "see also": linking b->a after a->b is
+    /// the same relation), supersedes (from replaces to), caused_by (from was
+    /// caused by to).
     pub kind: String,
 }
 
-/// Arguments for `memory_unlink` (MCP-07): remove the directed edge
-/// `from_id -[kind]-> to_id`. Direction and kind must match the stored edge.
+/// Arguments for `memory_unlink` (MCP-07): remove the relation
+/// `from_id -[kind]-> to_id`. For supersedes and caused_by, direction and kind
+/// must match the stored edge; a symmetric relates_to can be removed from
+/// either end.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UnlinkArgs {
     /// The id the edge starts at.
     pub from_id: i64,
     /// The id the edge points to.
     pub to_id: i64,
-    /// One of: relates_to, supersedes, caused_by.
+    /// One of: relates_to (symmetric: removable from either end), supersedes,
+    /// caused_by (direction must match).
     pub kind: String,
 }
 
@@ -400,7 +405,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Link two memories with a typed, directed relation from_id -[kind]-> to_id. kind is one of: relates_to (symmetric see-also), supersedes (from_id replaces the older to_id), caused_by (from_id was caused by to_id). Linking an existing edge again is a no-op success; from_id and to_id must differ. Returns {from_id, to_id, kind, linked: true}, or {linked: false, reason: 'not_found', missing_id} when either memory does not exist."
+        description = "Link two memories with a typed relation from_id -[kind]-> to_id. kind is one of: relates_to (a symmetric see-also: linking b->a after a->b is the same relation), supersedes (from_id replaces the older to_id), caused_by (from_id was caused by to_id); supersedes and caused_by are directed. Linking an existing relation again is a no-op success; from_id and to_id must differ. The result always echoes the from_id and to_id you sent. Returns {from_id, to_id, kind, linked: true}, or {linked: false, reason: 'not_found', missing_id} when either memory does not exist."
     )]
     async fn memory_link(
         &self,
@@ -438,7 +443,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "Remove the directed relation from_id -[kind]-> to_id (direction and kind must match the stored edge; kind is relates_to, supersedes or caused_by). Returns {from_id, to_id, kind, unlinked: true}, or a clean {unlinked: false, reason: 'not_found'} result when no such edge exists."
+        description = "Remove the relation from_id -[kind]-> to_id; kind is relates_to, supersedes or caused_by. For supersedes and caused_by the direction must match the stored edge; relates_to is symmetric and can be removed from either end. Returns {from_id, to_id, kind, unlinked: true}, or a clean {unlinked: false, reason: 'not_found'} result when no such edge exists."
     )]
     async fn memory_unlink(
         &self,
@@ -868,6 +873,70 @@ mod tests {
                 "from_id": a, "to_id": b, "kind": "supersedes",
                 "unlinked": false, "reason": "not_found"
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn relates_to_link_and_unlink_responses_echo_the_request_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let a = store_one(&server, "first see-also").await;
+        let b = store_one(&server, "second see-also").await;
+        assert!(b > a, "b sorts after a, so canonical storage is (a, b)");
+        // Stored canonically as (a, b), yet the wire reports what was sent.
+        let raw = format!(r#"{{"from_id": {b}, "to_id": {a}, "kind": "relates_to"}}"#);
+
+        let linked = link_raw(&server, &raw).await.expect("link succeeds");
+        let body = result_json(&linked);
+        assert_eq!(body["from_id"], b, "{body}");
+        assert_eq!(body["to_id"], a, "{body}");
+        assert_eq!(body["kind"], "relates_to", "{body}");
+        assert_eq!(body["linked"], true, "{body}");
+
+        let removed = unlink_raw(&server, &raw).await.expect("unlink succeeds");
+        let body = result_json(&removed);
+        assert_eq!(body["from_id"], b, "{body}");
+        assert_eq!(body["to_id"], a, "{body}");
+        assert_eq!(body["kind"], "relates_to", "{body}");
+        assert_eq!(body["unlinked"], true, "{body}");
+
+        // A not-found body names the request's ids and its missing id.
+        let missing = link_raw(
+            &server,
+            &format!(r#"{{"from_id": 999999, "to_id": {a}, "kind": "relates_to"}}"#),
+        )
+        .await
+        .expect("a missing endpoint is a successful tool call");
+        assert_eq!(
+            result_json(&missing),
+            serde_json::json!({
+                "from_id": 999_999, "to_id": a, "kind": "relates_to",
+                "linked": false, "reason": "not_found", "missing_id": 999_999
+            })
+        );
+    }
+
+    #[test]
+    fn link_and_unlink_descriptions_state_relates_to_symmetry() {
+        let tools = MemoryMcp::tool_router().list_all();
+        let description_of = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is registered"))
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let link = description_of("memory_link");
+        let unlink = description_of("memory_unlink");
+        assert!(link.contains("symmetric"), "{link}");
+        assert!(unlink.contains("symmetric"), "{unlink}");
+        assert!(unlink.contains("either end"), "{unlink}");
+        assert!(
+            unlink.contains("For supersedes and caused_by the direction must match"),
+            "{unlink}"
         );
     }
 

@@ -803,11 +803,17 @@ impl Store for SqliteStore {
 
         // The (from_id, to_id, kind) primary key makes a duplicate an
         // idempotent no-op: changes() == 0 is still Linked (D-02). The kind
-        // binds only the closed enum's wire form (T-04-10).
+        // binds only the closed enum's wire form (T-04-10). The endpoints are
+        // the STORED pair: relates_to is canonicalised to (min, max), so b->a
+        // after a->b hits the same key and stays one symmetric relation
+        // (REVIEW WR-03); directed kinds bind the request order unchanged.
+        // The pre-check above stays in request order, so NotFound still names
+        // the request's from_id first.
+        let (stored_from, stored_to) = kind.canonical_endpoints(from_id, to_id);
         tx.execute(
             "INSERT OR IGNORE INTO memory_links (from_id, to_id, kind, created_at) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![from_id, to_id, kind.as_wire_str(), now],
+            params![stored_from, stored_to, kind.as_wire_str(), now],
         )?;
         tx.commit()?;
         Ok(LinkOutcome::Linked)
@@ -818,9 +824,17 @@ impl Store for SqliteStore {
             .writer
             .lock()
             .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
+        // The requested orientation always matches. For a symmetric kind
+        // (relates_to) the reversed orientation matches too (?4 = 1), so the
+        // relation can be removed from either end (REVIEW WR-03): that covers
+        // the canonical (min, max) row link() writes, and is also the backstop
+        // for any relates_to row a pre-fix dev build of the unreleased 0003
+        // stored in request order. Every value is bound, never formatted.
         let removed = conn.execute(
-            "DELETE FROM memory_links WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
-            params![from_id, to_id, kind.as_wire_str()],
+            "DELETE FROM memory_links WHERE kind = ?3 \
+               AND ((from_id = ?1 AND to_id = ?2) \
+                    OR (?4 = 1 AND from_id = ?2 AND to_id = ?1))",
+            params![from_id, to_id, kind.as_wire_str(), kind.is_symmetric()],
         )?;
         Ok(removed > 0)
     }

@@ -78,6 +78,14 @@ impl std::convert::TryFrom<&str> for MemoryType {
 /// - `supersedes` — `from` replaces `to` (the newer memory points at the older).
 /// - `caused_by` — `from` was caused by `to` (the effect points at its cause).
 ///
+/// `relates_to` is ONE symmetric relation (REVIEW WR-03): it is stored with
+/// canonical endpoints, (smaller id, larger id), whichever way round it was
+/// linked ([`LinkKind::canonical_endpoints`]), so linking b→a after a→b is the
+/// same relation, and it can be unlinked from either end. The `direction` that
+/// 1-hop expansion reports for a `relates_to` neighbour therefore carries no
+/// meaning. `supersedes` and `caused_by` keep D-03 directed identity: a→b and
+/// b→a are two distinct relations.
+///
 /// The wire form is snake_case (`relates_to`, `supersedes`, `caused_by`).
 /// Parse untrusted input with [`LinkKind::try_from`], which rejects anything
 /// else with [`MemoryError::InvalidArgument`] naming the allowed set — so a
@@ -110,6 +118,33 @@ impl LinkKind {
             LinkKind::RelatesTo => "relates_to",
             LinkKind::Supersedes => "superseded_by",
             LinkKind::CausedBy => "caused",
+        }
+    }
+
+    /// Whether the relation reads the same from both ends. True only for
+    /// `relates_to`; a symmetric kind is stored canonically and unlinked
+    /// from either end (REVIEW WR-03).
+    pub fn is_symmetric(self) -> bool {
+        match self {
+            LinkKind::RelatesTo => true,
+            LinkKind::Supersedes => false,
+            LinkKind::CausedBy => false,
+        }
+    }
+
+    /// The `(from_id, to_id)` pair this relation is STORED under.
+    ///
+    /// `relates_to` is canonicalised to `(min, max)`, so a→b and b→a land on
+    /// the same primary key and a duplicate in either order is the D-02
+    /// idempotent no-op. `supersedes` and `caused_by` are returned unchanged:
+    /// their direction is part of their identity (D-03).
+    ///
+    /// Storage only: transports always echo the REQUEST's ids on the wire.
+    pub fn canonical_endpoints(self, from_id: i64, to_id: i64) -> (i64, i64) {
+        match self {
+            LinkKind::RelatesTo => (from_id.min(to_id), from_id.max(to_id)),
+            LinkKind::Supersedes => (from_id, to_id),
+            LinkKind::CausedBy => (from_id, to_id),
         }
     }
 }
@@ -184,11 +219,17 @@ pub struct RelatedLink {
 
 /// Maximum characters of neighbor content carried in a [`RelatedLink`]
 /// snippet (D-05). Counted in Unicode scalar values, so a cut never splits a
-/// UTF-8 codepoint.
+/// UTF-8 codepoint. It may, however, split a grapheme cluster — a combining
+/// accent sequence or a ZWJ emoji — leaving a dangling modifier before the
+/// `…` (REVIEW IN-06). That is cosmetic and accepted under the D-05
+/// discretion: grapheme-aware cutting would need a new dependency for no
+/// functional gain.
 pub const RELATED_SNIPPET_CHARS: usize = 160;
 
 /// Cut `content` to [`RELATED_SNIPPET_CHARS`] characters on a char boundary,
-/// appending `…` only when something was cut.
+/// appending `…` only when something was cut. The cut counts Unicode scalars,
+/// not grapheme clusters, so it can split a combined emoji or accent sequence
+/// (IN-06, documented and accepted).
 pub fn snippet(content: &str) -> String {
     match content.char_indices().nth(RELATED_SNIPPET_CHARS) {
         Some((byte_idx, _)) => format!("{}…", &content[..byte_idx]),

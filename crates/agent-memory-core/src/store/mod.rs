@@ -157,6 +157,12 @@ pub trait Store: Send + Sync {
     /// `embedding_status` becomes 1; `None` leaves the row pending (0) for the
     /// sweep backfill. The id never changes: an update is never a DELETE+INSERT.
     /// `patch` must already be validated by the service.
+    ///
+    /// A row whose TTL has passed but which the sweep has not removed yet is
+    /// still a row (REVIEW IN-05): the update succeeds, and a `ttl_secs` patch
+    /// can extend or clear its expiry. This is consistent with list and search,
+    /// which also show such rows until the sweep runs. Documented behaviour,
+    /// deliberately unchanged.
     fn update(
         &self,
         id: i64,
@@ -165,13 +171,20 @@ pub trait Store: Send + Sync {
         now: i64,
     ) -> Result<Option<UpdatedMemory>, MemoryError>;
 
-    /// Create the directed edge `from_id -[kind]-> to_id` (MCP-07), stamped
+    /// Create the relation `from_id -[kind]-> to_id` (MCP-07), stamped
     /// `created_at = now`. One writer transaction: both endpoints are checked
-    /// first, and a missing one returns [`LinkOutcome::NotFound`] naming it
-    /// (`from_id` first) — a clean not-found, never an FK-violation error
-    /// (D-02 / T-04-13). A duplicate `(from_id, to_id, kind)` is an idempotent
-    /// no-op that still returns [`LinkOutcome::Linked`]. The self-link check
-    /// belongs to the service seam and has already run.
+    /// first, in REQUEST order, and a missing one returns
+    /// [`LinkOutcome::NotFound`] naming it (`from_id` first) — a clean
+    /// not-found, never an FK-violation error (D-02 / T-04-13).
+    ///
+    /// The row is stored under [`LinkKind::canonical_endpoints`]: `relates_to`
+    /// as (smaller id, larger id), so linking b→a after a→b is the same
+    /// symmetric relation (REVIEW WR-03); `supersedes` / `caused_by` as given
+    /// (D-03 directed identity). A duplicate of the stored row is an idempotent
+    /// no-op that still returns [`LinkOutcome::Linked`]. Canonicalisation is
+    /// storage-only: callers echo the request's ids on the wire, and
+    /// [`LinkOutcome`] carries no stored ids. The self-link check belongs to
+    /// the service seam and has already run.
     fn link(
         &self,
         from_id: i64,
@@ -180,10 +193,16 @@ pub trait Store: Send + Sync {
         now: i64,
     ) -> Result<LinkOutcome, MemoryError>;
 
-    /// Remove the directed edge `from_id -[kind]-> to_id` (MCP-07). Returns
-    /// `true` if an edge was removed, `false` if no such edge existed — the
-    /// clean not-found of [`Store::forget`], never an error (D-02). Direction
-    /// and kind are part of the edge's identity.
+    /// Remove the relation `from_id -[kind]-> to_id` (MCP-07). Returns `true`
+    /// if an edge was removed, `false` if no such edge existed — the clean
+    /// not-found of [`Store::forget`], never an error (D-02).
+    ///
+    /// For `supersedes` and `caused_by`, direction and kind are part of the
+    /// edge's identity: only the requested orientation is removed. For a
+    /// symmetric kind ([`LinkKind::is_symmetric`], i.e. `relates_to`) BOTH
+    /// orientations match, so the relation can be removed from either end
+    /// (REVIEW WR-03). That also removes any `relates_to` row a pre-fix dev
+    /// build stored in request order; no migration is involved.
     fn unlink(&self, from_id: i64, to_id: i64, kind: LinkKind) -> Result<bool, MemoryError>;
 
     /// The 1-hop neighbors of memory `id`, following its edges in BOTH
