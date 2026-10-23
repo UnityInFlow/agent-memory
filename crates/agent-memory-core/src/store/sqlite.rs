@@ -21,8 +21,8 @@ use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
 use crate::domain::{
-    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
-    UpdatedMemory,
+    snippet, LinkDirection, LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType,
+    MemoryView, NewMemory, RelatedLink, UpdatedMemory,
 };
 use crate::service::{ListArgs, SearchArgs};
 use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
@@ -299,7 +299,23 @@ fn row_to_view(row: &rusqlite::Row<'_>) -> Result<MemoryView, rusqlite::Error> {
         decay_score: row.get("decay_score")?,
         created_at: row.get("created_at")?,
         last_accessed: row.get("last_accessed")?,
+        // Expansion is attached by the service only when asked for (D-04).
+        related: None,
     })
+}
+
+/// A stored text value that fails its closed-enum parse is corrupt data, not
+/// client input: report it as a row conversion failure (the `row_to_view`
+/// mem_type precedent), which surfaces on the internal tier.
+fn corrupt_column(what: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid {what} in row: {value}"),
+        )),
+    )
 }
 
 /// Classify a post-bind FTS5 execution error at the store seam: a MATCH string
@@ -792,6 +808,57 @@ impl Store for SqliteStore {
         )?;
         tx.commit()?;
         Ok(Some(updated))
+    }
+
+    fn related(&self, id: i64, cap: usize) -> Result<Vec<RelatedLink>, MemoryError> {
+        // Read pool: expansion is a pure read and never touches the writer.
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        // Both directions in one pass (D-03): the CASE picks the FAR endpoint
+        // of each edge touching `id`. The from_id lookup rides the primary key
+        // and the to_id lookup rides idx_links_to. Newest edges first, so the
+        // LIMIT keeps the most recent (D-07); the id/kind tail only makes ties
+        // deterministic. All values bound (T-04-10).
+        let mut stmt = conn.prepare(
+            "SELECT l.from_id, l.kind, m.id, m.mem_type, m.content, m.tags \
+             FROM memory_links l \
+             JOIN memories m \
+               ON m.id = CASE WHEN l.from_id = ?1 THEN l.to_id ELSE l.from_id END \
+             WHERE l.from_id = ?1 OR l.to_id = ?1 \
+             ORDER BY l.created_at DESC, m.id DESC, l.kind ASC \
+             LIMIT ?2",
+        )?;
+        let cap = i64::try_from(cap).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![id, cap], |row| {
+            let from_id: i64 = row.get(0)?;
+            let kind_str: String = row.get(1)?;
+            let mem_type_str: String = row.get(3)?;
+            let content: String = row.get(4)?;
+            let tags_json: String = row.get(5)?;
+            let kind = LinkKind::try_from(kind_str.as_str())
+                .map_err(|_| corrupt_column("link kind", &kind_str))?;
+            let mem_type = MemoryType::try_from(mem_type_str.as_str())
+                .map_err(|_| corrupt_column("mem_type", &mem_type_str))?;
+            // Seen from the anchor: an outgoing edge reads its stored kind,
+            // an incoming one its natural reverse label (superseded_by, caused).
+            let (direction, label) = if from_id == id {
+                (LinkDirection::Out, kind.as_wire_str())
+            } else {
+                (LinkDirection::In, kind.reverse_label())
+            };
+            Ok(RelatedLink {
+                id: row.get(2)?,
+                kind: label.to_string(),
+                direction,
+                mem_type,
+                snippet: snippet(&content),
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError> {

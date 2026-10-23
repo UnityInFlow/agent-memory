@@ -18,7 +18,7 @@ use crate::clock::Clock;
 use crate::decay::{apply_decay, decay_score, DecayConfig, DecayEngine, RankWeights, SweepReport};
 use crate::domain::{
     LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
-    UpdatedMemory,
+    UpdatedMemory, MAX_EXPANDED_LINKS,
 };
 use crate::embed::Embedder;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
@@ -32,6 +32,9 @@ pub struct ListArgs {
     pub tag: Option<String>,
     pub scope: Option<String>,
     pub limit: Option<i64>,
+    /// Attach 1-hop relation summaries to every returned row (MCP-07 / D-04).
+    /// `false` (the default) keeps the v1.0 response byte-identical.
+    pub expand_links: bool,
 }
 
 /// Arguments for [`MemoryService::search`]. `query` is the FTS5 MATCH string; the
@@ -43,6 +46,10 @@ pub struct SearchArgs {
     pub tag: Option<String>,
     pub scope: Option<String>,
     pub limit: Option<i64>,
+    /// Attach 1-hop relation summaries to every returned row (MCP-07 / D-04).
+    /// Orthogonal to the search mode: applies on the semantic and the keyword
+    /// path alike. `false` (the default) keeps the v1.0 envelope byte-identical.
+    pub expand_links: bool,
 }
 
 /// Which search path produced a result set. Serialized lowercase — the shared
@@ -147,11 +154,16 @@ impl MemoryService {
         // API-02 / D-01: a present limit must be 1..=200; omitted stays
         // unlimited (v1.0 behavior, RESEARCH Pitfall 6).
         crate::domain::validate_limit(args.limit)?;
+        let expand_links = args.expand_links;
         let store = self.store.clone();
         let now = self.clock.now();
-        tokio::task::spawn_blocking(move || store.list(args, now))
+        let views = tokio::task::spawn_blocking(move || store.list(args, now))
             .await
-            .map_err(MemoryError::Join)?
+            .map_err(MemoryError::Join)??;
+        if expand_links {
+            return self.expand_related(views).await;
+        }
+        Ok(views)
     }
 
     /// Search the corpus (MCP-02 / SEARCH-02 / SEARCH-03 / D-04).
@@ -179,6 +191,7 @@ impl MemoryService {
         let cfg = self.decay_cfg;
         let weights = RankWeights::default();
         let limit = args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT) as usize;
+        let expand_links = args.expand_links;
 
         let query_input = [args.query.clone()];
         match self.embedder.embed(&query_input).await {
@@ -216,7 +229,14 @@ impl MemoryService {
                     .map(|(view, _)| view)
                     .collect();
 
+                // Bump ONLY the returned ids, before expansion runs — expanded
+                // neighbors are never passed here (D-06).
                 self.spawn_bump(results.iter().map(|v| v.id).collect(), now);
+                let results = if expand_links {
+                    self.expand_related(results).await?
+                } else {
+                    results
+                };
                 Ok(SearchOutcome {
                     search_mode: SearchMode::Semantic,
                     results,
@@ -245,7 +265,14 @@ impl MemoryService {
                     apply_decay(view, now, &cfg);
                 }
 
+                // Same order as the semantic leg: bump the returned ids, then
+                // expand — neighbors are never bumped (D-06).
                 self.spawn_bump(views.iter().map(|v| v.id).collect(), now);
+                let views = if expand_links {
+                    self.expand_related(views).await?
+                } else {
+                    views
+                };
                 Ok(SearchOutcome {
                     search_mode: SearchMode::Keyword,
                     results: views,
@@ -337,6 +364,29 @@ impl MemoryService {
             imported,
             skipped_duplicates,
         })
+    }
+
+    /// Attach 1-hop relation summaries to already-final result rows (MCP-07):
+    /// one `spawn_blocking` hop that reads each row's neighbors via
+    /// [`Store::related`], capped at [`MAX_EXPANDED_LINKS`] most-recent edges
+    /// (D-07). Runs AFTER truncation and AFTER the recency bump, and is a pure
+    /// read — neighbor ids never reach [`Self::spawn_bump`] (D-06). Every row
+    /// gets `Some(..)`, an explicit `[]` when it has no edges, so a flag-on
+    /// response always carries the member. Strictly 1-hop: neighbors are not
+    /// themselves expanded (T-04-11).
+    async fn expand_related(
+        &self,
+        mut views: Vec<MemoryView>,
+    ) -> Result<Vec<MemoryView>, MemoryError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            for view in &mut views {
+                view.related = Some(store.related(view.id, MAX_EXPANDED_LINKS)?);
+            }
+            Ok(views)
+        })
+        .await
+        .map_err(MemoryError::Join)?
     }
 
     /// Fire-and-forget recency bump: retrieving a memory bumps its

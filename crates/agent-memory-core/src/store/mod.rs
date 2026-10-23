@@ -12,7 +12,7 @@ pub mod sqlite;
 use crate::decay::{DecayConfig, RankWeights};
 use crate::domain::{
     LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
-    UpdatedMemory,
+    RelatedLink, UpdatedMemory,
 };
 use crate::service::{ListArgs, SearchArgs};
 
@@ -130,6 +130,13 @@ pub trait Store: Send + Sync {
     /// clean not-found of [`Store::forget`], never an error (D-02). Direction
     /// and kind are part of the edge's identity.
     fn unlink(&self, from_id: i64, to_id: i64, kind: LinkKind) -> Result<bool, MemoryError>;
+
+    /// The 1-hop neighbors of memory `id`, following its edges in BOTH
+    /// directions (MCP-07 / D-03), as trimmed summaries (D-05). At most `cap`
+    /// entries, most-recent edges first (`created_at` descending — D-07).
+    /// A pure read on the read pool: it never bumps anything (D-06). An id
+    /// with no edges (or no row) yields an empty vec.
+    fn related(&self, id: i64, cap: usize) -> Result<Vec<RelatedLink>, MemoryError>;
 
     /// Bump the recency of the given ids: set `last_accessed = now` and increment
     /// `access_count`. Runs on the writer lane. A no-op for an empty id slice.
