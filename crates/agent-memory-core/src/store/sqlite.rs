@@ -1077,4 +1077,165 @@ mod tests {
         let k_at_max = (crate::domain::MAX_LIMIT * 4).min(MAX_KNN_K);
         assert_eq!(k_at_max, crate::domain::MAX_LIMIT * 4);
     }
+
+    // -----------------------------------------------------------------------
+    // option-a (T-04-15 revised): the classifier, the sanitizer, and the
+    // always-parses fallback, pinned against the BUNDLED SQLite — the source
+    // of truth, not the system sqlite3 CLI the planning probe used.
+    // -----------------------------------------------------------------------
+
+    /// An in-memory one-column FTS5 table shaped like `memories_fts(content)`.
+    fn fts_probe_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE t USING fts5(content);
+             INSERT INTO t(content) VALUES ('sqlite with vec support');",
+        )
+        .expect("create fts5 probe table");
+        conn
+    }
+
+    /// Bind `query` as the MATCH string of a statement that prepared fine, so
+    /// any error is a step-time error — exactly what the store seam sees.
+    fn probe(stmt: &mut rusqlite::Statement<'_>, query: &str) -> Result<i64, rusqlite::Error> {
+        stmt.query_row([query], |row| row.get(0))
+    }
+
+    fn deep_parens() -> String {
+        format!("{}a{}", "(".repeat(3000), ")".repeat(3000))
+    }
+
+    /// Candidate probes from the planning table that FTS5 rejects. All nine
+    /// error in the bundled SQLite 3.51.3 exactly as in the sqlite3 3.46 CLI
+    /// probe (the empty string included), so none moved to the valid-raw group.
+    fn erroring_probes() -> Vec<String> {
+        vec![
+            String::new(),
+            "what is it?".to_string(),
+            "\"unbalanced".to_string(),
+            "AND".to_string(),
+            "sqlite-vec".to_string(),
+            "auth: tokens".to_string(),
+            "*".to_string(),
+            "NEAR(a b, x)".to_string(),
+            deep_parens(),
+        ]
+    }
+
+    /// Structured FTS5 syntax that is valid as written: it runs raw, and the
+    /// sanitized retry never fires for it.
+    fn valid_raw_probes() -> Vec<String> {
+        vec![
+            "\"exact phrase\"".to_string(),
+            "sqlite AND vec".to_string(),
+            "vec*".to_string(),
+            "content: tokens".to_string(),
+            "\"\"".to_string(),
+        ]
+    }
+
+    #[test]
+    fn every_bundled_fts5_parse_error_is_classified_as_match_input() {
+        let conn = fts_probe_conn();
+        let mut stmt = conn
+            .prepare("SELECT count(*) FROM t WHERE t MATCH ?1")
+            .expect("static statement prepares");
+        let erroring = erroring_probes();
+        assert!(!erroring.is_empty());
+        for query in &erroring {
+            let err = probe(&mut stmt, query)
+                .expect_err(&format!("{:.40?} must error in the bundled SQLite", query));
+            assert!(
+                is_match_input_error(&err),
+                "{:.40?} must be classified as client input, got: {err}",
+                query
+            );
+        }
+    }
+
+    #[test]
+    fn valid_structured_fts5_syntax_runs_raw_in_the_bundled_sqlite() {
+        let conn = fts_probe_conn();
+        let mut stmt = conn
+            .prepare("SELECT count(*) FROM t WHERE t MATCH ?1")
+            .expect("static statement prepares");
+        for query in valid_raw_probes() {
+            probe(&mut stmt, &query)
+                .unwrap_or_else(|e| panic!("{query:?} is valid FTS5 and must run raw: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_sanitized_fallback_always_parses() {
+        let conn = fts_probe_conn();
+        let mut stmt = conn
+            .prepare("SELECT count(*) FROM t WHERE t MATCH ?1")
+            .expect("static statement prepares");
+        for query in erroring_probes().iter().chain(valid_raw_probes().iter()) {
+            if let Some(fallback) = sanitize_fts_query(query) {
+                probe(&mut stmt, &fallback).unwrap_or_else(|e| {
+                    panic!("fallback {fallback:.60?} of {query:.40?} must parse: {e}")
+                });
+            }
+        }
+        // The fallback finds the row through a hyphenated query's words.
+        let fallback = sanitize_fts_query("sqlite-vec").expect("has words");
+        assert_eq!(probe(&mut stmt, &fallback).expect("parses"), 1);
+    }
+
+    #[test]
+    fn the_classifier_rejects_everything_that_is_not_an_fts5_parse_error() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        assert!(!is_match_input_error(&busy));
+        // The primary code gates too: a parse marker under SQLITE_BUSY is no match.
+        let busy_with_marker = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("fts5: syntax error near \"?\"".to_string()),
+        );
+        assert!(!is_match_input_error(&busy_with_marker));
+        // SQLITE_ERROR alone is not enough: the message must be an FTS5 parse.
+        let malformed_json = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("malformed JSON".to_string()),
+        );
+        assert!(!is_match_input_error(&malformed_json));
+        assert!(!is_match_input_error(&corrupt_column("mem_type", "BOGUS")));
+        // Positive control for the constructed form.
+        let syntax = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("fts5: syntax error near \"?\"".to_string()),
+        );
+        assert!(is_match_input_error(&syntax));
+    }
+
+    #[test]
+    fn sanitize_fts_query_quotes_and_or_joins_word_tokens() {
+        let table: [(&str, Option<&str>); 12] = [
+            (
+                "what vector store do we use?",
+                Some(r#""what" OR "vector" OR "store" OR "do" OR "we" OR "use""#),
+            ),
+            ("don't retry", Some(r#""don" OR "t" OR "retry""#)),
+            ("C++", Some(r#""C""#)),
+            ("sqlite-vec", Some(r#""sqlite" OR "vec""#)),
+            ("auth: tokens", Some(r#""auth" OR "tokens""#)),
+            ("\"unbalanced", Some(r#""unbalanced""#)),
+            ("AND", Some(r#""AND""#)),
+            ("snake_case", Some(r#""snake_case""#)),
+            ("über 日本語", Some(r#""über" OR "日本語""#)),
+            ("", None),
+            ("?!,", None),
+            ("*", None),
+        ];
+        for (input, expected) in table {
+            assert_eq!(
+                sanitize_fts_query(input).as_deref(),
+                expected,
+                "sanitize_fts_query({input:?})"
+            );
+        }
+    }
 }
