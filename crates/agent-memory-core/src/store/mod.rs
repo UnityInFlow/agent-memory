@@ -10,7 +10,7 @@ pub mod migrations;
 pub mod sqlite;
 
 use crate::decay::{DecayConfig, RankWeights};
-use crate::domain::{MemoryError, MemoryType, MemoryView, NewMemory};
+use crate::domain::{MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory, UpdatedMemory};
 use crate::service::{ListArgs, SearchArgs};
 
 /// Synchronous persistence interface, implemented by [`sqlite::SqliteStore`].
@@ -83,6 +83,26 @@ pub trait Store: Send + Sync {
     /// row is deleted EXPLICITLY (vec0 virtual tables ignore triggers —
     /// RESEARCH Pitfall 3 / T-02-05).
     fn forget(&self, id: i64) -> Result<bool, MemoryError>;
+
+    /// Patch a memory IN PLACE (MCP-06 / D-08), returning the post-update row,
+    /// or `Ok(None)` if no row with that id exists (clean not-found, never an
+    /// error — the [`Store::forget`] contract).
+    ///
+    /// One writer transaction: the `memories` UPDATE (the FTS5 update trigger
+    /// re-mirrors content), the freshness bump folded into the same statement
+    /// (`last_accessed = now`, `access_count + 1` — D-09), and, when the patch
+    /// carries new content, the explicit `vec_memories` invalidation (vec0
+    /// ignores triggers). With new content, a `Some` `embedding` is written and
+    /// `embedding_status` becomes 1; `None` leaves the row pending (0) for the
+    /// sweep backfill. The id never changes: an update is never a DELETE+INSERT.
+    /// `patch` must already be validated by the service.
+    fn update(
+        &self,
+        id: i64,
+        patch: MemoryPatch,
+        embedding: Option<Vec<f32>>,
+        now: i64,
+    ) -> Result<Option<UpdatedMemory>, MemoryError>;
 
     /// Bump the recency of the given ids: set `last_accessed = now` and increment
     /// `access_count`. Runs on the writer lane. A no-op for an empty id slice.

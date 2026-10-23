@@ -12,13 +12,13 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 
-use agent_memory_core::domain::{MemoryError, MemoryType, NewMemory};
+use agent_memory_core::domain::{MemoryError, MemoryPatch, MemoryType, NewMemory};
 use agent_memory_core::embed::Embedder;
 use agent_memory_core::service::{
     ListArgs as ServiceListArgs, MemoryService, SearchArgs as ServiceSearchArgs,
 };
 
-/// Shared two-tier [`MemoryError`] → [`McpError`] mapping for all four tool
+/// Shared two-tier [`MemoryError`] → [`McpError`] mapping for every tool
 /// service calls — the mirror of `rest/handlers.rs`'s `map_memory_error`
 /// (closes review WR-04): client input (`InvalidType`, `InvalidQuery`,
 /// `InvalidArgument`) reports
@@ -27,8 +27,8 @@ use agent_memory_core::service::{
 /// argument-repair loops over a DB fault (T-02G-03).
 ///
 /// `Internal` covers server faults with no client cause, e.g. a poisoned writer
-/// mutex (WR-02). MCP's clean not-found is data — the `Ok(false)` forget
-/// result — never an error variant. No catch-all arm: a new `MemoryError`
+/// mutex (WR-02). MCP's clean not-found is data — forget's `Ok(false)` and
+/// update's `Ok(None)` — never an error variant. No catch-all arm: a new `MemoryError`
 /// variant must be classified here at compile time.
 fn map_mcp_error(e: MemoryError) -> McpError {
     match &e {
@@ -120,6 +120,66 @@ pub struct SearchArgs {
 pub struct ForgetArgs {
     /// The numeric id of the memory to delete.
     pub id: i64,
+}
+
+/// Arguments for `memory_update` (MCP-06) — a JSON-merge-patch over one memory.
+///
+/// Omit a field to leave it unchanged; send `null` to clear it (`tags` → empty,
+/// `scope` → global, `ttl_secs` → no expiry); send a value to set it. `content`
+/// can be replaced but never cleared or emptied. At least one field besides
+/// `id` is required. `type` and `source` cannot be changed.
+///
+/// `skip_serializing_if` on the patch fields is for the SCHEMA, not the wire:
+/// it stops schemars from advertising `"default": null`. A client that fills
+/// in schema defaults would otherwise send explicit nulls — and null means
+/// "clear" here, so every patch would wipe tags/scope/ttl.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateArgs {
+    /// The numeric id of the memory to update.
+    pub id: i64,
+    /// New content (re-indexed and re-embedded). Omit to keep; never null or empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub content: Option<Option<String>>,
+    /// Replacement tag list. Omit to keep; `null` clears to an empty list.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub tags: Option<Option<Vec<String>>>,
+    /// New logical scope. Omit to keep; `null` resets to global.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub scope: Option<Option<String>>,
+    /// New time-to-live in seconds, counted from now. Omit to keep; `null` removes the expiry.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_explicit_null"
+    )]
+    pub ttl_secs: Option<Option<i64>>,
+}
+
+impl UpdateArgs {
+    /// Split into the target id and the core patch, field-for-field.
+    fn into_patch(self) -> (i64, MemoryPatch) {
+        (
+            self.id,
+            MemoryPatch {
+                content: self.content,
+                tags: self.tags,
+                scope: self.scope,
+                ttl_secs: self.ttl_secs,
+            },
+        )
+    }
 }
 
 /// The MCP server. Holds shared state and the generated tool router.
@@ -256,6 +316,32 @@ impl MemoryMcp {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Update a memory in place by id (JSON merge-patch): omit a field to keep it, send null to clear it (tags -> [], scope -> global, ttl_secs -> no expiry), send a value to set it. content can be replaced but never cleared; a new content is re-indexed and re-embedded. Returns the full updated memory including embedding_status (0 = re-embed pending), or a clean not-found result for an unknown id."
+    )]
+    async fn memory_update(
+        &self,
+        Parameters(args): Parameters<UpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let (id, patch) = args.into_patch();
+        let updated = self
+            .state
+            .service
+            .update(id, patch)
+            .await
+            .map_err(map_mcp_error)?;
+
+        // Ok(None) is a clean not-found, NOT an error — the memory_forget shape.
+        let json = match updated {
+            Some(updated) => serde_json::to_string(&updated),
+            None => serde_json::to_string(
+                &serde_json::json!({ "id": id, "updated": false, "reason": "not_found" }),
+            ),
+        }
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -267,7 +353,7 @@ impl ServerHandler for MemoryMcp {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
-            "Persistent typed agent memory: store, list, search, and forget typed memories."
+            "Persistent typed agent memory: store, list, search, update, and forget typed memories."
                 .to_string(),
         );
         info
@@ -277,6 +363,142 @@ impl ServerHandler for MemoryMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use agent_memory_core::clock::SystemClock;
+    use agent_memory_core::decay::DecayConfig;
+    use agent_memory_core::embed::ollama::OllamaClient;
+    use agent_memory_core::store::sqlite::SqliteStore;
+
+    /// A loopback port nothing listens on: stores land pending (status 0) and
+    /// no test depends on a local Ollama.
+    const DEAD_OLLAMA: &str = "http://127.0.0.1:9";
+
+    fn test_server(dir: &tempfile::TempDir) -> MemoryMcp {
+        let store = SqliteStore::open(&dir.path().join("mem.db")).expect("store opens");
+        let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(DEAD_OLLAMA));
+        let service = MemoryService::new(
+            Arc::new(store),
+            Arc::new(SystemClock),
+            embedder.clone(),
+            DecayConfig::default(),
+        );
+        MemoryMcp::new(Arc::new(AppState { service, embedder }))
+    }
+
+    /// The JSON text payload of a successful tool result.
+    fn result_json(result: &CallToolResult) -> serde_json::Value {
+        let value = serde_json::to_value(result).expect("tool result serializes");
+        let text = value
+            .pointer("/content/0/text")
+            .and_then(|t| t.as_str())
+            .unwrap_or_else(|| panic!("no text content in tool result: {value}"));
+        serde_json::from_str(text).expect("tool text is JSON")
+    }
+
+    async fn store_one(server: &MemoryMcp, content: &str) -> i64 {
+        let args: StoreArgs = serde_json::from_value(serde_json::json!({
+            "content": content,
+            "type": "PATTERN",
+            "tags": ["before"],
+            "scope": "project-a",
+            "ttl_secs": 3600
+        }))
+        .expect("store args deserialize");
+        let result = server
+            .memory_store(Parameters(args))
+            .await
+            .expect("store succeeds");
+        result_json(&result).as_i64().expect("store returns an id")
+    }
+
+    fn update_args(json: serde_json::Value) -> UpdateArgs {
+        serde_json::from_value(json).expect("update args deserialize")
+    }
+
+    #[tokio::test]
+    async fn memory_update_returns_the_full_updated_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let id = store_one(&server, "old wording").await;
+
+        let result = server
+            .memory_update(Parameters(update_args(serde_json::json!({
+                "id": id,
+                "content": "new wording",
+                "tags": ["after"]
+            }))))
+            .await
+            .expect("update succeeds");
+
+        let body = result_json(&result);
+        assert_eq!(body["id"], id);
+        assert_eq!(body["content"], "new wording");
+        assert_eq!(body["type"], "PATTERN");
+        assert_eq!(body["tags"], serde_json::json!(["after"]));
+        assert_eq!(body["scope"], "project-a", "omitted scope is unchanged");
+        // Dead embedder: the re-embed is pending, and the caller can see it.
+        assert_eq!(body["embedding_status"], 0);
+    }
+
+    #[tokio::test]
+    async fn memory_update_of_an_unknown_id_is_a_clean_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+
+        let result = server
+            .memory_update(Parameters(update_args(serde_json::json!({
+                "id": 999_999,
+                "content": "nobody home"
+            }))))
+            .await
+            .expect("an unknown id is a successful tool call, not an error");
+
+        assert_eq!(
+            result_json(&result),
+            serde_json::json!({ "id": 999_999, "updated": false, "reason": "not_found" })
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_update_with_empty_content_is_invalid_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        let id = store_one(&server, "keep me").await;
+
+        let err = server
+            .memory_update(Parameters(update_args(serde_json::json!({
+                "id": id,
+                "content": ""
+            }))))
+            .await
+            .expect_err("empty content is rejected");
+        assert_eq!(err.code, McpError::invalid_params("x", None).code);
+        assert!(err.message.contains("content must be a non-empty string"));
+    }
+
+    #[test]
+    fn update_args_schema_makes_only_id_required() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(UpdateArgs)).expect("schema serializes");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["id"]),
+            "patch fields are optional in the tool schema: {schema}"
+        );
+        for field in ["content", "tags", "scope", "ttl_secs"] {
+            let property = &schema["properties"][field];
+            assert!(
+                property.is_object(),
+                "{field} is described in the tool schema: {schema}"
+            );
+            // null means "clear" in a merge-patch: advertising it as the
+            // default would invite clients to wipe fields they never touched.
+            assert!(
+                property.get("default").is_none(),
+                "{field} must not advertise a default: {property}"
+            );
+        }
+    }
 
     #[test]
     fn map_mcp_error_splits_client_and_internal_tiers() {
