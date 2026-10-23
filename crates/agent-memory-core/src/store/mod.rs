@@ -72,6 +72,14 @@ pub trait Store: Send + Sync {
     /// row's `last_accessed` at `now` (D-04, recompute-on-read — Open Question 3).
     /// A query that matches nothing returns an empty vec, never an error (MCP-02).
     /// `weights` tunes the relevance/decay blend; `cfg` supplies the half-life.
+    ///
+    /// A natural-language query never fails this method (user decision
+    /// option-a, T-04-15 revised): the raw MATCH string runs first, so valid
+    /// FTS5 syntax keeps its meaning; input FTS5 cannot parse (punctuation, a
+    /// hyphen or colon read as a column filter, an unbalanced quote, …) gets
+    /// ONE retry as its word tokens quoted and OR-joined; a query with no word
+    /// tokens is an empty vec. This method never returns
+    /// [`MemoryError::InvalidQuery`] — only server faults are errors.
     fn search(
         &self,
         args: SearchArgs,
@@ -88,9 +96,12 @@ pub trait Store: Send + Sync {
     /// Oversampled exactly like [`Store::knn_search`]: `limit * 4` rows (the
     /// limit defaults to 50), capped at the same KNN cap, so a hit ranked just
     /// past the limit still reaches fusion. Same type/scope/tag filters as
-    /// [`Store::search`] (`None` disables). A malformed MATCH string is
-    /// [`MemoryError::InvalidQuery`], exactly as on [`Store::search`]. A valid
-    /// query that matches nothing is an empty vec.
+    /// [`Store::search`] (`None` disables). The query is handled exactly as on
+    /// [`Store::search`], through the same helper, so classification does not
+    /// depend on the mode: raw MATCH first, one sanitized retry (word tokens
+    /// quoted and OR-joined) for input FTS5 cannot parse, and an empty vec for
+    /// a tokenless query. Never [`MemoryError::InvalidQuery`]; only server
+    /// faults are errors. A valid query that matches nothing is an empty vec.
     ///
     /// [`Store::search`] itself is unchanged: it is the keyword-only degrade
     /// path used when the embedder is down.

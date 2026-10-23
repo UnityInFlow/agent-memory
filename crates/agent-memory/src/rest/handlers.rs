@@ -616,9 +616,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_with_malformed_query_returns_400_never_500() {
-        // Gap 2 / WR-05: a lone double-quote is not a valid FTS5 match
-        // expression — CLIENT input must map to 400, never a 500 (API-01).
+    async fn search_with_a_lone_quote_returns_200_with_an_empty_keyword_answer() {
+        // User decision option-a reverses the Gap 2 / WR-05 400: a lone
+        // double-quote has no word tokens, so the keyword path has nothing to
+        // match and answers 200 with an empty result set — never a 400 or 500.
         let dir = tempfile::tempdir().expect("tempdir");
         let state = test_state(&dir);
 
@@ -629,7 +630,7 @@ mod tests {
         .await
         .expect("store succeeds");
 
-        let err = search_handler(
+        let resp = search_handler(
             State(state),
             Json(SearchRequest {
                 query: "\"".to_string(),
@@ -641,21 +642,16 @@ mod tests {
             }),
         )
         .await
-        .expect_err("malformed FTS5 query is rejected as client input");
+        .expect("a lone quote is answered, never rejected")
+        .into_response();
 
-        let resp = err.into_response();
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "malformed FTS5 query must map to 400, never 500"
-        );
+        assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        assert!(
-            !body["error"]
-                .as_str()
-                .expect("400 body carries a string error field")
-                .is_empty(),
-            "the error message must be non-empty, got: {body}"
+        assert_eq!(body["search_mode"], "keyword", "{body}");
+        assert_eq!(
+            body["results"].as_array().map(Vec::len),
+            Some(0),
+            "a tokenless query has no keyword matches: {body}"
         );
     }
 
@@ -711,9 +707,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_malformed_query_is_400_in_hybrid_mode_too_never_a_semantic_200() {
-        // T-04-15: with the embedder UP the KNN leg could answer, but the
-        // keyword leg's InvalidQuery must still surface as a 400.
+    async fn queries_fts5_cannot_parse_are_200_in_hybrid_mode_too() {
+        // T-04-15 revised (option-a): with the embedder UP, a query FTS5
+        // cannot parse is answered exactly as in keyword mode — 200 with the
+        // hybrid envelope, never a 400, a 500, or SQLite text in the body.
         let dir = tempfile::tempdir().expect("tempdir");
         let state = live_state(&dir);
         store_handler(
@@ -723,14 +720,17 @@ mod tests {
         .await
         .expect("store succeeds");
 
-        for malformed in ["\"", "what is the plan?"] {
-            let err = search_handler(State(state.clone()), Json(search_request(malformed)))
+        for input in ["\"", "what is the plan?", "sqlite-vec"] {
+            let resp = search_handler(State(state.clone()), Json(search_request(input)))
                 .await
-                .expect_err("a malformed MATCH is client input in hybrid mode");
-            assert_eq!(
-                err.into_response().status(),
-                StatusCode::BAD_REQUEST,
-                "{malformed:?} must be a 400 in hybrid mode, as in keyword mode"
+                .unwrap_or_else(|_| panic!("{input:?} must be answered in hybrid mode"))
+                .into_response();
+            assert_eq!(resp.status(), StatusCode::OK, "{input:?}");
+            let body = body_json(resp).await;
+            assert_eq!(body["search_mode"], "hybrid", "{input:?}: {body}");
+            assert!(
+                !body.to_string().contains("sqlite error"),
+                "{input:?}: {body}"
             );
         }
     }
