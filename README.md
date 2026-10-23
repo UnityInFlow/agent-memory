@@ -6,8 +6,8 @@ Tool 10 in the [UnityInFlow](https://github.com/UnityInFlow) ecosystem.
 
 AI agents forget everything between sessions. `agent-memory` is a small
 [MCP](https://modelcontextprotocol.io) stdio server backed by an embedded SQLite
-database: any MCP-speaking runtime can store, search, list, and forget structured
-memories, and **every runtime pointed at the same database file shares the same
+database: any MCP-speaking runtime can store, search, list, update, and forget
+structured memories, and **every runtime pointed at the same database file shares the same
 memory** — so a decision recorded by one agent is recalled by the next, across
 sessions and across tools.
 
@@ -101,13 +101,14 @@ Drop the same block into each agent runtime's MCP config; because they open the
 same `AGENT_MEMORY_DB` file (WAL-mode SQLite with a serialized writer), a memory
 stored in one is immediately retrievable in another.
 
-## The four tools
+## The five tools
 
 | Tool | Purpose | Validated parameters |
 |------|---------|----------------------|
 | `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
 | `memory_search` | Semantic (embedding) search when Ollama is reachable, FTS5 keyword otherwise — ranked by relevance × decay, recency-bumped on retrieval. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive) |
 | `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive) |
+| `memory_update` | Patch a memory in place by id — content, tags, scope, TTL (clean not-found for unknown ids). | `content`: never null or empty. `ttl_secs`: 1–3155760000 when set; `null` = no expiry. At least one field besides `id` |
 | `memory_forget` | Delete a memory by id (clean not-found for unknown ids). | — |
 
 Out-of-bounds values are rejected as client errors (`invalid_params` over MCP)
@@ -169,6 +170,52 @@ A present `limit` must be between 1 and 200 (omitted returns everything); a
 
 Returns `{ "id": 42, "deleted": true }`, or `deleted: false` for an unknown id.
 
+### `memory_update`
+
+Patch an existing memory **in place** — its id never changes. The arguments
+are a JSON merge-patch: each field you send is applied, each field you omit is
+left alone, and an explicit `null` clears the field where clearing is legal.
+
+```json
+{ "id": 42, "content": "We chose io.github.unityinflow as the Maven group (Sonatype-verified).", "ttl_secs": null }
+```
+
+| Field | Omitted | `null` | A value |
+|-------|---------|--------|---------|
+| `content` | unchanged | **rejected** (`invalid_params`) | replaced, then re-indexed and re-embedded |
+| `tags` | unchanged | cleared to `[]` | replaced (the whole list) |
+| `scope` | unchanged | reset to global (`null`) | replaced |
+| `ttl_secs` | unchanged (the existing expiry stays) | expiry removed — the memory never expires | a new TTL counted from **now** (1–3155760000) |
+
+`type` and `source` cannot be changed; to retype a memory, store a new one and
+forget the old. A patch with no field besides `id`, empty or whitespace-only
+`content`, or an out-of-bounds `ttl_secs` is rejected as `invalid_params`
+before anything is written.
+
+On success the result is the full updated memory — the same fields `memory_list`
+returns — plus `embedding_status`:
+
+```json
+{ "id": 42, "content": "We chose io.github.unityinflow as the Maven group (Sonatype-verified).",
+  "type": "DECISION", "tags": ["maven", "release"], "scope": "kore-runtime",
+  "decay_score": 1.0, "created_at": 1767225600, "last_accessed": 1767312000,
+  "embedding_status": 1 }
+```
+
+- **New content changes the meaning, everywhere.** The keyword index and the
+  embedding are replaced in the same transaction, so a search for the old
+  meaning stops matching the memory and the new meaning finds it.
+- **`embedding_status`** is `1` when the stored vector matches the current
+  content and `0` when a re-embed is pending — the update succeeded while Ollama
+  was unreachable, and the background sweep re-embeds it once Ollama is back.
+  Until then semantic search cannot match it by meaning; keyword-fallback
+  search already sees the new content.
+- **An update counts as a use.** It refreshes `last_accessed` (and the access
+  count), so an edited memory ranks as current rather than decayed.
+
+For an unknown id the result is `{ "id": 42, "updated": false, "reason": "not_found" }`
+— a normal tool result, not an error.
+
 ## Semantic search (optional Ollama)
 
 Out of the box, search uses SQLite FTS5 keyword ranking — fully offline, no
@@ -211,6 +258,7 @@ agent-memory serve-rest --addr 127.0.0.1:8080 # custom loopback bind
 | `POST` | `/api/memories` | Store a memory (same fields as `memory_store`) | `ttl_secs`: 1–3155760000 when present; omitted = no expiry |
 | `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit` query params | `limit`: 1–200 when present; omitted = unlimited. `tag`: exact tag (case-sensitive) |
 | `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope | `limit`: 1–200 when present; omitted defaults to 50. `tag`: exact tag (case-sensitive) |
+| `PATCH` | `/api/memories/{id}` | Update in place — JSON merge-patch body with the same fields and semantics as `memory_update`; 200 returns the updated memory with `embedding_status` | as `memory_update`; 404 `{"id", "updated": false, "reason": "not_found"}` for unknown ids |
 | `DELETE` | `/api/memories/{id}` | Forget by id (404 with a structured body for unknown ids) | — |
 | `GET` | `/health` | Liveness + embedder reachability status | — |
 
@@ -218,7 +266,16 @@ Out-of-bounds `limit`/`ttl_secs` values return **HTTP 400** with a JSON body
 whose `error` field names the field, range, and offending value — shaped
 `invalid argument: limit must be between 1 and 200 (got 0)` — never a 500 and
 never a silent clamp. The MCP transport rejects the same inputs identically as
-`invalid_params`, because validation lives once at the shared service seam.
+`invalid_params`, because validation lives once at the shared service seam. A
+`PATCH` body that is not valid JSON, has a wrongly typed field, or is sent
+without `Content-Type: application/json` is also a 400 with the same
+`{"error": ...}` body.
+
+```bash
+curl -X PATCH localhost:7437/api/memories/42 \
+  -H 'content-type: application/json' \
+  -d '{"tags": ["maven"], "ttl_secs": null}'
+```
 
 The REST daemon and the MCP stdio server can run concurrently against the same
 database file (WAL-mode SQLite with a serialized writer).
@@ -279,6 +336,11 @@ A background task sweeps on an interval while the server runs:
 **Decay never deletes.** A memory with no TTL stays retrievable forever, however
 low its decay score falls — it simply ranks lower. Removal happens only via TTL or
 `memory_forget`.
+
+Reads and updates both count as use: a search result is recency-bumped when it
+is returned, and `memory_update` resets the memory's decay clock. A TTL can be
+added, replaced (counted from the time of the update) or removed with
+`memory_update`.
 
 ## Development
 
