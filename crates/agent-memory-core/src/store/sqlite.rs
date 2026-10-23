@@ -81,11 +81,16 @@ pub fn register_vec_extension() -> Result<(), rusqlite::Error> {
 
 /// Apply the per-connection PRAGMAs that every connection (writer + pool) needs.
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // busy_timeout FIRST (REVIEW WR-01): several agent-memory processes open
+    // one DB at once by design (an MCP server per editor plus the REST
+    // daemon), and `journal_mode` and every later pragma can contend for a
+    // lock. With the timeout already set they wait out a concurrent opener
+    // instead of failing startup with SQLITE_BUSY.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     // journal_mode returns a row; the others do not. Use pragma_update where we can.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
     Ok(())
 }
 
@@ -123,21 +128,115 @@ fn utc_yyyymmdd() -> String {
     format!("{:04}{:02}{:02}", today.year(), today.month(), today.day())
 }
 
-/// Write the pre-migration backup of `src` (the open DB at `db_path`) to the
-/// sibling file `{db}.backup-pre-{NNNN}-{YYYYMMDD}`, where `NNNN` is the
-/// zero-padded schema version about to be migrated to (D-11). Generic over the
-/// target version, so every future migration inherits it (D-12).
+/// Serializes [`pre_migration_backup`] within one process. The temp file is
+/// pid-qualified, which keeps separate processes apart; two openers in the
+/// SAME process (threads) would otherwise share one temp path.
+static BACKUP_LOCK: Mutex<()> = Mutex::new(());
+
+/// The in-flight temp file for this process's backup of `file_name`:
+/// `{db}.backup-tmp-{NNNN}-{pid}`. Deliberately OUTSIDE the
+/// `{db}.backup-pre-{NNNN}-` retention prefix, so no opener ever prunes
+/// another's in-flight copy.
+fn backup_temp_path(dir: &Path, file_name: &str) -> PathBuf {
+    dir.join(format!(
+        "{file_name}.backup-tmp-{LATEST_SCHEMA_VERSION:04}-{}",
+        std::process::id()
+    ))
+}
+
+/// Best-effort removal of a backup temp file and any SQLite sidecar it left.
+/// Never fails: a leftover temp is harmless (T-04-32) and must not mask the
+/// error that led here.
+fn discard_backup_temp(temp: &Path) {
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{suffix}", temp.display()));
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(temp = %path.display(), error = %e, "could not remove backup temp file");
+            }
+        }
+    }
+}
+
+/// Copy `src` into a NEW database at `temp` with the SQLite Online Backup API
+/// and return the copy's `user_version`. The destination connection is
+/// closed before returning, so the file can be renamed.
+fn copy_into_temp(src: &Connection, temp: &Path) -> Result<i64, String> {
+    let mut dst =
+        Connection::open(temp).map_err(|e| format!("cannot create {}: {e}", temp.display()))?;
+    Backup::new(src, &mut dst)
+        .and_then(|backup| backup.run_to_completion(64, Duration::from_millis(50), None))
+        .map_err(|e| format!("copy to {} failed: {e}", temp.display()))?;
+    let copied_version: i64 = dst
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("cannot read the schema version of {}: {e}", temp.display()))?;
+    dst.close()
+        .map_err(|(_, e)| format!("cannot close {}: {e}", temp.display()))?;
+    Ok(copied_version)
+}
+
+/// Remove every `{prefix}*` entry in `dir` except `keep`. An entry that is
+/// already gone (a concurrent opener pruned it first) is not an error.
+fn prune_other_backups(dir: &Path, prefix: &str, keep: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read directory entry: {e}"))?;
+        let matches = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix));
+        let stale = entry.path();
+        if !matches || stale == keep {
+            continue;
+        }
+        match std::fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot remove previous backup {}: {e}",
+                    stale.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write the pre-migration backup of `src` (the open DB at `db_path`, probed
+/// at schema `expected_version`) to the sibling file
+/// `{db}.backup-pre-{NNNN}-{YYYYMMDD}`, where `NNNN` is the zero-padded schema
+/// version about to be migrated to (D-11). Generic over the target version,
+/// so every future migration inherits it (D-12).
 ///
-/// Retention is one backup per target schema version: every existing
-/// `{db}.backup-pre-{NNNN}-*` entry is removed first; other versions' backups
-/// are never touched. The copy uses the SQLite Online Backup API, which is
-/// WAL-correct by construction (a raw file copy of a live WAL database is not).
+/// Race-safe and replace-then-prune (REVIEW WR-01, IN-03):
+///
+/// 1. The copy goes to a temp file outside the retention prefix
+///    ([`backup_temp_path`]), via the SQLite Online Backup API, which is
+///    WAL-correct by construction (a raw file copy of a live WAL database is
+///    not).
+/// 2. The copy's `user_version` must still equal `expected_version`. If it
+///    does not, another process migrated the DB between our probe and our
+///    copy: the copy is a POST-migration database, so it is discarded and
+///    `Ok(None)` is returned. Existing backups are never touched.
+/// 3. The temp file is renamed into place, an atomic replace of a same-day
+///    stale backup. Only THEN are the other `{db}.backup-pre-{NNNN}-*`
+///    entries pruned, so a failed write never costs the previous valid
+///    backup. Other versions' backups are never touched.
+///
 /// The backup sits beside the DB, in the same directory and trust domain —
 /// never a shared temp dir (T-04-03).
 ///
-/// Any failure is returned as an error and ABORTS the open: a machine that
-/// cannot write a backup must not run an unattended migration (T-04-02).
-fn pre_migration_backup(src: &Connection, db_path: &Path) -> Result<PathBuf, MemoryError> {
+/// Any failure to copy, rename or prune is returned as an error and ABORTS
+/// the open: a machine that cannot write a backup must not run an unattended
+/// migration (T-04-02). The temp file is removed (best-effort) on every
+/// failure path.
+fn pre_migration_backup(
+    src: &Connection,
+    db_path: &Path,
+    expected_version: i64,
+) -> Result<Option<PathBuf>, MemoryError> {
     let fail = |what: String| {
         MemoryError::Internal(format!(
             "pre-migration backup failed ({what}); refusing to migrate {}",
@@ -154,38 +253,84 @@ fn pre_migration_backup(src: &Connection, db_path: &Path) -> Result<PathBuf, Mem
         _ => PathBuf::from("."),
     };
     let prefix = format!("{file_name}.backup-pre-{LATEST_SCHEMA_VERSION:04}-");
+    let temp_path = backup_temp_path(&dir, file_name);
+    let final_path = dir.join(format!("{prefix}{}", utc_yyyymmdd()));
 
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| fail(format!("cannot read directory {}: {e}", dir.display())))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| fail(format!("cannot read directory entry: {e}")))?;
-        let matches = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(&prefix));
-        if matches {
-            let stale = entry.path();
-            std::fs::remove_file(&stale).map_err(|e| {
-                fail(format!(
-                    "cannot remove previous backup {}: {e}",
-                    stale.display()
-                ))
-            })?;
+    // A poisoned lock only means another thread panicked mid-backup; the
+    // guard protects no data, so carry on.
+    let _serialized = BACKUP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let copied_version = match copy_into_temp(src, &temp_path) {
+        Ok(version) => version,
+        Err(what) => {
+            discard_backup_temp(&temp_path);
+            return Err(fail(what));
         }
+    };
+
+    if copied_version != expected_version {
+        discard_backup_temp(&temp_path);
+        tracing::info!(
+            db = %db_path.display(),
+            expected_version,
+            copied_version,
+            "another process migrated the database first; discarding the post-migration copy"
+        );
+        return Ok(None);
     }
 
-    let backup_path = dir.join(format!("{prefix}{}", utc_yyyymmdd()));
-    let mut dst = Connection::open(&backup_path)
-        .map_err(|e| fail(format!("cannot create {}: {e}", backup_path.display())))?;
-    Backup::new(src, &mut dst)
-        .and_then(|backup| backup.run_to_completion(64, Duration::from_millis(50), None))
-        .map_err(|e| fail(format!("copy to {} failed: {e}", backup_path.display())))?;
+    if let Err(e) = std::fs::rename(&temp_path, &final_path) {
+        discard_backup_temp(&temp_path);
+        return Err(fail(format!(
+            "cannot move {} into place as {}: {e}",
+            temp_path.display(),
+            final_path.display()
+        )));
+    }
+
+    prune_other_backups(&dir, &prefix, &final_path).map_err(fail)?;
+
     tracing::info!(
-        backup = %backup_path.display(),
+        backup = %final_path.display(),
         target_schema_version = LATEST_SCHEMA_VERSION,
         "pre-migration backup written"
     );
-    Ok(backup_path)
+    Ok(Some(final_path))
+}
+
+/// Run `migrate` and absorb exactly one failure: another process completing
+/// the same upgrade first (REVIEW WR-01).
+///
+/// rusqlite_migration reads `user_version` OUTSIDE its own deferred
+/// transaction, so a second opener that probed the old version can attempt
+/// 0003's `CREATE TABLE` after the first one committed it, and fail with
+/// `table memory_links already exists` or `SQLITE_BUSY_SNAPSHOT`. Its
+/// transaction rolls back. On any failure the version is re-read on the same
+/// connection: if it is now [`LATEST_SCHEMA_VERSION`], the schema this binary
+/// needs is in place, so the open proceeds. Anything else returns the
+/// original error. The FTS5 and vec0 smoke checks in [`SqliteStore::open`]
+/// still run afterwards, so a half-built schema cannot slip through.
+fn migrate_tolerating_concurrent_upgrade(
+    conn: &mut Connection,
+    migrate: impl FnOnce(&mut Connection) -> Result<(), MemoryError>,
+) -> Result<(), MemoryError> {
+    let err = match migrate(conn) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+    match conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)) {
+        Ok(version) if version == LATEST_SCHEMA_VERSION => {
+            tracing::info!(
+                schema_version = version,
+                error = %err,
+                "another process completed the schema upgrade first"
+            );
+            Ok(())
+        }
+        Ok(_) | Err(_) => Err(err),
+    }
 }
 
 /// A pool customizer that runs [`apply_pragmas`] on each pooled read connection.
@@ -211,16 +356,24 @@ impl SqliteStore {
     /// Migration hygiene (STORE-05), in this order — the probe and the backup
     /// MUST precede `to_latest` (RESEARCH Pitfall 8):
     ///
-    /// 1. Probe `PRAGMA user_version`. A DB AHEAD of [`LATEST_SCHEMA_VERSION`]
+    /// 1. Register vec0, open the writer, and set its `busy_timeout`, so every
+    ///    later step waits out a concurrent opener (REVIEW WR-01). The timeout
+    ///    is connection-level state; it writes nothing to the file.
+    /// 2. Probe `PRAGMA user_version`. A DB AHEAD of [`LATEST_SCHEMA_VERSION`]
     ///    is refused with [`MemoryError::SchemaTooNew`] (D-13). The probe runs
-    ///    before even the per-connection PRAGMAs, because switching a non-WAL
+    ///    before the other per-connection PRAGMAs, because switching a non-WAL
     ///    file to WAL rewrites its header — a refused DB stays byte-for-byte
     ///    untouched.
-    /// 2. If migrations are pending on a non-empty DB (`0 < user_version <
-    ///    LATEST`, D-12), write a sibling online backup first (D-11). A backup
-    ///    failure aborts the open; no migration runs. A brand-new file
+    /// 3. Apply the per-connection PRAGMAs and functions.
+    /// 4. If migrations are pending on a non-empty DB (`0 < user_version <
+    ///    LATEST`, D-12), write a sibling online backup first (D-11), checked
+    ///    against the probed version so a copy taken after a concurrent
+    ///    migration is discarded, never kept under the pre-migration name. A
+    ///    backup failure aborts the open; no migration runs. A brand-new file
     ///    (`user_version == 0`) has nothing to back up.
-    /// 3. Migrate to latest.
+    /// 5. Migrate to latest, tolerating a concurrent process that completed
+    ///    the same upgrade first ([`migrate_tolerating_concurrent_upgrade`]).
+    /// 6. Smoke-check FTS5 and vec0, then build the read pool.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
         // vec0 registration MUST precede Connection::open: auto-extensions only
         // apply to connections opened after registration (this also covers every
@@ -228,8 +381,12 @@ impl SqliteStore {
         register_vec_extension()?;
 
         let mut writer = Connection::open(path)?;
+        // Connection-level state, set before anything that can contend for the
+        // DB (WR-01). It touches nothing on disk, so the D-13 probe below still
+        // leaves a refused file byte-for-byte untouched.
+        writer.busy_timeout(Duration::from_millis(5000))?;
 
-        // (1) D-13 newer-schema refusal — read-only, before any write.
+        // (2) D-13 newer-schema refusal — read-only, before any write.
         let db_version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if db_version > LATEST_SCHEMA_VERSION {
             return Err(MemoryError::SchemaTooNew {
@@ -238,18 +395,26 @@ impl SqliteStore {
             });
         }
 
+        // (3) Per-connection PRAGMAs (busy_timeout first) and functions.
         prepare_connection(&writer)?;
 
-        // (2) D-11/D-12 pre-migration backup. open() runs before serving, so
-        // the writer is the only connection and can be the backup source.
+        // (4) D-11/D-12 pre-migration backup. open() runs before serving, so
+        // within this process the writer is the only connection and can be
+        // the backup source; another process may still be opening the same
+        // file, which the version check inside pre_migration_backup handles.
         if db_version > 0 && db_version < LATEST_SCHEMA_VERSION {
-            pre_migration_backup(&writer, path)?;
+            // Ok(None) = another process migrated in between, so our copy was
+            // post-migration and was discarded (logged inside); the genuine
+            // backup is the one that process wrote. Either way, migrate on.
+            pre_migration_backup(&writer, path, db_version)?;
         }
 
-        // (3) Migrate. rusqlite_migration's own DatabaseTooFarAhead check stays
+        // (5) Migrate. rusqlite_migration's own DatabaseTooFarAhead check stays
         // as a backstop should the probe above ever be bypassed.
         let migrations: Migrations<'static> = migrations();
-        migrations.to_latest(&mut writer)?;
+        migrate_tolerating_concurrent_upgrade(&mut writer, |conn| {
+            migrations.to_latest(conn).map_err(MemoryError::from)
+        })?;
 
         // Smoke-check that FTS5 is available (bundled SQLite compiles it in).
         writer.query_row("SELECT count(*) FROM memories_fts", [], |row| {
@@ -1099,6 +1264,246 @@ impl Store for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // STORE-05 backup race and failure seams (REVIEW WR-01, IN-03). Real temp
+    // files; vec0 registered first because SqliteStore::open runs 0002.
+    // -----------------------------------------------------------------------
+
+    /// A raw database at schema version 2 with one table, standing in for a
+    /// v0.0.1 store whose upgrade is pending.
+    fn raw_v2_db(path: &Path) -> Connection {
+        register_vec_extension().expect("sqlite-vec registers");
+        let conn = Connection::open(path).expect("create raw db");
+        conn.execute_batch("CREATE TABLE pre_upgrade (x INTEGER); PRAGMA user_version = 2;")
+            .expect("build v2 db");
+        conn
+    }
+
+    fn backup_prefix(db: &Path) -> String {
+        let name = db.file_name().and_then(|n| n.to_str()).expect("db name");
+        format!("{name}.backup-pre-{LATEST_SCHEMA_VERSION:04}-")
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    fn assert_no_backup_temp(dir: &Path) {
+        let names = dir_names(dir);
+        assert!(
+            !names.iter().any(|n| n.contains(".backup-tmp-")),
+            "no backup temp file may remain: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_backup_of_an_already_migrated_database_is_discarded_and_keeps_the_valid_one() {
+        register_vec_extension().expect("sqlite-vec registers");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        // Another process already migrated: the DB is at LATEST.
+        drop(SqliteStore::open(&db).expect("create a latest-schema db"));
+        let valid = dir.path().join(format!("{}20000101", backup_prefix(&db)));
+        std::fs::write(&valid, b"valid").expect("plant the genuine backup");
+        let conn = Connection::open(&db).expect("open raw");
+
+        // We probed 2 before the other process migrated.
+        let outcome = pre_migration_backup(&conn, &db, 2).expect("not an error");
+
+        assert!(
+            outcome.is_none(),
+            "a post-migration copy is never kept: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&valid).expect("the genuine backup survives"),
+            b"valid",
+            "an existing backup is never touched by a discarded copy"
+        );
+        assert_no_backup_temp(dir.path());
+    }
+
+    #[test]
+    fn a_valid_backup_replaces_then_prunes_the_stale_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        let conn = raw_v2_db(&db);
+        let stale = dir.path().join(format!("{}20000101", backup_prefix(&db)));
+        std::fs::write(&stale, b"stale").expect("plant stale backup");
+
+        let backup = pre_migration_backup(&conn, &db, 2)
+            .expect("backup succeeds")
+            .expect("a genuine pre-migration copy is kept");
+
+        let name = backup.file_name().and_then(|n| n.to_str()).expect("name");
+        assert_eq!(name, format!("{}{}", backup_prefix(&db), utc_yyyymmdd()));
+        let copy = Connection::open(&backup).expect("backup opens");
+        let version: i64 = copy
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read copy version");
+        assert_eq!(version, 2, "the backup carries the pre-migration schema");
+        assert!(!stale.exists(), "the stale same-version backup is pruned");
+        assert_no_backup_temp(dir.path());
+    }
+
+    #[test]
+    fn a_failed_backup_write_never_removes_the_previous_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        let conn = raw_v2_db(&db);
+        let stale = dir.path().join(format!("{}20000101", backup_prefix(&db)));
+        std::fs::write(&stale, b"previous").expect("plant previous backup");
+        // A non-empty directory occupying this process's temp path: the copy
+        // cannot even be created.
+        let blocker = backup_temp_path(dir.path(), "memory.db");
+        std::fs::create_dir(&blocker).expect("create blocker dir");
+        std::fs::write(blocker.join("keep"), b"x").expect("populate blocker dir");
+
+        let message = match pre_migration_backup(&conn, &db, 2) {
+            Ok(outcome) => panic!("the backup must fail, got {outcome:?}"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(message.contains("backup"), "names the backup: {message}");
+        assert_eq!(
+            std::fs::read(&stale).expect("the previous backup survives"),
+            b"previous",
+            "IN-03: nothing is deleted before a valid replacement exists"
+        );
+    }
+
+    #[test]
+    fn a_backup_that_cannot_be_moved_into_place_keeps_the_previous_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        let conn = raw_v2_db(&db);
+        let stale = dir.path().join(format!("{}20000101", backup_prefix(&db)));
+        std::fs::write(&stale, b"previous").expect("plant previous backup");
+        // A non-empty directory at today's final name: the copy is written,
+        // but the rename into place fails.
+        let target = dir
+            .path()
+            .join(format!("{}{}", backup_prefix(&db), utc_yyyymmdd()));
+        std::fs::create_dir(&target).expect("create blocker dir");
+        std::fs::write(target.join("keep"), b"x").expect("populate blocker dir");
+
+        let message = match pre_migration_backup(&conn, &db, 2) {
+            Ok(outcome) => panic!("the backup must fail, got {outcome:?}"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(message.contains("backup"), "names the backup: {message}");
+        assert_eq!(
+            std::fs::read(&stale).expect("the previous backup survives"),
+            b"previous",
+            "IN-03: nothing is pruned before the new backup is in place"
+        );
+        assert_no_backup_temp(dir.path());
+    }
+
+    fn set_user_version(conn: &Connection, version: i64) {
+        conn.pragma_update(None, "user_version", version)
+            .expect("set user_version");
+    }
+
+    #[test]
+    fn a_migration_failure_is_absorbed_only_when_another_process_reached_latest() {
+        let simulated = || {
+            Err::<(), _>(MemoryError::Internal(
+                "simulated: table memory_links already exists".to_string(),
+            ))
+        };
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+
+        set_user_version(&conn, LATEST_SCHEMA_VERSION);
+        migrate_tolerating_concurrent_upgrade(&mut conn, |_| simulated())
+            .expect("a concurrent completed upgrade is success");
+
+        set_user_version(&conn, 2);
+        let err = migrate_tolerating_concurrent_upgrade(&mut conn, |_| simulated())
+            .expect_err("a migration that left the DB behind still fails");
+        assert!(
+            err.to_string().contains("memory_links already exists"),
+            "the original error is returned: {err}"
+        );
+
+        migrate_tolerating_concurrent_upgrade(&mut conn, |_| Ok(())).expect("Ok stays Ok");
+    }
+
+    /// The two REAL ways a second opener loses the 0003 race, reproduced
+    /// deterministically with two connections on one WAL database: the loser
+    /// probed version 2, then the winner committed the whole upgrade before
+    /// the loser's 0003 statement ran (rusqlite_migration reads user_version
+    /// outside its transaction). Both are real SQLite errors, and both must be
+    /// absorbed because the re-probe sees the latest schema.
+    #[test]
+    fn a_real_lost_migration_race_is_absorbed() {
+        register_vec_extension().expect("sqlite-vec registers");
+        let relations_sql = include_str!("../../sql/0003_relations.sql");
+
+        for stale_snapshot in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = dir.path().join("memory.db");
+            {
+                let mut setup = Connection::open(&db).expect("create db");
+                setup
+                    .pragma_update(None, "journal_mode", "WAL")
+                    .expect("WAL");
+                migrations()
+                    .to_version(&mut setup, 2)
+                    .expect("schema 2 (v0.0.1)");
+            }
+            let mut winner = Connection::open(&db).expect("winner");
+            winner
+                .busy_timeout(Duration::from_millis(5000))
+                .expect("winner busy_timeout");
+            let mut loser = Connection::open(&db).expect("loser");
+            loser
+                .busy_timeout(Duration::from_millis(5000))
+                .expect("loser busy_timeout");
+
+            let mut observed = String::new();
+            migrate_tolerating_concurrent_upgrade(&mut loser, |conn| {
+                let attempt = (|| -> Result<(), rusqlite::Error> {
+                    let tx = conn.transaction()?;
+                    if stale_snapshot {
+                        // Read first: the loser's snapshot predates the winner's commit.
+                        tx.query_row("SELECT count(*) FROM memories", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?;
+                    }
+                    migrations()
+                        .to_latest(&mut winner)
+                        .expect("the other process wins the upgrade");
+                    tx.execute_batch(relations_sql)?;
+                    tx.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
+                    tx.commit()
+                })();
+                attempt.map_err(|e| {
+                    observed = e.to_string();
+                    MemoryError::from(e)
+                })
+            })
+            .expect("a lost race against a completed upgrade is not a startup failure");
+
+            assert!(
+                !observed.is_empty(),
+                "stale_snapshot={stale_snapshot}: the loser really failed"
+            );
+            let version: i64 = loser
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .expect("re-read version");
+            assert_eq!(version, LATEST_SCHEMA_VERSION);
+        }
+    }
 
     #[test]
     fn max_knn_k_keeps_four_x_oversample_at_max_limit() {

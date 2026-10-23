@@ -98,6 +98,25 @@ fn backups_for_latest(db: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// No in-flight backup temp file (`{db}.backup-tmp-*`) may be left beside the
+/// DB after an open, successful or not (REVIEW WR-01 / IN-03).
+fn assert_no_backup_temp(dir: &Path) {
+    let leftovers: Vec<String> = fs::read_dir(dir)
+        .expect("read db dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|n| n.contains(".backup-tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no backup temp file may remain: {leftovers:?}"
+    );
+}
+
 /// One-shot generator for the committed fixture. It applies ONLY migrations
 /// 0001+0002 (the schema v0.0.1 shipped — verified byte-identical to the
 /// `v0.0.1` tag before generation) and plants two rows. It is a no-op when the
@@ -222,6 +241,7 @@ fn upgrading_writes_one_pre_migration_backup_with_the_old_schema() {
 
     // The live DB itself was migrated.
     assert_eq!(user_version(&db), LATEST_SCHEMA_VERSION);
+    assert_no_backup_temp(dir.path());
 }
 
 #[test]
@@ -266,6 +286,7 @@ fn re_running_the_upgrade_keeps_one_backup_per_schema_version() {
         b"other",
         "another schema version's backup is never touched"
     );
+    assert_no_backup_temp(dir.path());
 }
 
 #[test]
@@ -354,4 +375,65 @@ fn a_failed_backup_aborts_the_open_before_migrating() {
         V0_0_1_SCHEMA_VERSION as i64,
         "no migration may run without a backup"
     );
+}
+
+/// REVIEW WR-01 smoke test: an MCP server and the REST daemon starting at the
+/// same moment after `brew upgrade`. Two openers race on a fresh copy of the
+/// v0.0.1 fixture; both must start, the DB ends at the latest schema, and the
+/// ONE surviving backup is a genuine pre-migration copy. The deterministic
+/// proof lives in the seam tests in `store/sqlite.rs`; this exercises the real
+/// race window, repeated so a real interleaving is likely to be hit.
+#[test]
+fn two_concurrent_first_opens_of_a_v0_0_1_database_both_succeed_with_one_genuine_backup() {
+    for round in 0..10 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        copy_fixture(&db);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let db = db.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SqliteStore::open(&db).map(drop).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for (n, opener) in openers.into_iter().enumerate() {
+            let outcome = match opener.join() {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                        .unwrap_or_else(|| "non-string panic payload".to_string());
+                    panic!("round {round}: opener {n} panicked: {message}");
+                }
+            };
+            if let Err(message) = outcome {
+                panic!("round {round}: opener {n} failed to open: {message}");
+            }
+        }
+
+        assert_eq!(
+            user_version(&db),
+            LATEST_SCHEMA_VERSION,
+            "round {round}: the DB was migrated"
+        );
+        let backups = backups_for_latest(&db);
+        assert_eq!(
+            backups.len(),
+            1,
+            "round {round}: exactly one backup, got {backups:?}"
+        );
+        assert_eq!(
+            user_version(&backups[0]),
+            V0_0_1_SCHEMA_VERSION as i64,
+            "round {round}: the surviving backup is a genuine pre-migration copy"
+        );
+        assert_no_backup_temp(dir.path());
+    }
 }
