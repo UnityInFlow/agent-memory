@@ -309,6 +309,97 @@ async fn rest_end_to_end_store_list_search_forget_health() {
     );
 }
 
+/// REVIEW WR-04, user decision option-a (reject): `GET /api/memories?expand_links=true`
+/// without a `limit` is a 400 over real HTTP; with a limit, and without
+/// `expand_links`, the route behaves exactly as before.
+#[tokio::test]
+async fn rest_list_with_expand_links_requires_a_limit() {
+    let server = RestServer::spawn();
+    let base = server.base_url();
+    let client = reqwest::Client::new();
+
+    let mut ids = Vec::new();
+    for content in ["first linked decision", "second linked decision"] {
+        let resp = client
+            .post(format!("{base}/api/memories"))
+            .json(&serde_json::json!({ "content": content, "type": "DECISION" }))
+            .send()
+            .await
+            .expect("store request");
+        assert_eq!(resp.status(), 201, "store must return 201 Created");
+        let body: serde_json::Value = resp.json().await.expect("store body is JSON");
+        let id = body
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| panic!("store body must carry a numeric id, got: {body}"));
+        ids.push(id);
+    }
+    let (a, b) = (ids[0], ids[1]);
+
+    let resp = client
+        .post(format!("{base}/api/links"))
+        .json(&serde_json::json!({ "from_id": a, "to_id": b, "kind": "relates_to" }))
+        .send()
+        .await
+        .expect("link request");
+    assert_eq!(resp.status(), 200, "link must return 200");
+
+    // expand_links without a limit → 400 naming the rule.
+    let resp = client
+        .get(format!("{base}/api/memories?expand_links=true"))
+        .send()
+        .await
+        .expect("expanded list without a limit");
+    assert_eq!(
+        resp.status(),
+        400,
+        "expand_links without a limit must be a 400"
+    );
+    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
+    assert!(
+        body.get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("limit is required when expand_links is true")),
+        "400 body must tell the caller to pass a limit, got: {body}"
+    );
+
+    // expand_links with a limit → 200, the neighbour is attached.
+    let resp = client
+        .get(format!("{base}/api/memories?expand_links=true&limit=10"))
+        .send()
+        .await
+        .expect("expanded list with a limit");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("list body is JSON");
+    let arr = body.as_array().expect("list body is a JSON array");
+    let row_a = arr
+        .iter()
+        .find(|v| v.get("id").and_then(|i| i.as_i64()) == Some(a))
+        .unwrap_or_else(|| panic!("row {a} is listed, got: {body}"));
+    assert_eq!(
+        row_a.pointer("/related/0/id").and_then(|i| i.as_i64()),
+        Some(b),
+        "row {a} carries its neighbour, got: {row_a}"
+    );
+
+    // No expand_links (absent or false) and no limit → every row, no related.
+    for query in ["", "?expand_links=false"] {
+        let resp = client
+            .get(format!("{base}/api/memories{query}"))
+            .send()
+            .await
+            .expect("plain list");
+        assert_eq!(resp.status(), 200, "plain list {query:?} must be 200");
+        let body: serde_json::Value = resp.json().await.expect("list body is JSON");
+        let arr = body.as_array().expect("list body is a JSON array");
+        assert_eq!(arr.len(), 2, "every row for {query:?}, got: {body}");
+        assert!(
+            arr.iter().all(|v| v.get("related").is_none()),
+            "no related member for {query:?}, got: {body}"
+        );
+    }
+}
+
 /// Bind guard: a non-loopback `--addr` without `--allow-remote` must be
 /// refused with an error that names the flag (T-02-10).
 #[test]

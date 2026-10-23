@@ -92,7 +92,8 @@ pub struct ListArgs {
     /// Filter by logical scope. Omit for all scopes.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Cap the number of returned rows.
+    /// Cap the number of returned rows (1-200). Omitted lists every row.
+    /// Required when `expand_links` is true.
     #[serde(default)]
     pub limit: Option<i64>,
     /// Attach up to 10 one-hop related memories to each result as
@@ -100,7 +101,9 @@ pub struct ListArgs {
     /// `out` (this memory -> neighbor) or `in` (neighbor -> this memory);
     /// `kind` reads naturally from this memory's side (an incoming supersedes
     /// is `superseded_by`, an incoming caused_by is `caused`). Most recent
-    /// links first. Defaults to false (no `related` member at all).
+    /// links first. Defaults to false (no `related` member at all). Requires
+    /// `limit`: `expand_links=true` without a limit is rejected as
+    /// invalid_params.
     #[serde(default)]
     pub expand_links: bool,
 }
@@ -294,7 +297,7 @@ impl MemoryMcp {
     }
 
     #[tool(
-        description = "List stored memories newest-first, with optional type/tag/scope/limit filters. Set expand_links=true to attach each memory's linked memories as trimmed related summaries."
+        description = "List stored memories newest-first, with optional type/tag/scope/limit filters. Set expand_links=true to attach each memory's linked memories as trimmed related summaries; expand_links requires a limit (1-200), and a call with expand_links=true and no limit is rejected as invalid_params. Without expand_links, an omitted limit lists every memory."
     )]
     async fn memory_list(
         &self,
@@ -1094,8 +1097,24 @@ mod tests {
             .to_string();
         assert!(!text.contains("related"), "{text}");
 
-        // memory_list, flag on and off.
+        // memory_list without a limit: expand_links is rejected (REVIEW WR-04
+        // option-a) as invalid_params, naming the fix.
         let args: ListArgs = serde_json::from_str(r#"{"expand_links": true}"#).expect("args");
+        let err = server
+            .memory_list(Parameters(args))
+            .await
+            .expect_err("expand_links without a limit must be rejected");
+        assert_eq!(err.code, McpError::invalid_params("x", None).code);
+        assert!(
+            err.message
+                .contains("limit is required when expand_links is true"),
+            "{}",
+            err.message
+        );
+
+        // memory_list, flag on (with a limit) and off.
+        let args: ListArgs =
+            serde_json::from_str(r#"{"expand_links": true, "limit": 10}"#).expect("args");
         let body = result_json(&server.memory_list(Parameters(args)).await.expect("list"));
         let rows = body.as_array().expect("array");
         let anchor_row = rows.iter().find(|r| r["id"] == anchor).expect("anchor");

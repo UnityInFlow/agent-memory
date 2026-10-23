@@ -149,7 +149,7 @@ stored in one is immediately retrievable in another.
 |------|---------|----------------------|
 | `memory_store` | Persist a typed memory; returns its id. | `ttl_secs`: optional integer, valid range 1–3155760000 (~100 years); omitted = no expiry |
 | `memory_search` | Hybrid (keyword + semantic, rank-fused) search when Ollama is reachable, FTS5 keyword otherwise — weighted by decay, and only the returned results are recency-bumped. Accepts plain natural-language queries (any punctuation) as well as FTS5 syntax. | `limit`: optional integer, valid range 1–200; omitted defaults to 50. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
-| `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
+| `memory_list` | List memories newest-first, with optional type/tag/scope filters. | `limit`: optional integer, valid range 1–200; omitted = unlimited, **required when `expand_links` is true**. `tag`: exact tag match (case-sensitive). `expand_links`: optional boolean, default `false` |
 | `memory_update` | Patch a memory in place by id — content, tags, scope, TTL (clean not-found for unknown ids). | `content`: never null or empty. `ttl_secs`: 1–3155760000 when set; `null` = no expiry. At least one field besides `id` |
 | `memory_link` | Link two memories with a typed, directed relation (idempotent; clean not-found for unknown ids). | `kind`: one of `relates_to`, `supersedes`, `caused_by`. `from_id` ≠ `to_id` |
 | `memory_unlink` | Remove a relation (clean not-found when no such edge exists). | `kind`: one of `relates_to`, `supersedes`, `caused_by` |
@@ -226,8 +226,9 @@ case-sensitively.
 { "type": "TODO", "scope": "kore-runtime", "limit": 20 }
 ```
 
-A present `limit` must be between 1 and 200 (omitted returns everything); a
-`tag` filter matches an exact tag (case-sensitive).
+A present `limit` must be between 1 and 200 (omitted returns everything,
+except that `expand_links: true` requires a `limit`); a `tag` filter matches
+an exact tag (case-sensitive).
 
 Both `memory_search` and `memory_list` accept `"expand_links": true` to attach
 each result's linked memories — see [Relations](#relations-memory_link--memory_unlink).
@@ -359,8 +360,12 @@ summaries, following relations in both directions:
   sequence.
 - At most `MAX_EXPANDED_LINKS = 10` neighbors per result; when a memory has
   more, the most recently created relations win.
-- `memory_list` with `expand_links` and no `limit` returns every memory, each
-  with up to 10 neighbors, so pass a `limit` on large stores.
+- `memory_list` with `expand_links` **requires a `limit`** (1–200). Without
+  one the call is rejected as a client error (HTTP 400 / MCP `invalid_params`)
+  whose message tells you to pass a `limit`, so an expanded response is always
+  bounded at 200 results × 10 neighbors. `memory_search` is bounded by its own
+  `limit` (default 50). Without `expand_links`, an omitted `limit` still lists
+  every memory.
 - Expansion is strictly one hop and a pure read: neighbors are **not**
   recency-bumped, so expanding never changes how anything decays.
 - A result with no relations gets `"related": []`. Without the flag there is no
@@ -370,7 +375,7 @@ summaries, following relations in both directions:
 
 | Bound | Value | Applies to |
 |-------|-------|------------|
-| `limit` | 1–200 (`MAX_LIMIT`) | `memory_search` (default 50), `memory_list` (default unlimited) |
+| `limit` | 1–200 (`MAX_LIMIT`) | `memory_search` (default 50), `memory_list` (default unlimited; required with `expand_links`) |
 | `ttl_secs` | 1–3155760000 (~100 years) | `memory_store`, `memory_update` |
 | `MAX_EXPANDED_LINKS` | 10 neighbors per result, most recent first | `expand_links` on search and list |
 | snippet length | 160 characters (+ `…` when cut) | `related[].snippet` |
@@ -418,7 +423,7 @@ agent-memory serve-rest --addr 127.0.0.1:8080 # custom loopback bind
 | Method | Path | Purpose | Validated parameters |
 |--------|------|---------|----------------------|
 | `POST` | `/api/memories` | Store a memory (same fields as `memory_store`) | `ttl_secs`: 1–3155760000 when present; omitted = no expiry |
-| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit`/`expand_links` query params | `limit`: 1–200 when present; omitted = unlimited. `tag`: exact tag (case-sensitive). `expand_links=true` attaches `related` summaries |
+| `GET` | `/api/memories` | List, with optional `type`/`tag`/`scope`/`limit`/`expand_links` query params | `limit`: 1–200 when present; omitted = unlimited, but required with `expand_links=true` (400 without one). `tag`: exact tag (case-sensitive). `expand_links=true` attaches `related` summaries |
 | `POST` | `/api/search` | Search — returns the same `{search_mode, results}` envelope | `limit`: 1–200 when present; omitted defaults to 50. `tag`: exact tag (case-sensitive). `"expand_links": true` attaches `related` summaries |
 | `PATCH` | `/api/memories/{id}` | Update in place — JSON merge-patch body with the same fields and semantics as `memory_update`; 200 returns the updated memory with `embedding_status` | as `memory_update`; 404 `{"id", "updated": false, "reason": "not_found"}` for unknown ids |
 | `DELETE` | `/api/memories/{id}` | Forget by id (404 with a structured body for unknown ids) | — |
@@ -431,6 +436,10 @@ whose `error` field names the field, range, and offending value — shaped
 `invalid argument: limit must be between 1 and 200 (got 0)` — never a 500 and
 never a silent clamp. The MCP transport rejects the same inputs identically as
 `invalid_params`, because validation lives once at the shared service seam.
+`GET /api/memories?expand_links=true` without a `limit` is also a 400
+(`invalid argument: limit is required when expand_links is true; pass a limit
+between 1 and 200`), and MCP `memory_list` rejects the same call as
+`invalid_params`.
 
 Malformed input that never reaches the seam gets the same 400 `{"error": ...}`
 body on these routes only:
@@ -461,7 +470,7 @@ curl -X POST localhost:7437/api/links \
   -H 'content-type: application/json' \
   -d '{"from_id": 57, "to_id": 42, "kind": "supersedes"}'
 
-curl 'localhost:7437/api/memories?type=DECISION&expand_links=true'
+curl 'localhost:7437/api/memories?type=DECISION&expand_links=true&limit=20'
 ```
 
 The REST daemon and the MCP stdio server can run concurrently against the same

@@ -19,7 +19,7 @@ use crate::clock::Clock;
 use crate::decay::{apply_decay, decay_score, DecayConfig, DecayEngine, RankWeights, SweepReport};
 use crate::domain::{
     LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
-    UpdatedMemory, MAX_EXPANDED_LINKS,
+    UpdatedMemory, MAX_EXPANDED_LINKS, MAX_LIMIT, MIN_LIMIT,
 };
 use crate::embed::Embedder;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
@@ -68,7 +68,10 @@ pub struct ListArgs {
     pub scope: Option<String>,
     pub limit: Option<i64>,
     /// Attach 1-hop relation summaries to every returned row (MCP-07 / D-04).
-    /// `false` (the default) keeps the v1.0 response byte-identical.
+    /// `false` (the default) keeps the v1.0 response byte-identical. `true`
+    /// requires `limit` (REVIEW WR-04, user decision option-a): without one,
+    /// [`MemoryService::list`] rejects the call as
+    /// [`MemoryError::InvalidArgument`].
     pub expand_links: bool,
 }
 
@@ -229,10 +232,26 @@ impl MemoryService {
     }
 
     /// List stored memories newest-first with optional filters (MCP-03 / D-06).
+    ///
+    /// `expand_links` requires a `limit` (REVIEW WR-04, user decision
+    /// option-a): an expanded list with no limit is rejected as
+    /// [`MemoryError::InvalidArgument`] before any store hop, with a message
+    /// telling the caller to pass a limit. The rule is enforced here, at the
+    /// shared seam, so MCP and REST cannot drift, and the
+    /// `200 × MAX_EXPANDED_LINKS` bound therefore covers every expanded
+    /// response. A list without `expand_links` still returns every row when
+    /// `limit` is omitted.
     pub async fn list(&self, args: ListArgs) -> Result<Vec<MemoryView>, MemoryError> {
-        // API-02 / D-01: a present limit must be 1..=200; omitted stays
-        // unlimited (v1.0 behavior, RESEARCH Pitfall 6).
+        // API-02 / D-01: a present limit must be 1..=200. An omitted limit
+        // stays unlimited (v1.0 behavior, RESEARCH Pitfall 6) only without
+        // `expand_links`; range validation runs first.
         crate::domain::validate_limit(args.limit)?;
+        if args.expand_links && args.limit.is_none() {
+            return Err(MemoryError::InvalidArgument(format!(
+                "limit is required when expand_links is true; \
+                 pass a limit between {MIN_LIMIT} and {MAX_LIMIT}"
+            )));
+        }
         let expand_links = args.expand_links;
         let store = self.store.clone();
         let now = self.clock.now();
