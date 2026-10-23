@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 04
 current_phase_name: Memory Update, Relations & Hybrid Search
 status: executing
-stopped_at: Completed 04-06-PLAN.md
-last_updated: "2026-10-23T19:59:51.264Z"
+stopped_at: Completed 04-07-PLAN.md
+last_updated: "2026-10-23T20:12:50.775Z"
 last_activity: 2026-10-23
-last_activity_desc: Completed 04-06 (gap wave 2, conditional backfill + symmetric relates_to)
-state_head: c72146bc6296170116a8ed40749576c6af5c6f87
+last_activity_desc: Completed 04-07 (gap wave 3, strict update DTOs + REST error bodies + race-safe backup)
+state_head: 9693c5fc8d881f1e3fce159415d5cd4ff2f8873b
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
-Plan: 6 of 7 (gap closure: 04-05, 04-06 done; 04-07 next)
-Status: Executing gap closure — 04-07 ready to execute
-Last activity: 2026-10-23 — Completed 04-06 (CR-03 conditional sweep backfill, WR-03 symmetric relates_to, IN-05/IN-06/WR-04 docs)
+Plan: 7 of 7 (gap closure: 04-05, 04-06, 04-07 done)
+Status: All 7 plans executed — ready for phase 04 re-verification (not yet marked complete)
+Last activity: 2026-10-23 — Completed 04-07 (WR-02 deny_unknown_fields on update DTOs, IN-02 uniform REST rejection bodies, WR-01/IN-03 race-safe pre-migration backup, IN-01 README Upgrading)
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -74,6 +74,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P04 | 11 min | 2 tasks | 11 files |
 | Phase 04 P05 | 10 min | 3 tasks | 12 files |
 | Phase 04 P06 | 7 min | 3 tasks | 9 files |
+| Phase 04 P07 | 12 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,8 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-06: relates_to stored canonically as (min id, max id) and unlinked from either end; supersedes/caused_by stay directed (D-03). Storage-only: MCP/REST responses echo request ids; NotFound names the request's from_id first. No migration (REVIEW WR-03).
 - [Phase 04]: 04-06: WR-04 documented only: the 200 x 10 expansion bound covers search and list-with-limit; unlimited expanded memory_list returns every row. Behaviour choice (reject / default limit / unbounded) is an open API-contract question for Phase 5/6.
 - [Phase 04]: 04-07: deny_unknown_fields added to UpdateArgs/UpdateBody only (new v0.1.0 surfaces, REVIEW WR-02); the [03-01] decision stands for the v0.0.1 DTOs, so the v0.1.0 release-notes delta for existing surfaces is unchanged. Over MCP, rmcp 1.8 reports the rejection as a tool error result (isError: true, "failed to deserialize parameters: unknown field ..."), not a JSON-RPC -32602; REST is a 400 {"error"}.
+- [Phase 04]: 04-07: backup temp is pid-qualified and a process-wide BACKUP_LOCK serializes backups within one process, so same-process openers never share a temp; prune tolerates NotFound from a concurrent opener
+- [Phase 04]: 04-07: WR-01 closed with verify-then-rename + tolerate-by-re-probe (no file lock, no new dep); cross-process exclusive lock stays deferred
 
 ### Pending Todos
 
@@ -159,8 +162,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-23T19:59:51.214Z
-Stopped at: Completed 04-06-PLAN.md
+Last session: 2026-10-23T20:12:50.720Z
+Stopped at: Completed 04-07-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
