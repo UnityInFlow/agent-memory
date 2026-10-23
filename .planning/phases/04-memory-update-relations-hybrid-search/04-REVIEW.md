@@ -207,6 +207,15 @@ The user does not get the friendly D-13 text that names `brew upgrade`. The refu
 
 **Fix:** Rename it to `memory_update_with_an_unknown_field_is_a_tool_error_over_stdio`.
 
+## Fixes applied (2026-10-23)
+
+| ID | Status | Commit | Change |
+|----|--------|--------|--------|
+| WR-01 (new) | Fixed | `36df937` | Added `fts5 expression tree is too large` to `FTS5_QUERY_PARSE_MARKERS`. The NOT×257 and NOT×300 probes are in the bundled-SQLite classifier and fallback tests. A boundary test pins 256 NOTs as accepted, 257 as the classified depth error, and a 3000-NOT chain's flat-OR fallback as parsing. The two-mode test `a_not_chain_past_the_fts5_depth_limit_is_answered_in_both_modes` covers hybrid and keyword mode. |
+| WR-02 (new) | Fixed (doc only) | `68b479c` | The README now lists the exact routes that return a 400 `{"error"}` for a malformed body, path, or query. It also states that `POST /api/memories` and `POST /api/search` keep axum's plain-text 422/400/415 body rejection. No behaviour change. |
+
+Workspace after the fixes: 213 passed / 0 failed / 2 ignored. `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+
 ---
 
 _Reviewed: 2026-10-23_
