@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -211,11 +211,29 @@ pub async fn store_handler(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response())
 }
 
+/// Map an axum `Path`/`Query` extractor rejection to [`ApiError`], so a
+/// malformed path segment or query parameter gets the same `{"error": ...}`
+/// body as every other client error instead of axum's plain-text default
+/// (REVIEW IN-02). The extractor's status tier is preserved: a parse failure
+/// (4xx) is a 400, while a 5xx — an axum routing misconfiguration such as a
+/// path-parameter count mismatch — stays a 500.
+fn extractor_rejection(status: StatusCode, message: String) -> ApiError {
+    if status.is_server_error() {
+        ApiError::Internal(message)
+    } else {
+        ApiError::BadRequest(message)
+    }
+}
+
 /// `GET /api/memories?type=&tag=&scope=&limit=&expand_links=` → 200 `Vec<MemoryView>`.
+///
+/// A malformed query string (`limit=abc`, `expand_links=1`) is a 400 with the
+/// `{"error"}` body via [`extractor_rejection`].
 pub async fn list_handler(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<ListQuery>,
+    query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let Query(q) = query.map_err(|r| extractor_rejection(r.status(), r.body_text()))?;
     let mem_type = parse_type_filter(q.r#type.as_deref())?;
 
     let views = state
@@ -260,11 +278,13 @@ pub async fn search_handler(
 
 /// `DELETE /api/memories/{id}` → 200 `{"id", "deleted": true}` or 404
 /// `{"id", "deleted": false, "reason": "not_found"}` — the exact JSON bodies
-/// the `mcp.rs` forget tool produces, with HTTP-native status codes.
+/// the `mcp.rs` forget tool produces, with HTTP-native status codes. A
+/// non-numeric id segment is a 400 `{"error"}` via [`extractor_rejection`].
 pub async fn forget_handler(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
+    path: Result<Path<i64>, PathRejection>,
 ) -> Result<Response, ApiError> {
+    let Path(id) = path.map_err(|r| extractor_rejection(r.status(), r.body_text()))?;
     let deleted = state.service.forget(id).await.map_err(map_memory_error)?;
 
     if deleted {
@@ -285,16 +305,18 @@ pub async fn forget_handler(
 ///
 /// The body extractor's rejection is taken explicitly and reported as a 400
 /// with the usual `{"error": ...}` body: a malformed or wrongly-typed patch is
-/// client input, whatever axum's default status for it would be. Invalid
+/// client input, whatever axum's default status for it would be. A
+/// non-numeric id segment gets the same body via [`extractor_rejection`]. Invalid
 /// patch VALUES (null/empty content, out-of-bounds TTL, an empty patch) are
 /// rejected by the service seam and map to 400 through [`map_memory_error`].
 ///
 /// [`UpdatedMemory`]: agent_memory_core::domain::UpdatedMemory
 pub async fn update_handler(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
+    path: Result<Path<i64>, PathRejection>,
     body: Result<Json<UpdateBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Path(id) = path.map_err(|r| extractor_rejection(r.status(), r.body_text()))?;
     let Json(body) = body.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
 
     let updated = state
@@ -366,11 +388,14 @@ pub async fn link_handler(
 /// `DELETE /api/links/{from_id}/{to_id}/{kind}` → 200 `{"from_id", "to_id",
 /// "kind", "unlinked": true}`, or 404 `{..., "unlinked": false, "reason":
 /// "not_found"}` when no such edge exists — the `mcp.rs` unlink tool's JSON.
-/// An unknown `kind` segment is a 400.
+/// An unknown `kind` segment is a 400; a non-numeric id segment is a 400
+/// `{"error"}` via [`extractor_rejection`].
 pub async fn unlink_handler(
     State(state): State<Arc<AppState>>,
-    Path((from_id, to_id, kind)): Path<(i64, i64, String)>,
+    path: Result<Path<(i64, i64, String)>, PathRejection>,
 ) -> Result<Response, ApiError> {
+    let Path((from_id, to_id, kind)) =
+        path.map_err(|r| extractor_rejection(r.status(), r.body_text()))?;
     let kind = parse_link_kind(&kind)?;
     let removed = state
         .service
@@ -551,13 +576,13 @@ mod tests {
 
         let resp = list_handler(
             State(state.clone()),
-            Query(ListQuery {
+            Ok(Query(ListQuery {
                 r#type: Some("TODO".to_string()),
                 tag: None,
                 scope: None,
                 limit: None,
                 expand_links: false,
-            }),
+            })),
         )
         .await
         .expect("list succeeds")
@@ -570,13 +595,13 @@ mod tests {
 
         let err = list_handler(
             State(state),
-            Query(ListQuery {
+            Ok(Query(ListQuery {
                 r#type: Some("bogus".to_string()),
                 tag: None,
                 scope: None,
                 limit: None,
                 expand_links: false,
-            }),
+            })),
         )
         .await
         .expect_err("bad type filter is rejected");
@@ -925,13 +950,13 @@ mod tests {
 
         let err = list_handler(
             State(state),
-            Query(ListQuery {
+            Ok(Query(ListQuery {
                 r#type: None,
                 tag: None,
                 scope: None,
                 limit: Some(-5),
                 expand_links: false,
-            }),
+            })),
         )
         .await
         .expect_err("limit=-5 is rejected");
@@ -959,7 +984,7 @@ mod tests {
             .into_response();
         let id = body_json(created).await["id"].as_i64().expect("id");
 
-        let resp = forget_handler(State(state.clone()), Path(id))
+        let resp = forget_handler(State(state.clone()), Ok(Path(id)))
             .await
             .expect("forget succeeds")
             .into_response();
@@ -967,7 +992,7 @@ mod tests {
         assert_eq!(body_json(resp).await["deleted"], true);
 
         // Second delete of the same id: 404 with the exact mcp.rs not-found body.
-        let resp = forget_handler(State(state), Path(id))
+        let resp = forget_handler(State(state), Ok(Path(id)))
             .await
             .expect("forget of a missing id is a clean handler result")
             .into_response();
@@ -1023,7 +1048,7 @@ mod tests {
             .body(axum::body::Body::from(raw.to_string()))
             .expect("request builds");
         let body = Json::<UpdateBody>::from_request(req, &()).await;
-        match update_handler(State(state.clone()), Path(id), body).await {
+        match update_handler(State(state.clone()), Ok(Path(id)), body).await {
             Ok(resp) => resp,
             Err(err) => err.into_response(),
         }
@@ -1328,7 +1353,7 @@ mod tests {
     }
 
     async fn unlink_path(state: &Arc<AppState>, from: i64, to: i64, kind: &str) -> Response {
-        match unlink_handler(State(state.clone()), Path((from, to, kind.to_string()))).await {
+        match unlink_handler(State(state.clone()), Ok(Path((from, to, kind.to_string())))).await {
             Ok(resp) => resp,
             Err(err) => err.into_response(),
         }
@@ -1506,7 +1531,7 @@ mod tests {
                     .parse()
                     .expect("uri parses");
                 let query = Query::<ListQuery>::try_from_uri(&uri).expect("query parses");
-                list_handler(State(state), query)
+                list_handler(State(state), Ok(query))
                     .await
                     .expect("list succeeds")
                     .into_response()
@@ -1639,6 +1664,88 @@ mod tests {
             .await
             .expect("DELETE again");
         assert_eq!(resp.status().as_u16(), 404);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_path_and_query_params_get_the_json_error_body() {
+        // REVIEW IN-02: path and query extractor rejections used to be axum's
+        // plain-text default; every client error now carries {"error"}.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        let a = stored_id(&state, "target").await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::rest::build_router(state))
+                .await
+                .expect("serve");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("client");
+        let base = format!("http://{addr}");
+
+        let requests = [
+            (
+                "PATCH /api/memories/abc",
+                client
+                    .patch(format!("{base}/api/memories/abc"))
+                    .json(&serde_json::json!({ "content": "valid body" })),
+            ),
+            (
+                "DELETE /api/memories/abc",
+                client.delete(format!("{base}/api/memories/abc")),
+            ),
+            (
+                "DELETE /api/links/x/2/relates_to",
+                client.delete(format!("{base}/api/links/x/{a}/relates_to")),
+            ),
+            (
+                "GET /api/memories?expand_links=1",
+                client.get(format!("{base}/api/memories?expand_links=1")),
+            ),
+            (
+                "GET /api/memories?limit=abc",
+                client.get(format!("{base}/api/memories?limit=abc")),
+            ),
+        ];
+        for (label, request) in requests {
+            let resp = request.send().await.expect(label);
+            assert_eq!(resp.status().as_u16(), 400, "{label} is a client error");
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                content_type.starts_with("application/json"),
+                "{label}: JSON body, got content-type {content_type:?}"
+            );
+            let body: serde_json::Value = resp.json().await.expect("JSON error body");
+            let message = body["error"].as_str().unwrap_or_default();
+            assert!(
+                !message.is_empty(),
+                "{label}: non-empty error string, got {body}"
+            );
+        }
+
+        // The malformed PATCH wrote nothing.
+        let rows: serde_json::Value = client
+            .get(format!("{base}/api/memories"))
+            .send()
+            .await
+            .expect("GET /api/memories")
+            .json()
+            .await
+            .expect("json rows");
+        assert_eq!(rows[0]["content"], "target");
 
         server.abort();
     }
