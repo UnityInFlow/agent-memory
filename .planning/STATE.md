@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 04
 current_phase_name: Memory Update, Relations & Hybrid Search
 status: executing
-stopped_at: Completed 04-05-PLAN.md
-last_updated: "2026-10-23T19:49:24.593Z"
+stopped_at: Completed 04-06-PLAN.md
+last_updated: "2026-10-23T19:59:51.264Z"
 last_activity: 2026-10-23
-last_activity_desc: Completed 04-05 (gap wave 1, option-a forgiving keyword leg)
-state_head: 42533282bbb1b9dac1228e0438b38ddc90c8fdff
+last_activity_desc: Completed 04-06 (gap wave 2, conditional backfill + symmetric relates_to)
+state_head: c72146bc6296170116a8ed40749576c6af5c6f87
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
-Plan: 5 of 7 (gap closure: 04-05 done; 04-06, 04-07 next)
-Status: Executing gap closure — 04-06 ready to execute
-Last activity: 2026-10-23 — Completed 04-05 (option-a forgiving keyword leg + search error redaction)
+Plan: 6 of 7 (gap closure: 04-05, 04-06 done; 04-07 next)
+Status: Executing gap closure — 04-07 ready to execute
+Last activity: 2026-10-23 — Completed 04-06 (CR-03 conditional sweep backfill, WR-03 symmetric relates_to, IN-05/IN-06/WR-04 docs)
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -73,6 +73,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P03 | 10 min | 2 tasks | 9 files |
 | Phase 04 P04 | 11 min | 2 tasks | 11 files |
 | Phase 04 P05 | 10 min | 3 tasks | 12 files |
+| Phase 04 P06 | 7 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -114,6 +115,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-04: SearchMode::Semantic removed; embedder-up searches report search_mode "hybrid", embedder-down stays "keyword" byte-identical to v1.0 (README behavioral change 3)
 - [Phase 04]: 04-04: Keyword-leg errors propagate first, so a malformed MATCH (incl. bare ?/,/' punctuation) is InvalidQuery/400 in hybrid as in keyword mode (T-04-15); follow-up candidate: sanitize natural-language queries for the keyword leg
 - [Phase 04]: 04-05: T-04-15 revised by user decision option-a (2026-10-23) — search runs the raw FTS5 MATCH first, then one sanitized retry (word tokens quoted and OR-joined) on any FTS5 query-parse error, including the step-time `no such column` class from hyphens/colons; a tokenless query is an empty keyword leg (hybrid answers semantic-only, keyword mode returns empty); identical in both modes, so search never returns InvalidQuery; every search-path internal error is redacted to SEARCH_STORAGE_FAILURE (T-04-19). Supersedes the 04-04 decision that a malformed MATCH is InvalidQuery/400 in hybrid mode.
+- [Phase 04]: 04-06: sweep backfill writes a vector only through a guarded claim (embedding_status = 0 AND content = embedded text) run first in the writer tx; Store::insert_embedding returns bool. Closes REVIEW CR-03, across processes too.
+- [Phase 04]: 04-06: relates_to stored canonically as (min id, max id) and unlinked from either end; supersedes/caused_by stay directed (D-03). Storage-only: MCP/REST responses echo request ids; NotFound names the request's from_id first. No migration (REVIEW WR-03).
+- [Phase 04]: 04-06: WR-04 documented only: the 200 x 10 expansion bound covers search and list-with-limit; unlimited expanded memory_list returns every row. Behaviour choice (reject / default limit / unbounded) is an open API-contract question for Phase 5/6.
 
 ### Pending Todos
 
@@ -154,8 +158,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-23T19:49:24.539Z
-Stopped at: Completed 04-05-PLAN.md
+Last session: 2026-10-23T19:59:51.214Z
+Stopped at: Completed 04-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
