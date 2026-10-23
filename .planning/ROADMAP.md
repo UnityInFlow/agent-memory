@@ -67,7 +67,7 @@ Plans:
   4. Hybrid ranking stays decay-aware — a fresh memory outranks a stale one at equal fused rank — and access bumps apply only to post-truncation returned ids.
   5. Upgrading a real v0.0.1 database applies migration 0003 only after a pre-migration backup; shipped 0001/0002 SQL is provably unchanged (fixture divergence test against a v0.0.1 database), and a newer-schema DB met by an older binary yields a friendly error, not a crash.
 
-**Plans**: 5/7 plans executed (4 executed + 3 gap closure)
+**Plans**: 6/7 plans executed (4 executed + 3 gap closure)
 Plans:
 **Wave 1**
 
@@ -88,7 +88,7 @@ Plans:
 **Gap closure** *(from 04-VERIFICATION.md + 04-REVIEW.md; gap waves run in order)*
 
 - [x] 04-05-PLAN.md — Gap wave 1: forgiving keyword leg per user decision option-a (raw MATCH first, one sanitized OR-of-quoted-tokens retry, tokenless = empty leg, identical in both modes) + search-path error redaction (CR-01, CR-02, truths #14/#15, IN-04) (SEARCH-04)
-- [ ] 04-06-PLAN.md — Gap wave 2: conditional sweep backfill closing the update/forget/sweep races + symmetric relates_to + IN-05/IN-06 docs (CR-03, WR-03) (MCP-06, MCP-07)
+- [x] 04-06-PLAN.md — Gap wave 2: conditional sweep backfill closing the update/forget/sweep races + symmetric relates_to + IN-05/IN-06 docs (CR-03, WR-03) (MCP-06, MCP-07)
 - [ ] 04-07-PLAN.md — Gap wave 3: deny_unknown_fields on update DTOs, uniform REST rejection bodies, race-safe verify-then-rename pre-migration backup + Upgrading docs (WR-02, IN-02, WR-01, IN-03, IN-01) (MCP-06, MCP-07, STORE-05)
 
 ### Phase 5: Portable Export & Import
@@ -130,6 +130,6 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 1. Core Memory Foundation | v1.0 | 3/3 | Complete | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
-| 4. Memory Update, Relations & Hybrid Search | v1.1 | 5/7 | In Progress|  |
+| 4. Memory Update, Relations & Hybrid Search | v1.1 | 6/7 | In Progress|  |
 | 5. Portable Export & Import | v1.1 | 0/? | Not started | - |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
