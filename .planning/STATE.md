@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Hardening & Interop
 current_phase: 04
 current_phase_name: Memory Update, Relations & Hybrid Search
-status: executing
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-10-23T18:25:09.406Z"
+status: verifying
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-10-23T18:40:45.705Z"
 last_activity: 2026-10-23
 last_activity_desc: Phase 04 execution started
-state_head: a82878198070304fd79df425fa413df1affc0685
+state_head: fb9c4634bf807922d5bc73a2959dd6be257def80
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 
 Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-23 — Phase 04 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P01 | 9 min | 2 tasks | 13 files |
 | Phase 04 P02 | 10min | 2 tasks | 11 files |
 | Phase 04 P03 | 10 min | 2 tasks | 9 files |
+| Phase 04 P04 | 11 min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-03: forget() and sweep_expired() each carry an explicit orphan-edge DELETE beside the FK ON DELETE CASCADE, proven by pragma-less-connection tests
 - [Phase 04]: 04-03: expand_links attaches MemoryView.related (Option, skip_serializing_if) after truncation and after spawn_bump; MAX_EXPANDED_LINKS = 10 newest-first, snippet 160 chars; neighbors never bumped; flag-less envelope golden-tested byte-identical
 - [Phase 04]: 04-03: Incoming edges read natural reverse labels (superseded_by, caused); RelatedLink.direction is out|in; REST POST /api/links + DELETE /api/links/{from_id}/{to_id}/{kind} with 200/404 and 400 on any bad body/kind
+- [Phase 04]: 04-04: Hybrid search = RRF (k=60, 1-based ranks, duplicate ids sum, id tie-break) over two pure-relevance legs (KNN distance, bm25 ASC), each oversampled limit*4 capped at MAX_KNN_K; decay applied once, multiplicatively, post-fusion (SEARCH-04/05)
+- [Phase 04]: 04-04: SearchMode::Semantic removed; embedder-up searches report search_mode "hybrid", embedder-down stays "keyword" byte-identical to v1.0 (README behavioral change 3)
+- [Phase 04]: 04-04: Keyword-leg errors propagate first, so a malformed MATCH (incl. bare ?/,/' punctuation) is InvalidQuery/400 in hybrid as in keyword mode (T-04-15); follow-up candidate: sanitize natural-language queries for the keyword leg
 
 ### Pending Todos
 
@@ -148,8 +152,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-23T18:25:02.213Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-10-23T18:40:36.856Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

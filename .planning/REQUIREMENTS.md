@@ -10,8 +10,8 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Search (SEARCH)
 
-- [ ] **SEARCH-04**: With Ollama available, `memory_search` fuses the keyword and semantic legs via reciprocal-rank fusion (rank-based, k=60, duplicate ids sum contributions from both legs); results carry `search_mode: "hybrid"`. With Ollama unreachable, search degrades to keyword exactly as in v1.0 — the envelope shape is unchanged and existing `search_mode == "keyword"` checks keep working
-- [ ] **SEARCH-05**: Hybrid ranking remains decay-aware — a post-fusion decay blend so a fresh memory outranks a stale one at equal fused rank, and access bumps apply only to post-truncation returned ids
+- [x] **SEARCH-04**: With Ollama available, `memory_search` fuses the keyword and semantic legs via reciprocal-rank fusion (rank-based, k=60, duplicate ids sum contributions from both legs); results carry `search_mode: "hybrid"`. With Ollama unreachable, search degrades to keyword exactly as in v1.0 — the envelope shape is unchanged and existing `search_mode == "keyword"` checks keep working
+- [x] **SEARCH-05**: Hybrid ranking remains decay-aware — a post-fusion decay blend so a fresh memory outranks a stale one at equal fused rank, and access bumps apply only to post-truncation returned ids
 
 ### MCP Interface (MCP)
 
@@ -67,8 +67,8 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 | MCP-06 | Phase 4 | Complete |
 | MCP-07 | Phase 4 | Complete |
 | STORE-05 | Phase 4 | Complete |
-| SEARCH-04 | Phase 4 | Pending |
-| SEARCH-05 | Phase 4 | Pending |
+| SEARCH-04 | Phase 4 | Complete |
+| SEARCH-05 | Phase 4 | Complete |
 | DIST-04 | Phase 5 | Pending |
 | INTEROP-02 | Phase 5 | Pending |
 | DIST-05 | Phase 6 | Pending |
