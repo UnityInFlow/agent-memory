@@ -67,7 +67,7 @@ Plans:
   4. Hybrid ranking stays decay-aware — a fresh memory outranks a stale one at equal fused rank — and access bumps apply only to post-truncation returned ids.
   5. Upgrading a real v0.0.1 database applies migration 0003 only after a pre-migration backup; shipped 0001/0002 SQL is provably unchanged (fixture divergence test against a v0.0.1 database), and a newer-schema DB met by an older binary yields a friendly error, not a crash.
 
-**Plans**: 4/4 plans executed
+**Plans**: 7 plans (4 executed + 3 gap closure)
 Plans:
 **Wave 1**
 
@@ -84,6 +84,12 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 
 - [x] 04-04-PLAN.md — Decay-aware hybrid RRF fusion with keyword degrade, error taxonomy, and wire/docs (SEARCH-04, SEARCH-05)
+
+**Gap closure** *(from 04-VERIFICATION.md + 04-REVIEW.md; gap waves run in order)*
+
+- [ ] 04-05-PLAN.md — Gap wave 1: forgiving keyword leg per user decision option-a (raw MATCH first, one sanitized OR-of-quoted-tokens retry, tokenless = empty leg, identical in both modes) + search-path error redaction (CR-01, CR-02, truths #14/#15, IN-04) (SEARCH-04)
+- [ ] 04-06-PLAN.md — Gap wave 2: conditional sweep backfill closing the update/forget/sweep races + symmetric relates_to + IN-05/IN-06 docs (CR-03, WR-03) (MCP-06, MCP-07)
+- [ ] 04-07-PLAN.md — Gap wave 3: deny_unknown_fields on update DTOs, uniform REST rejection bodies, race-safe verify-then-rename pre-migration backup + Upgrading docs (WR-02, IN-02, WR-01, IN-03, IN-01) (MCP-06, MCP-07, STORE-05)
 
 ### Phase 5: Portable Export & Import
 
