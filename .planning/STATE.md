@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 04
 current_phase_name: Memory Update, Relations & Hybrid Search
 status: executing
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-10-23T18:11:23.164Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-10-23T18:25:09.406Z"
 last_activity: 2026-10-23
 last_activity_desc: Phase 04 execution started
-state_head: a49b6c6f5763bae94df3c1d219398cd4989f4455
+state_head: a82878198070304fd79df425fa413df1affc0685
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 04 (Memory Update, Relations & Hybrid Search) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-10-23 — Phase 04 execution started
 
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 |------|----------|-------|-------|
 | Phase 04 P01 | 9 min | 2 tasks | 13 files |
 | Phase 04 P02 | 10min | 2 tasks | 11 files |
+| Phase 04 P03 | 10 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,10 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-02: update is UPDATE-in-place (never delete+insert), folds the D-09 freshness bump and decay_score = 1.0 into the same statement, and swaps the vector in the same writer tx
 - [Phase 04]: 04-02: patch DTO fields carry skip_serializing_if so the MCP tool schema never advertises default: null (null means clear in a merge-patch)
 - [Phase 04]: 04-02: PATCH /api/memories/{id} maps every Json extractor rejection to 400 {error}; other REST handlers keep axum defaults
+- [Phase 04]: 04-03: Relations are flat directed edges (LinkKind relates_to|supersedes|caused_by, closed enum); duplicate link = idempotent Linked, self-link = InvalidArgument at the seam, missing endpoint = LinkOutcome::NotFound{missing_id} data (never an FK 500)
+- [Phase 04]: 04-03: forget() and sweep_expired() each carry an explicit orphan-edge DELETE beside the FK ON DELETE CASCADE, proven by pragma-less-connection tests
+- [Phase 04]: 04-03: expand_links attaches MemoryView.related (Option, skip_serializing_if) after truncation and after spawn_bump; MAX_EXPANDED_LINKS = 10 newest-first, snippet 160 chars; neighbors never bumped; flag-less envelope golden-tested byte-identical
+- [Phase 04]: 04-03: Incoming edges read natural reverse labels (superseded_by, caused); RelatedLink.direction is out|in; REST POST /api/links + DELETE /api/links/{from_id}/{to_id}/{kind} with 200/404 and 400 on any bad body/kind
 
 ### Pending Todos
 
@@ -143,8 +148,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-23T18:11:16.057Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-10-23T18:25:02.213Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
