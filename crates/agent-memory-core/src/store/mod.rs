@@ -80,6 +80,22 @@ pub trait Store: Send + Sync {
         cfg: DecayConfig,
     ) -> Result<Vec<MemoryView>, MemoryError>;
 
+    /// The keyword leg of hybrid search (SEARCH-04): FTS5 candidates in
+    /// **pure relevance** order (bm25 best first, ties by ascending id), with
+    /// no decay term. The service applies decay once, after fusion (SEARCH-05),
+    /// so a decay-blended leg here would count recency twice.
+    ///
+    /// Oversampled exactly like [`Store::knn_search`]: `limit * 4` rows (the
+    /// limit defaults to 50), capped at the same KNN cap, so a hit ranked just
+    /// past the limit still reaches fusion. Same type/scope/tag filters as
+    /// [`Store::search`] (`None` disables). A malformed MATCH string is
+    /// [`MemoryError::InvalidQuery`], exactly as on [`Store::search`]. A valid
+    /// query that matches nothing is an empty vec.
+    ///
+    /// [`Store::search`] itself is unchanged: it is the keyword-only degrade
+    /// path used when the embedder is down.
+    fn keyword_candidates(&self, args: SearchArgs) -> Result<Vec<MemoryView>, MemoryError>;
+
     /// Delete a memory by id. Returns `true` if a row was deleted, `false` if no
     /// row with that id existed (clean not-found, never an error — MCP-04). The
     /// FTS5 mirror is kept in sync by the delete trigger; the `vec_memories`

@@ -723,7 +723,7 @@ async fn expansion_also_applies_on_the_semantic_path() {
         .search(search_args("vector anchor", true))
         .await
         .expect("search");
-    assert_eq!(found.search_mode, SearchMode::Semantic);
+    assert_eq!(found.search_mode, SearchMode::Hybrid);
     let entry = &related_of(&found.results, a)[0];
     assert_eq!((entry.id, entry.kind.as_str()), (b, "superseded_by"));
     assert_eq!(entry.direction, LinkDirection::In);

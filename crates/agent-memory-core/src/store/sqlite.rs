@@ -603,6 +603,49 @@ impl Store for SqliteStore {
         Ok(out)
     }
 
+    fn keyword_candidates(&self, args: SearchArgs) -> Result<Vec<MemoryView>, MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        let mem_type_filter: Option<String> = args.mem_type.map(|t| t.as_wire_str().to_string());
+        // Same oversample as knn_search, so the two fused legs are symmetric
+        // (SEARCH-04 / RESEARCH Pitfall 3).
+        let fetch = (args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1) * 4).min(MAX_KNN_K);
+
+        // Pure relevance (RESEARCH Pitfall 1): bm25() is SMALLER = better, so
+        // ascending order is best first, with no negation and no decay term.
+        // Decay is applied once by the service, after fusion. The id tie-break
+        // keeps the leg deterministic. FROM/JOIN, filters and the
+        // map_fts_query_error routing are copied from `search`, and every
+        // value is bound, never concatenated (T-04-18).
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.mem_type, m.content, m.tags, m.source, m.scope, \
+                    m.base_weight, m.decay_score, m.access_count, m.created_at, \
+                    m.last_accessed, m.expires_at \
+             FROM memories_fts \
+             JOIN memories m ON m.id = memories_fts.rowid \
+             WHERE memories_fts MATCH ?1 \
+               AND (?2 IS NULL OR m.mem_type = ?2) \
+               AND (?3 IS NULL OR m.scope = ?3) \
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) \
+                                          WHERE json_each.value = ?4)) \
+             ORDER BY bm25(memories_fts) ASC, m.id ASC \
+             LIMIT ?5",
+        )?;
+
+        let rows = stmt.query_map(
+            params![args.query, mem_type_filter, args.scope, args.tag, fetch],
+            row_to_view,
+        );
+
+        // A malformed MATCH surfaces at step time, as on `search`: it is
+        // client input (InvalidQuery), never an internal error (T-04-15).
+        let rows = rows.map_err(|e| map_fts_query_error(&args.query, e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| map_fts_query_error(&args.query, e))?);
+        }
+        Ok(out)
+    }
+
     fn forget(&self, id: i64) -> Result<bool, MemoryError> {
         let mut conn = self
             .writer

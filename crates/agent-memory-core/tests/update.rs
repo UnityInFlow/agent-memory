@@ -212,7 +212,7 @@ async fn content_update_re_embeds_so_the_old_meaning_stops_matching() {
         })
         .await
         .expect("search before update");
-    assert_eq!(before.search_mode, SearchMode::Semantic);
+    assert_eq!(before.search_mode, SearchMode::Hybrid);
     assert_eq!(
         before.results[0].id, id,
         "sanity: the old meaning matches the target before the update"
@@ -236,7 +236,7 @@ async fn content_update_re_embeds_so_the_old_meaning_stops_matching() {
         })
         .await
         .expect("old-meaning search");
-    assert_eq!(old.search_mode, SearchMode::Semantic);
+    assert_eq!(old.search_mode, SearchMode::Hybrid);
     assert!(
         old.results.iter().all(|v| v.id != id),
         "the old meaning must no longer return the updated row: {:?}",
@@ -252,7 +252,7 @@ async fn content_update_re_embeds_so_the_old_meaning_stops_matching() {
         })
         .await
         .expect("new-meaning search");
-    assert_eq!(new.search_mode, SearchMode::Semantic);
+    assert_eq!(new.search_mode, SearchMode::Hybrid);
     assert_eq!(new.results[0].id, id, "the new meaning returns the row");
 
     // Exactly one vector row: the old one was replaced, not shadowed.
