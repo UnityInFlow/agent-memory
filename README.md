@@ -454,7 +454,10 @@ A background task sweeps on an interval while the server runs:
    ranking stays cheap between reads. Pinned types (`DECISION`, `ARCHITECTURE`,
    `CONSTRAINT`) decay markedly slower.
 3. **Embedding backfill** — memories stored while Ollama was unreachable are
-   embedded in batches once it comes back.
+   embedded in batches once it comes back. A memory that is edited or deleted
+   while its backfill is in flight is never overwritten with a vector of its
+   old text: that write is skipped, and the memory's current content is
+   embedded on a later sweep (or by the edit itself, when Ollama is up).
 
 **Decay never deletes.** A memory with no TTL stays retrievable forever, however
 low its decay score falls — it simply ranks lower. Removal happens only via TTL or

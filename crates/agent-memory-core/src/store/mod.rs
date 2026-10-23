@@ -42,12 +42,40 @@ pub trait Store: Send + Sync {
         args: SearchArgs,
     ) -> Result<Vec<(MemoryView, f64)>, MemoryError>;
 
-    /// Attach an embedding to an existing memory (sweep backfill): writes the
-    /// vector row and flips `embedding_status` to 1 on the writer lane.
-    fn insert_embedding(&self, memory_id: i64, embedding: Vec<f32>) -> Result<(), MemoryError>;
+    /// Attach an embedding to an existing memory (sweep backfill), but ONLY
+    /// if the row is still the pending row whose content was embedded
+    /// (REVIEW CR-03 / T-04-23, T-04-24).
+    ///
+    /// The backfill embeds outside any lock, so by the time the vector comes
+    /// back the row may have changed. The write therefore starts with one
+    /// guarded claim in the writer transaction:
+    /// `UPDATE memories SET embedding_status = 1 WHERE id = ? AND
+    /// embedding_status = 0 AND content = ?`. Only if that claim changes a row
+    /// is the vector written (vec0 DELETE + INSERT, same transaction).
+    ///
+    /// - `Ok(true)`: the vector was written and `embedding_status` is now 1.
+    /// - `Ok(false)`: nothing was written. The row was updated since it was
+    ///   read (its current content is embedded by `update` itself or by a
+    ///   later sweep), was already embedded, or was forgotten.
+    ///
+    /// The claim closes three races: an `update` landing mid-embed (a stale
+    /// vector would otherwise overwrite the fresh one, permanently, since the
+    /// row reads as embedded), a `forget` landing mid-embed (a vector would
+    /// otherwise attach to a later memory reusing the rowid), and two sweeps
+    /// embedding the same row. SQLite takes its write lock at the claim, so
+    /// this holds across the several processes that share one DB file, not
+    /// just across threads.
+    fn insert_embedding(
+        &self,
+        memory_id: i64,
+        expected_content: &str,
+        embedding: Vec<f32>,
+    ) -> Result<bool, MemoryError>;
 
     /// The ids + contents of up to `limit` rows still awaiting an embedding
     /// (`embedding_status = 0`), oldest first — the sweep backfill work queue.
+    /// The returned content is exactly the text the caller must embed AND pass
+    /// back to [`Store::insert_embedding`] as `expected_content`.
     fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError>;
 
     /// The INTEROP-01 idempotency probe: does a row with exactly this

@@ -653,7 +653,13 @@ impl MemoryService {
     /// After the decay pass, pending embeddings (`embedding_status = 0`) are
     /// backfilled best-effort in ONE batch embed call (RESEARCH Open Question 1)
     /// — this completes the "install Ollama later and old memories become
-    /// semantically searchable" story. Backfill counts are tracing-only:
+    /// semantically searchable" story. A backfill never overwrites a row that
+    /// changed or vanished while it was being embedded: each vector is written
+    /// only if the row is still pending with exactly the embedded content
+    /// ([`Store::insert_embedding`], REVIEW CR-03). A row edited mid-embed is
+    /// either already embedded by `update` itself, or still pending, in which
+    /// case its CURRENT content is embedded on a later sweep. Backfill counts
+    /// (`backfilled`, `skipped_stale`) are tracing-only:
     /// [`SweepReport`]'s shape is unchanged, so the TTL contract stays intact.
     ///
     /// Driven by the injected clock so it is deterministic under test; exposed for
@@ -679,20 +685,32 @@ impl MemoryService {
                 pending.iter().map(|(_, content)| content.clone()).collect();
             match self.embedder.embed(&contents).await {
                 Ok(vectors) if vectors.len() == pending.len() => {
-                    let ids: Vec<i64> = pending.iter().map(|(id, _)| *id).collect();
                     let store = self.store.clone();
-                    let written =
-                        tokio::task::spawn_blocking(move || -> Result<usize, MemoryError> {
+                    let (written, skipped) = tokio::task::spawn_blocking(
+                        move || -> Result<(usize, usize), MemoryError> {
                             let mut written = 0usize;
-                            for (id, vector) in ids.into_iter().zip(vectors) {
-                                store.insert_embedding(id, vector)?;
-                                written += 1;
+                            let mut skipped = 0usize;
+                            // Each vector is written only if its row is still
+                            // pending with exactly the content embedded above
+                            // (CR-03). A row that changed or vanished while the
+                            // embed was in flight is skipped, never overwritten.
+                            for ((id, content), vector) in pending.into_iter().zip(vectors) {
+                                if store.insert_embedding(id, &content, vector)? {
+                                    written += 1;
+                                } else {
+                                    skipped += 1;
+                                }
                             }
-                            Ok(written)
-                        })
-                        .await
-                        .map_err(MemoryError::Join)??;
-                    tracing::info!(backfilled = written, "embedded pending memories on sweep");
+                            Ok((written, skipped))
+                        },
+                    )
+                    .await
+                    .map_err(MemoryError::Join)??;
+                    tracing::info!(
+                        backfilled = written,
+                        skipped_stale = skipped,
+                        "embedded pending memories on sweep"
+                    );
                 }
                 Ok(_) => tracing::warn!(
                     "embedding backfill skipped (batch size mismatch); retrying next sweep"

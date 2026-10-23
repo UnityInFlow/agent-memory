@@ -519,12 +519,33 @@ impl Store for SqliteStore {
         Ok(out)
     }
 
-    fn insert_embedding(&self, memory_id: i64, embedding: Vec<f32>) -> Result<(), MemoryError> {
+    fn insert_embedding(
+        &self,
+        memory_id: i64,
+        expected_content: &str,
+        embedding: Vec<f32>,
+    ) -> Result<bool, MemoryError> {
         let mut conn = self
             .writer
             .lock()
             .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
+        // CR-03: claim the row FIRST. It must still be pending AND still hold
+        // the exact text that was embedded. An update (content changed, or
+        // status already 1), a forget (row gone, or a reused rowid with other
+        // content), or a racing sweep (status already 1) all match nothing,
+        // and then nothing is written: the tx rolls back on drop. SQLite takes
+        // the write lock at this statement, so the claim is atomic across
+        // processes sharing the DB file, not only across this process's
+        // threads (the writer mutex is per process).
+        let claimed = tx.execute(
+            "UPDATE memories SET embedding_status = 1 \
+             WHERE id = ?1 AND embedding_status = 0 AND content = ?2",
+            params![memory_id, expected_content],
+        )?;
+        if claimed == 0 {
+            return Ok(false);
+        }
         let blob: &[u8] = bytemuck::cast_slice(&embedding);
         // DELETE + INSERT instead of INSERT OR REPLACE: conflict-resolution
         // clauses are not reliably supported on virtual tables, and the two
@@ -537,12 +558,8 @@ impl Store for SqliteStore {
             "INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)",
             params![memory_id, blob],
         )?;
-        tx.execute(
-            "UPDATE memories SET embedding_status = 1 WHERE id = ?1",
-            params![memory_id],
-        )?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError> {
