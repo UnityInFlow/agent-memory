@@ -82,18 +82,21 @@ pub struct ListQuery {
 
 /// Two-tier [`MemoryError`] → HTTP mapping, mirroring `mcp.rs`'s
 /// `invalid_params` / `internal_error` split: `InvalidType`, `InvalidQuery`,
-/// and `InvalidArgument` are client input (400), `NotFound` is a missing
-/// resource (404), everything else is 500.
+/// and `InvalidArgument` are client input (400); everything else — including
+/// `Internal` (e.g. a poisoned writer lock, WR-02) — is 500. A missing resource
+/// is never an error variant: handlers build their 404 from not-found *data*
+/// (forget's `Ok(false)`). No catch-all arm: a new `MemoryError` variant must
+/// be classified here at compile time.
 fn map_memory_error(e: MemoryError) -> ApiError {
     match &e {
         MemoryError::InvalidType(_)
         | MemoryError::InvalidQuery(_)
         | MemoryError::InvalidArgument(_) => ApiError::BadRequest(e.to_string()),
-        MemoryError::NotFound => ApiError::NotFound,
         MemoryError::Sqlite(_)
         | MemoryError::Pool(_)
         | MemoryError::Join(_)
-        | MemoryError::Migration(_) => ApiError::Internal(e.to_string()),
+        | MemoryError::Migration(_)
+        | MemoryError::Internal(_) => ApiError::Internal(e.to_string()),
     }
 }
 
@@ -570,5 +573,25 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["embedder"], "unreachable");
+    }
+
+    #[test]
+    fn map_memory_error_puts_internal_faults_in_the_500_tier() {
+        // WR-02: a poisoned writer lock is a server fault — 500, never 404.
+        let err = map_memory_error(MemoryError::Internal("writer lock poisoned".into()));
+        assert!(
+            matches!(&err, ApiError::Internal(msg) if msg.contains("writer lock poisoned")),
+            "Internal must map to ApiError::Internal, got {err:?}"
+        );
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        // The client tier is unchanged.
+        let bad = map_memory_error(MemoryError::InvalidArgument(
+            "limit must be between 1 and 200 (got 0)".into(),
+        ));
+        assert_eq!(bad.into_response().status(), StatusCode::BAD_REQUEST);
     }
 }

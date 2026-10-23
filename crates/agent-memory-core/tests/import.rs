@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agent_memory_core::clock::TestClock;
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::MemoryType;
+use agent_memory_core::domain::{MemoryType, NewMemory};
 use agent_memory_core::embed::FakeEmbedder;
 use agent_memory_core::import::gsd_state::parse_gsd_state;
 use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs, SearchMode};
@@ -96,4 +96,37 @@ async fn import_loads_typed_searchable_memories_idempotently() {
         .expect("second import");
     assert_eq!(second.imported, 0, "re-run must import nothing");
     assert_eq!(second.skipped_duplicates, first.imported);
+}
+
+/// CR-01 regression (03-REVIEW): a draft with `source: None` persists its
+/// source as SQL NULL, so the dedup probe must use NULL-safe equality — before
+/// the fix the probe coerced `None` to `""`, `NULL = ''` never matched, and
+/// every re-import inserted a duplicate row.
+#[tokio::test]
+async fn reimporting_a_sourceless_draft_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let service = service_for(&dir.path().join("memory.db"));
+
+    let draft = || NewMemory {
+        content: "sourceless decision survives re-import exactly once".to_string(),
+        mem_type: MemoryType::Decision,
+        tags: vec![],
+        source: None,
+        scope: None,
+        ttl_secs: None,
+    };
+
+    let first = service.import(vec![draft()]).await.expect("first import");
+    assert_eq!(first.imported, 1);
+    assert_eq!(first.skipped_duplicates, 0);
+
+    let second = service.import(vec![draft()]).await.expect("second import");
+    assert_eq!(second.imported, 0, "re-run must import nothing");
+    assert_eq!(
+        second.skipped_duplicates, 1,
+        "the source:None draft must be recognised as a duplicate"
+    );
+
+    let rows = service.list(ListArgs::default()).await.expect("list").len();
+    assert_eq!(rows, 1, "exactly one row after two imports");
 }

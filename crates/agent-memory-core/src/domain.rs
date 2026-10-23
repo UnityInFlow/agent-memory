@@ -155,8 +155,12 @@ pub enum MemoryError {
     #[error("migration error: {0}")]
     Migration(#[from] rusqlite_migration::Error),
 
-    #[error("memory not found")]
-    NotFound,
+    /// A server-side fault with no client-input cause — e.g. a poisoned writer
+    /// mutex after a panic while it was held (WR-02). Always the internal tier
+    /// (REST 500 / MCP `internal_error`), never a not-found: not-found is data
+    /// (`Ok(false)` / `Ok(None)`), not an error variant.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Validate an optional `limit` against the D-01 bounds. `None` always passes
