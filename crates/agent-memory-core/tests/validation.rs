@@ -9,6 +9,9 @@
 //! Per RESEARCH Pitfall 2 the matrix includes the VALID boundaries (1, 200 /
 //! 1, 3_155_760_000), not just the invalid values — an off-by-one in the range
 //! check must fail these tests, not slip through.
+//!
+//! It also pins the REVIEW WR-04 option-a rule: a `list` with `expand_links`
+//! and no `limit` is rejected as `InvalidArgument` at the same seam.
 
 use std::sync::Arc;
 
@@ -117,6 +120,100 @@ async fn valid_limit_boundaries_succeed() {
             .await
             .unwrap_or_else(|e| panic!("list with limit {good:?} must succeed, got: {e}"));
     }
+}
+
+/// REVIEW WR-04, user decision option-a (reject): an expanded list must carry
+/// a limit, so every expanded response stays within `200 × MAX_EXPANDED_LINKS`.
+#[tokio::test]
+async fn expand_links_list_without_a_limit_is_rejected_at_the_service_seam() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let service = dead_embedder_service(&dir);
+
+    service
+        .store(new_memory("a searchable pipeline row", MemoryType::Pattern))
+        .await
+        .expect("store succeeds under a dead embedder");
+
+    // Rejected: expand_links with no limit.
+    let err = service
+        .list(ListArgs {
+            expand_links: true,
+            ..Default::default()
+        })
+        .await
+        .expect_err("expand_links without a limit must reject");
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "expected InvalidArgument, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("limit is required when expand_links is true"),
+        "message must name the rule, got: {msg}"
+    );
+    assert!(
+        msg.contains("between 1 and 200"),
+        "message must name the valid range, got: {msg}"
+    );
+    assert_eq!(
+        msg,
+        "invalid argument: limit is required when expand_links is true; \
+         pass a limit between 1 and 200"
+    );
+
+    // Range validation runs first: an out-of-bounds limit still reports the range.
+    let err = service
+        .list(ListArgs {
+            expand_links: true,
+            limit: Some(0),
+            ..Default::default()
+        })
+        .await
+        .expect_err("limit 0 must reject even with expand_links");
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "expected InvalidArgument, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("limit must be between"),
+        "range error must win, got: {err}"
+    );
+
+    // Accepted: expand_links with a valid limit at both boundaries.
+    for good in [Some(1), Some(200)] {
+        let views = service
+            .list(ListArgs {
+                expand_links: true,
+                limit: good,
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_else(|e| panic!("expanded list with limit {good:?} must succeed: {e}"));
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            views[0].related.as_deref(),
+            Some(&[][..]),
+            "an expanded row with no relations carries an explicit empty list"
+        );
+    }
+
+    // Unchanged: no expand_links and no limit lists every row, with no related.
+    let views = service
+        .list(ListArgs::default())
+        .await
+        .expect("plain unlimited list must succeed");
+    assert_eq!(views.len(), 1);
+    assert!(views[0].related.is_none());
+
+    // Unchanged: expanded search is already bounded (default 50).
+    service
+        .search(SearchArgs {
+            query: "pipeline".to_string(),
+            expand_links: true,
+            ..Default::default()
+        })
+        .await
+        .expect("expanded search with no limit must succeed");
 }
 
 #[tokio::test]

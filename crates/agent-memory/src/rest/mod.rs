@@ -26,14 +26,14 @@ use crate::mcp::AppState;
 
 /// Typed HTTP error for the REST handlers — the two-tier mapping mirrors
 /// `mcp.rs`'s `invalid_params` / `internal_error` split: bad input is a 400,
-/// a missing resource is a 404, everything else is a 500. The body is always
-/// `{"error": "..."}` so bad input can never surface as a 500.
+/// everything else is a 500. The body is always `{"error": "..."}` so bad input
+/// can never surface as a 500. A missing resource is not an error here:
+/// handlers return their 404 body from not-found data (forget's `Ok(false)`,
+/// update's `Ok(None)`, link's `NotFound`), so a server fault can never be mis-tiered as a 404 (WR-02).
 #[derive(Debug)]
 pub enum ApiError {
     /// Invalid client input (e.g. an unknown memory type) → 400.
     BadRequest(String),
-    /// The referenced resource does not exist → 404.
-    NotFound,
     /// An unexpected server-side failure → 500.
     Internal(String),
 }
@@ -42,7 +42,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
@@ -75,7 +74,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(handlers::store_handler).get(handlers::list_handler),
         )
         .route("/api/search", post(handlers::search_handler))
-        .route("/api/memories/{id}", delete(handlers::forget_handler))
+        .route(
+            "/api/memories/{id}",
+            delete(handlers::forget_handler).patch(handlers::update_handler),
+        )
+        .route("/api/links", post(handlers::link_handler))
+        .route(
+            "/api/links/{from_id}/{to_id}/{kind}",
+            delete(handlers::unlink_handler),
+        )
         .route("/health", get(handlers::health_handler))
         .with_state(state)
 }

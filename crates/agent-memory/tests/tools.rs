@@ -294,6 +294,56 @@ fn memory_search_returns_ranked_results_with_decay_then_empty_on_no_match() {
 }
 
 #[test]
+fn memory_search_answers_hyphenated_and_punctuated_queries_over_stdio() {
+    // User decision option-a (T-04-15 revised), end to end through the real
+    // binary in keyword mode: a hyphenated term (which FTS5 reads as a column
+    // filter) and a punctuated question are both answered with the stored
+    // memory, never a JSON-RPC error and never SQLite text.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let stored = server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({
+            "content": "We chose sqlite-vec for local vector similarity search",
+            "type": "PATTERN"
+        }),
+    );
+    let m1: i64 = tool_text(&stored)
+        .parse()
+        .unwrap_or_else(|e| panic!("memory_store returns an id ({e}): {stored}"));
+
+    for (id, query) in [(3, "sqlite-vec"), (4, "what vector store do we use?")] {
+        let resp = server.call_tool(id, "memory_search", serde_json::json!({ "query": query }));
+        assert!(
+            resp.get("error").is_none(),
+            "{query:?} must be answered, not a JSON-RPC error: {resp}"
+        );
+        assert!(resp.get("result").is_some(), "{query:?}: {resp}");
+        assert!(
+            !resp.to_string().contains("sqlite error"),
+            "{query:?}: no SQLite text may reach the agent: {resp}"
+        );
+        let (mode, results) = search_outcome(&resp);
+        assert_eq!(mode, "keyword", "{query:?}: dead Ollama URL forces keyword");
+        assert_eq!(
+            results
+                .first()
+                .and_then(|v| v.get("id"))
+                .and_then(|i| i.as_i64()),
+            Some(m1),
+            "{query:?} must recall the sqlite-vec memory first: {resp}"
+        );
+    }
+
+    server.shutdown();
+}
+
+#[test]
 fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_found() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
@@ -360,6 +410,160 @@ fn memory_forget_deletes_then_search_and_list_omit_it_unknown_id_is_clean_not_fo
     let unknown_json: serde_json::Value =
         serde_json::from_str(&tool_text(&unknown_resp)).expect("forget returns JSON");
     assert_eq!(unknown_json["deleted"], serde_json::json!(false));
+
+    server.shutdown();
+}
+
+#[test]
+fn memory_update_with_an_unknown_field_is_invalid_params_over_stdio() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let store_resp = server.call_tool(
+        2,
+        "memory_store",
+        serde_json::json!({ "content": "original text", "type": "PATTERN" }),
+    );
+    let id: i64 = tool_text(&store_resp)
+        .trim()
+        .parse()
+        .expect("memory_store returns a numeric id");
+
+    // rmcp deserializes `arguments` straight into UpdateArgs, so an unknown
+    // or immutable key is refused before the handler runs (REVIEW WR-02),
+    // never a success with the member silently dropped. rmcp 1.8 reports an
+    // argument-deserialization failure (its invalid_params error prefixed
+    // "failed to deserialize parameters:") as a tool error result
+    // (`isError: true`) rather than a JSON-RPC error member, per the MCP rule
+    // that input-validation errors are tool execution errors the model can
+    // correct (rmcp router/tool.rs `into_tool_argument_error`).
+    for (request_id, arguments, field) in [
+        (
+            3,
+            serde_json::json!({ "id": id, "content": "changed", "type": "DECISION" }),
+            "type",
+        ),
+        (
+            4,
+            serde_json::json!({ "id": id, "content": "changed", "ttl_sec": 60 }),
+            "ttl_sec",
+        ),
+    ] {
+        let resp = server.call_tool(request_id, "memory_update", arguments);
+        assert!(
+            resp.get("error").is_none(),
+            "rmcp reports a bad argument as a tool error result: {resp}"
+        );
+        assert_eq!(
+            resp.pointer("/result/isError"),
+            Some(&serde_json::json!(true)),
+            "an unknown field must be a tool error, never a success: {resp}"
+        );
+        let message = tool_text(&resp);
+        assert!(
+            message.starts_with("failed to deserialize parameters:")
+                && message.contains("unknown field")
+                && message.contains(&format!("`{field}`")),
+            "the error names the field {field:?}: {resp}"
+        );
+    }
+
+    // Nothing was written: the memory still carries its original content and type.
+    let views = tool_views(&server.call_tool(5, "memory_list", serde_json::json!({})));
+    assert_eq!(views.len(), 1, "exactly one memory: {views:?}");
+    assert_eq!(views[0]["content"], "original text");
+    assert_eq!(views[0]["type"], "PATTERN");
+
+    server.shutdown();
+}
+
+/// REVIEW WR-04, user decision option-a (reject): `memory_list` with
+/// `expand_links` and no `limit` is invalid_params over stdio; with a limit,
+/// and without `expand_links`, the tool behaves exactly as before.
+#[test]
+fn memory_list_with_expand_links_requires_a_limit_over_stdio() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    server.initialize();
+
+    let mut store = |request_id: i64, content: &str| -> i64 {
+        let resp = server.call_tool(
+            request_id,
+            "memory_store",
+            serde_json::json!({ "content": content, "type": "DECISION" }),
+        );
+        tool_text(&resp)
+            .trim()
+            .parse()
+            .expect("memory_store returns a numeric id")
+    };
+    let a = store(2, "first linked decision");
+    let b = store(3, "second linked decision");
+
+    let link_resp = server.call_tool(
+        4,
+        "memory_link",
+        serde_json::json!({ "from_id": b, "to_id": a, "kind": "relates_to" }),
+    );
+    assert!(
+        link_resp.get("error").is_none()
+            && link_resp.pointer("/result/isError") != Some(&serde_json::json!(true)),
+        "memory_link must succeed: {link_resp}"
+    );
+
+    let resp = server.call_tool(
+        5,
+        "memory_list",
+        serde_json::json!({ "expand_links": true }),
+    );
+    // This is a JSON-RPC error member, NOT an `isError: true` tool result
+    // (unlike the memory_update unknown-field test above): rmcp 1.8 only turns
+    // invalid_params messages prefixed "failed to deserialize parameters:" into
+    // tool errors (router/tool.rs `into_tool_argument_error`), and this
+    // rejection is raised at the service seam after deserialization succeeded.
+    assert_eq!(
+        resp.pointer("/error/code"),
+        Some(&serde_json::json!(-32602)),
+        "an expanded list without a limit must be invalid_params: {resp}"
+    );
+    assert!(resp.get("result").is_none(), "no result member: {resp}");
+    let message = resp
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("limit is required when expand_links is true"),
+        "the error tells the caller to pass a limit: {resp}"
+    );
+
+    // The server is still alive, and expand_links with a limit is unchanged.
+    let views = tool_views(&server.call_tool(
+        6,
+        "memory_list",
+        serde_json::json!({ "expand_links": true, "limit": 10 }),
+    ));
+    let row_a = views
+        .iter()
+        .find(|v| v["id"] == serde_json::json!(a))
+        .unwrap_or_else(|| panic!("row {a} is listed: {views:?}"));
+    assert_eq!(
+        row_a["related"][0]["id"],
+        serde_json::json!(b),
+        "row {a} carries its neighbour: {row_a}"
+    );
+
+    // A list without expand_links and without a limit returns every row, no related.
+    let views = tool_views(&server.call_tool(7, "memory_list", serde_json::json!({})));
+    assert_eq!(views.len(), 2, "every row: {views:?}");
+    assert!(
+        views.iter().all(|v| v.get("related").is_none()),
+        "no related member without expand_links: {views:?}"
+    );
 
     server.shutdown();
 }

@@ -27,7 +27,7 @@ Full phase details: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md)
 - Decimal phases (3.1, 3.2): Urgent insertions (marked INSERTED)
 
 - [x] **Phase 3: API Hardening & Toolchain Spikes** - Out-of-bounds limit/ttl rejected as client errors and exact tag matching at the shared service seam, plus early Windows/musl cross-compile spikes answering the milestone's only feasibility unknown (completed 2026-07-12)
-- [ ] **Phase 4: Memory Update, Relations & Hybrid Search** - `memory_update` with same-transaction re-embed, flat typed links with cascade, migration 0003 hygiene, and decay-aware hybrid RRF as a parallel track
+- [x] **Phase 4: Memory Update, Relations & Hybrid Search** - `memory_update` with same-transaction re-embed, flat typed links with cascade, migration 0003 hygiene, and decay-aware hybrid RRF as a parallel track (completed 2026-10-23)
 - [ ] **Phase 5: Portable Export & Import** - Versioned JSONL export (link edges included, embeddings excluded) and idempotent cross-machine import with sweep-backfill re-embedding
 - [ ] **Phase 6: Distribution & v0.1.0 Release** - musl + Windows binaries on the spike-chosen toolchains and the checksummed v0.1.0 release with Homebrew update and behavioral-change release notes
 
@@ -67,23 +67,29 @@ Plans:
   4. Hybrid ranking stays decay-aware — a fresh memory outranks a stale one at equal fused rank — and access bumps apply only to post-truncation returned ids.
   5. Upgrading a real v0.0.1 database applies migration 0003 only after a pre-migration backup; shipped 0001/0002 SQL is provably unchanged (fixture divergence test against a v0.0.1 database), and a newer-schema DB met by an older binary yields a friendly error, not a crash.
 
-**Plans**: 4 plans
+**Plans**: 7/7 plans executed (4 executed + 3 gap closure)
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — Error foundation (Internal tier, NotFound removal, CR-01 dedup, MAX_KNN_K decouple) + migration 0003 with backup/fixture-freeze/too-new hygiene (STORE-05)
+- [x] 04-01-PLAN.md — Error foundation (Internal tier, NotFound removal, CR-01 dedup, MAX_KNN_K decouple) + migration 0003 with backup/fixture-freeze/too-new hygiene (STORE-05)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-02-PLAN.md — memory_update end-to-end: merge-patch semantics, same-tx FTS+vector re-embed, PATCH /api/memories/{id} (MCP-06)
+- [x] 04-02-PLAN.md — memory_update end-to-end: merge-patch semantics, same-tx FTS+vector re-embed, PATCH /api/memories/{id} (MCP-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 04-03-PLAN.md — memory_link/memory_unlink with cascade + opt-in 1-hop expansion on search/list (MCP-07)
+- [x] 04-03-PLAN.md — memory_link/memory_unlink with cascade + opt-in 1-hop expansion on search/list (MCP-07)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 04-04-PLAN.md — Decay-aware hybrid RRF fusion with keyword degrade, error taxonomy, and wire/docs (SEARCH-04, SEARCH-05)
+- [x] 04-04-PLAN.md — Decay-aware hybrid RRF fusion with keyword degrade, error taxonomy, and wire/docs (SEARCH-04, SEARCH-05)
+
+**Gap closure** *(from 04-VERIFICATION.md + 04-REVIEW.md; gap waves run in order)*
+
+- [x] 04-05-PLAN.md — Gap wave 1: forgiving keyword leg per user decision option-a (raw MATCH first, one sanitized OR-of-quoted-tokens retry, tokenless = empty leg, identical in both modes) + search-path error redaction (CR-01, CR-02, truths #14/#15, IN-04) (SEARCH-04)
+- [x] 04-06-PLAN.md — Gap wave 2: conditional sweep backfill closing the update/forget/sweep races + symmetric relates_to + IN-05/IN-06 docs (CR-03, WR-03) (MCP-06, MCP-07)
+- [x] 04-07-PLAN.md — Gap wave 3: deny_unknown_fields on update DTOs, uniform REST rejection bodies, race-safe verify-then-rename pre-migration backup + Upgrading docs (WR-02, IN-02, WR-01, IN-03, IN-01) (MCP-06, MCP-07, STORE-05)
 
 ### Phase 5: Portable Export & Import
 
@@ -124,6 +130,6 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 1. Core Memory Foundation | v1.0 | 3/3 | Complete | 2026-06-25 |
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
-| 4. Memory Update, Relations & Hybrid Search | v1.1 | 0/? | Not started | - |
+| 4. Memory Update, Relations & Hybrid Search | v1.1 | 7/7 | Complete    | 2026-10-23 |
 | 5. Portable Export & Import | v1.1 | 0/? | Not started | - |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |

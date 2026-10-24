@@ -10,13 +10,13 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Search (SEARCH)
 
-- [ ] **SEARCH-04**: With Ollama available, `memory_search` fuses the keyword and semantic legs via reciprocal-rank fusion (rank-based, k=60, duplicate ids sum contributions from both legs); results carry `search_mode: "hybrid"`. With Ollama unreachable, search degrades to keyword exactly as in v1.0 — the envelope shape is unchanged and existing `search_mode == "keyword"` checks keep working
-- [ ] **SEARCH-05**: Hybrid ranking remains decay-aware — a post-fusion decay blend so a fresh memory outranks a stale one at equal fused rank, and access bumps apply only to post-truncation returned ids
+- [x] **SEARCH-04**: With Ollama available, `memory_search` fuses the keyword and semantic legs via reciprocal-rank fusion (rank-based, k=60, duplicate ids sum contributions from both legs); results carry `search_mode: "hybrid"`. With Ollama unreachable, search degrades to keyword exactly as in v1.0 — the envelope shape is unchanged and existing `search_mode == "keyword"` checks keep working
+- [x] **SEARCH-05**: Hybrid ranking remains decay-aware — a post-fusion decay blend so a fresh memory outranks a stale one at equal fused rank, and access bumps apply only to post-truncation returned ids
 
 ### MCP Interface (MCP)
 
-- [ ] **MCP-06**: Agent can call `memory_update` to patch an existing memory (content, tags, scope, TTL) by id; a content update re-mirrors FTS and invalidates/re-embeds the vector **in the same writer transaction** (embed-outage falls back to `embedding_status = 0` + existing sweep backfill); unknown id returns the clean not-found shape
-- [ ] **MCP-07**: Agent can link two memories with a flat typed relation (`memory_link` / `memory_unlink`: from_id, to_id, kind) and search/list results can expand 1-hop related memories; forgetting a memory cascades its links (no orphan edges, no graph/entity model)
+- [x] **MCP-06**: Agent can call `memory_update` to patch an existing memory (content, tags, scope, TTL) by id; a content update re-mirrors FTS and invalidates/re-embeds the vector **in the same writer transaction** (embed-outage falls back to `embedding_status = 0` + existing sweep backfill); unknown id returns the clean not-found shape
+- [x] **MCP-07**: Agent can link two memories with a flat typed relation (`memory_link` / `memory_unlink`: from_id, to_id, kind) and search/list results can expand 1-hop related memories; forgetting a memory cascades its links (no orphan edges, no graph/entity model)
 
 ### REST & Input Hardening (API)
 
@@ -25,7 +25,7 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Storage & Migration Hygiene (STORE)
 
-- [ ] **STORE-05**: Schema migration 0003 (relations) ships with migration hygiene: shipped 0001/0002 SQL frozen (fixture divergence test against a v0.0.1 database), pre-migration backup, and a friendly error when a newer DB meets an older binary
+- [x] **STORE-05**: Schema migration 0003 (relations) ships with migration hygiene: shipped 0001/0002 SQL frozen (fixture divergence test against a v0.0.1 database), pre-migration backup, and a friendly error when a newer DB meets an older binary
 
 ### Portability (DIST / INTEROP)
 
@@ -64,11 +64,11 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 |-------------|-------|--------|
 | API-02 | Phase 3 | Complete |
 | API-03 | Phase 3 | Complete |
-| MCP-06 | Phase 4 | Pending |
-| MCP-07 | Phase 4 | Pending |
-| STORE-05 | Phase 4 | Pending |
-| SEARCH-04 | Phase 4 | Pending |
-| SEARCH-05 | Phase 4 | Pending |
+| MCP-06 | Phase 4 | Complete |
+| MCP-07 | Phase 4 | Complete |
+| STORE-05 | Phase 4 | Complete |
+| SEARCH-04 | Phase 4 | Complete |
+| SEARCH-05 | Phase 4 | Complete |
 | DIST-04 | Phase 5 | Pending |
 | INTEROP-02 | Phase 5 | Pending |
 | DIST-05 | Phase 6 | Pending |

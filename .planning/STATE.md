@@ -2,16 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
-status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-07-13T13:42:43.486Z"
-last_activity: 2026-10-09 -- Completed quick task 261009-hc1 (hosted release pipeline, closes #1)
+current_phase: 5
+current_phase_name: Portable Export & Import
+status: planning
+stopped_at: Phase 04 complete, ready to plan Phase 5
+last_updated: "2026-10-23T20:25:00.455Z"
+last_activity: 2026-10-23
+last_activity_desc: Phase 04 complete, transitioned to Phase 5
+state_head: 4441bdafab5d420a1fbcf3ba348c0589d72bdc11
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 25
+  completed_phases: 2
+  total_plans: 9
+  completed_plans: 9
 ---
 
 # Project State
@@ -21,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 04 — memory-update-relations-hybrid-search
+**Current focus:** Phase 04 — Memory Update, Relations & Hybrid Search
 
 ## Current Position
 
-Phase: 4
+Phase: 5 — Portable Export & Import
 Plan: Not started
-Status: Ready to execute
-Last activity: 2026-10-09 - Completed quick task 261009-hc1: hosted release pipeline with SLSA provenance (closes #1)
+Status: Ready to plan
+Last activity: 2026-10-23 - Completed quick task 261023-v6w: WR-04: reject memory_list expand_links without limit
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -36,7 +39,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
 **Velocity:**
 
-- Total plans completed: 13
+- Total plans completed: 17
 - Average duration: ~28 min
 - Total execution time: ~1.4 hours
 
@@ -47,6 +50,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | 1 | 3 | - | - |
 | 02 | 5 | - | - |
 | 03 | 2 | - | - |
+| 04 | 7 | - | - |
 
 **Recent Trend:**
 
@@ -61,6 +65,17 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 02 P05 | 8 min | 2 tasks | 6 files |
 | Phase 03 P01 | 12 min | 3 tasks | 11 files |
 | Phase 03 P02 | 30 min | 3 tasks | 2 files |
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 04 P01 | 9 min | 2 tasks | 13 files |
+| Phase 04 P02 | 10min | 2 tasks | 11 files |
+| Phase 04 P03 | 10 min | 2 tasks | 9 files |
+| Phase 04 P04 | 11 min | 2 tasks | 11 files |
+| Phase 04 P05 | 10 min | 3 tasks | 12 files |
+| Phase 04 P06 | 7 min | 3 tasks | 9 files |
+| Phase 04 P07 | 12 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -84,6 +99,30 @@ Recent decisions affecting current work:
 - [03-01]: import() validates ttl per draft through the shared helper — the store() bypass is closed structurally for Phase 5 JSONL import
 - [03-02]: Phase 6 toolchain verdict (D-11): all 4 spike legs GREEN in one dispatch — Windows = cargo-xwin 0.23.0 / x86_64-pc-windows-msvc (gnu mingw-w64 proven fallback); musl = zigbuild 0.23.0 + target-suffixed CFLAGS -Du_int*_t shim (both legs green, no DIST-05 blocker)
 - [03-02]: CI revived on GitHub-hosted ubuntu-latest, secretless contents: read (D-12/D-10, ecosystem D-02 exception) — supersedes inner CLAUDE.md 'never ubuntu-latest' for this public repo; release.yml runner decision stays with Phase 6
+- [Phase 04]: [04-01]: MemoryError::Internal(String) is the 500/internal_error tier for server faults (poisoned writer lock); MemoryError::NotFound and ApiError::NotFound deleted — not-found is data (Ok(false)/Ok(None)) only (WR-02)
+- [Phase 04]: [04-01]: Store::exists takes Option<&str> with NULL-safe 'source IS ?1' — source:None re-imports are idempotent (CR-01)
+- [Phase 04]: [04-01]: MAX_KNN_K = MAX_LIMIT * 4 (800) — candidate oversample cap, distinct from RRF k=60 (WR-01 partial; full filter-aware fix deferred)
+- [Phase 04]: [04-01]: SqliteStore::open order is probe user_version (before any PRAGMA, so a refused DB is byte-untouched) -> SchemaTooNew refusal -> pragmas -> sibling online backup {db}.backup-pre-{NNNN}-{YYYYMMDD} (one per target version, failure aborts) -> to_latest; LATEST_SCHEMA_VERSION=3 must be bumped with every new migration
+- [Phase 04]: [04-01]: tests/fixtures/v0.0.1.db is a committed binary fixture generated once from tag-identical 0001+0002 — never regenerate it; it is gitignored locally by *.db so stage with git add -f
+- [Phase 04]: 04-02: memory_update returns a dedicated UpdatedMemory (flattened MemoryView + embedding_status); MemoryView untouched so list/search envelopes stay byte-identical (D-10)
+- [Phase 04]: 04-02: an all-fields-absent patch is InvalidArgument, not a no-op; content null/empty rejected at the seam; TTL patches reuse validate_ttl (D-08)
+- [Phase 04]: 04-02: update is UPDATE-in-place (never delete+insert), folds the D-09 freshness bump and decay_score = 1.0 into the same statement, and swaps the vector in the same writer tx
+- [Phase 04]: 04-02: patch DTO fields carry skip_serializing_if so the MCP tool schema never advertises default: null (null means clear in a merge-patch)
+- [Phase 04]: 04-02: PATCH /api/memories/{id} maps every Json extractor rejection to 400 {error}; other REST handlers keep axum defaults
+- [Phase 04]: 04-03: Relations are flat directed edges (LinkKind relates_to|supersedes|caused_by, closed enum); duplicate link = idempotent Linked, self-link = InvalidArgument at the seam, missing endpoint = LinkOutcome::NotFound{missing_id} data (never an FK 500)
+- [Phase 04]: 04-03: forget() and sweep_expired() each carry an explicit orphan-edge DELETE beside the FK ON DELETE CASCADE, proven by pragma-less-connection tests
+- [Phase 04]: 04-03: expand_links attaches MemoryView.related (Option, skip_serializing_if) after truncation and after spawn_bump; MAX_EXPANDED_LINKS = 10 newest-first, snippet 160 chars; neighbors never bumped; flag-less envelope golden-tested byte-identical
+- [Phase 04]: 04-03: Incoming edges read natural reverse labels (superseded_by, caused); RelatedLink.direction is out|in; REST POST /api/links + DELETE /api/links/{from_id}/{to_id}/{kind} with 200/404 and 400 on any bad body/kind
+- [Phase 04]: 04-04: Hybrid search = RRF (k=60, 1-based ranks, duplicate ids sum, id tie-break) over two pure-relevance legs (KNN distance, bm25 ASC), each oversampled limit*4 capped at MAX_KNN_K; decay applied once, multiplicatively, post-fusion (SEARCH-04/05)
+- [Phase 04]: 04-04: SearchMode::Semantic removed; embedder-up searches report search_mode "hybrid", embedder-down stays "keyword" byte-identical to v1.0 (README behavioral change 3)
+- [Phase 04]: 04-04: Keyword-leg errors propagate first, so a malformed MATCH (incl. bare ?/,/' punctuation) is InvalidQuery/400 in hybrid as in keyword mode (T-04-15); follow-up candidate: sanitize natural-language queries for the keyword leg
+- [Phase 04]: 04-05: T-04-15 revised by user decision option-a (2026-10-23) — search runs the raw FTS5 MATCH first, then one sanitized retry (word tokens quoted and OR-joined) on any FTS5 query-parse error, including the step-time `no such column` class from hyphens/colons; a tokenless query is an empty keyword leg (hybrid answers semantic-only, keyword mode returns empty); identical in both modes, so search never returns InvalidQuery; every search-path internal error is redacted to SEARCH_STORAGE_FAILURE (T-04-19). Supersedes the 04-04 decision that a malformed MATCH is InvalidQuery/400 in hybrid mode.
+- [Phase 04]: 04-06: sweep backfill writes a vector only through a guarded claim (embedding_status = 0 AND content = embedded text) run first in the writer tx; Store::insert_embedding returns bool. Closes REVIEW CR-03, across processes too.
+- [Phase 04]: 04-06: relates_to stored canonically as (min id, max id) and unlinked from either end; supersedes/caused_by stay directed (D-03). Storage-only: MCP/REST responses echo request ids; NotFound names the request's from_id first. No migration (REVIEW WR-03).
+- [Phase 04]: 04-06: WR-04 resolved by user decision option-a (reject, 2026-10-23, quick task 261023-v6w) — memory_list with expand_links and no limit is a client error (MemoryError::InvalidArgument → REST 400 {error} / MCP invalid_params) whose message tells the caller to pass a limit; expand_links with a limit, a list without expand_links, and search (already bounded) are unchanged, so the 200 x 10 expansion bound now covers every expanded response. Supersedes the 04-06 doc-only deferral; closed, nothing left for Phase 5/6.
+- [Phase 04]: 04-07: deny_unknown_fields added to UpdateArgs/UpdateBody only (new v0.1.0 surfaces, REVIEW WR-02); the [03-01] decision stands for the v0.0.1 DTOs, so the v0.1.0 release-notes delta for existing surfaces is unchanged. Over MCP, rmcp 1.8 reports the rejection as a tool error result (isError: true, "failed to deserialize parameters: unknown field ..."), not a JSON-RPC -32602; REST is a 400 {"error"}.
+- [Phase 04]: 04-07: backup temp is pid-qualified and a process-wide BACKUP_LOCK serializes backups within one process, so same-process openers never share a temp; prune tolerates NotFound from a concurrent opener
+- [Phase 04]: 04-07: WR-01 closed with verify-then-rename + tolerate-by-re-probe (no file lock, no new dep); cross-process exclusive lock stays deferred
 
 ### Pending Todos
 
@@ -108,6 +147,7 @@ Watch items:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261009-hc1 | Release pipeline on GitHub-hosted runners with SLSA provenance, semver-only trigger, all actions SHA-pinned (closes #1); resolves the release-runner decision Phase 3 D-12 deferred to Phase 6 | 2026-10-09 | 9810e31 | [261009-hc1-move-release-yml-to-github-hosted-runner](./quick/261009-hc1-move-release-yml-to-github-hosted-runner/) |
+| 261023-v6w | WR-04: reject `memory_list` with `expand_links` and no `limit` as a client error (MCP `invalid_params`, REST 400); user decision option (a) | 2026-10-23 | 969e891 | [261023-v6w-wr-04-reject-memory-list-expand-links-wi](./quick/261023-v6w-wr-04-reject-memory-list-expand-links-wi/) |
 
 ## Deferred Items
 
@@ -124,9 +164,9 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-07-12T20:49:51.528Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-memory-update-relations-hybrid-search/04-CONTEXT.md
+Last session: 2026-10-23T20:12:50.720Z
+Stopped at: Phase 04 complete, ready to plan Phase 5
+Resume file: None
 
 ## Operator Next Steps
 

@@ -107,8 +107,8 @@ async fn semantic_search_finds_meaning_with_no_shared_keywords() {
 
     assert_eq!(
         outcome.search_mode,
-        SearchMode::Semantic,
-        "with a working embedder the search mode must be semantic"
+        SearchMode::Hybrid,
+        "with a working embedder the search mode must be hybrid (SEARCH-04)"
     );
     assert!(
         !outcome.results.is_empty(),
@@ -169,7 +169,7 @@ async fn at_equal_vector_distance_recent_memory_outranks_aged() {
         .await
         .expect("semantic search");
 
-    assert_eq!(outcome.search_mode, SearchMode::Semantic);
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
     assert_eq!(outcome.results.len(), 2, "both memories are candidates");
     assert_eq!(
         outcome.results[0].id, new_id,
@@ -285,7 +285,7 @@ async fn tag_filter_is_exact_on_knn_path() {
         .search(search(Some("rust")))
         .await
         .expect("tag-filtered semantic search");
-    assert_eq!(outcome.search_mode, SearchMode::Semantic);
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
     assert_eq!(
         outcome.results.len(),
         1,
@@ -353,7 +353,7 @@ async fn live_ollama_semantic_recall_without_shared_keywords() {
         .await
         .expect("live semantic search");
 
-    assert_eq!(outcome.search_mode, SearchMode::Semantic);
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
     assert_eq!(
         outcome.results.first().map(|v| v.id),
         Some(rls_id),

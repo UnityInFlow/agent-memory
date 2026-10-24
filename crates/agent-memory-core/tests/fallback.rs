@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::{MemoryError, MemoryType, NewMemory};
+use agent_memory_core::domain::{MemoryType, NewMemory};
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
 use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs, SearchMode};
 use agent_memory_core::store::sqlite::SqliteStore;
@@ -194,10 +194,11 @@ async fn keyword_fallback_tag_filter_is_exact() {
 }
 
 #[tokio::test]
-async fn malformed_fts5_query_maps_to_invalid_query_in_keyword_mode() {
-    // Gap 2 / WR-05 regression: a query FTS5 cannot parse (a lone double-quote)
-    // is CLIENT input, not an internal failure — the store seam must surface it
-    // as MemoryError::InvalidQuery, never MemoryError::Sqlite (API-01).
+async fn a_lone_double_quote_is_an_empty_keyword_answer_never_an_error() {
+    // User decision option-a (2026-10-23) reverses the Gap 2 / WR-05 400: a
+    // query FTS5 cannot parse (a lone double-quote) is retried once with its
+    // word tokens, and a query with NO word tokens is simply no keyword
+    // matches. Keyword mode answers it with an empty set, never an error.
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
     let clock = Arc::new(TestClock::new(1_000));
@@ -211,17 +212,19 @@ async fn malformed_fts5_query_maps_to_invalid_query_in_keyword_mode() {
         .await
         .expect("store succeeds while embedder is down");
 
-    let err = service
+    let outcome = service
         .search(SearchArgs {
             query: "\"".to_string(),
             ..Default::default()
         })
         .await
-        .expect_err("a lone double-quote is not a valid FTS5 match expression");
+        .expect("a lone double-quote must be answered, never rejected");
 
+    assert_eq!(outcome.search_mode, SearchMode::Keyword);
     assert!(
-        matches!(err, MemoryError::InvalidQuery(_)),
-        "malformed FTS5 input must map to InvalidQuery, got: {err:?}"
+        outcome.results.is_empty(),
+        "a tokenless query has no keyword matches, got: {:?}",
+        outcome.results
     );
 }
 

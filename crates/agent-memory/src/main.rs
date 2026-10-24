@@ -7,6 +7,7 @@
 mod config;
 mod mcp;
 mod rest;
+mod serde_util;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

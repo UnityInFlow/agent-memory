@@ -198,24 +198,31 @@ async fn rest_end_to_end_store_list_search_forget_health() {
         "search results must contain the stored id {id}, got: {body}"
     );
 
-    // POST /api/search with a malformed FTS5 query (a lone double-quote) in
-    // keyword mode → 400 with an error body — CLIENT input, never a 500.
-    let resp = client
-        .post(format!("{base}/api/search"))
-        .json(&serde_json::json!({ "query": "\"" }))
-        .send()
-        .await
-        .expect("malformed-query search request");
-    assert_eq!(
-        resp.status(),
-        400,
-        "malformed FTS5 query must map to 400, never 500"
-    );
-    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
-    assert!(
-        body.get("error").and_then(|e| e.as_str()).is_some(),
-        "400 body must carry an error field, got: {body}"
-    );
+    // POST /api/search with queries FTS5 cannot parse, in keyword mode (user
+    // decision option-a): a lone double-quote (no word tokens → empty answer)
+    // and a hyphenated term (read by FTS5 as a column filter → retried with
+    // its words) are both 200 with a results array — never a 400, never a
+    // 500, and never SQLite text in the response.
+    for input in ["\"", "sqlite-vec"] {
+        let resp = client
+            .post(format!("{base}/api/search"))
+            .json(&serde_json::json!({ "query": input }))
+            .send()
+            .await
+            .expect("unparseable-query search request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "{input:?} must be answered in keyword mode, never rejected"
+        );
+        let text = resp.text().await.expect("search body reads");
+        assert!(!text.contains("sqlite error"), "{input:?}: {text}");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("200 body is JSON");
+        assert!(
+            body.get("results").and_then(|r| r.as_array()).is_some(),
+            "{input:?}: 200 body must carry a results array, got: {body}"
+        );
+    }
 
     // POST /api/search with limit 0 → 400 carrying the valid range (API-02) —
     // realism-only proof over real HTTP; the coverage-bearing tests are the
@@ -300,6 +307,97 @@ async fn rest_end_to_end_store_list_search_forget_health() {
         Some("ok"),
         "health must report status ok, got: {body}"
     );
+}
+
+/// REVIEW WR-04, user decision option-a (reject): `GET /api/memories?expand_links=true`
+/// without a `limit` is a 400 over real HTTP; with a limit, and without
+/// `expand_links`, the route behaves exactly as before.
+#[tokio::test]
+async fn rest_list_with_expand_links_requires_a_limit() {
+    let server = RestServer::spawn();
+    let base = server.base_url();
+    let client = reqwest::Client::new();
+
+    let mut ids = Vec::new();
+    for content in ["first linked decision", "second linked decision"] {
+        let resp = client
+            .post(format!("{base}/api/memories"))
+            .json(&serde_json::json!({ "content": content, "type": "DECISION" }))
+            .send()
+            .await
+            .expect("store request");
+        assert_eq!(resp.status(), 201, "store must return 201 Created");
+        let body: serde_json::Value = resp.json().await.expect("store body is JSON");
+        let id = body
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| panic!("store body must carry a numeric id, got: {body}"));
+        ids.push(id);
+    }
+    let (a, b) = (ids[0], ids[1]);
+
+    let resp = client
+        .post(format!("{base}/api/links"))
+        .json(&serde_json::json!({ "from_id": a, "to_id": b, "kind": "relates_to" }))
+        .send()
+        .await
+        .expect("link request");
+    assert_eq!(resp.status(), 200, "link must return 200");
+
+    // expand_links without a limit → 400 naming the rule.
+    let resp = client
+        .get(format!("{base}/api/memories?expand_links=true"))
+        .send()
+        .await
+        .expect("expanded list without a limit");
+    assert_eq!(
+        resp.status(),
+        400,
+        "expand_links without a limit must be a 400"
+    );
+    let body: serde_json::Value = resp.json().await.expect("400 body is JSON");
+    assert!(
+        body.get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("limit is required when expand_links is true")),
+        "400 body must tell the caller to pass a limit, got: {body}"
+    );
+
+    // expand_links with a limit → 200, the neighbour is attached.
+    let resp = client
+        .get(format!("{base}/api/memories?expand_links=true&limit=10"))
+        .send()
+        .await
+        .expect("expanded list with a limit");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("list body is JSON");
+    let arr = body.as_array().expect("list body is a JSON array");
+    let row_a = arr
+        .iter()
+        .find(|v| v.get("id").and_then(|i| i.as_i64()) == Some(a))
+        .unwrap_or_else(|| panic!("row {a} is listed, got: {body}"));
+    assert_eq!(
+        row_a.pointer("/related/0/id").and_then(|i| i.as_i64()),
+        Some(b),
+        "row {a} carries its neighbour, got: {row_a}"
+    );
+
+    // No expand_links (absent or false) and no limit → every row, no related.
+    for query in ["", "?expand_links=false"] {
+        let resp = client
+            .get(format!("{base}/api/memories{query}"))
+            .send()
+            .await
+            .expect("plain list");
+        assert_eq!(resp.status(), 200, "plain list {query:?} must be 200");
+        let body: serde_json::Value = resp.json().await.expect("list body is JSON");
+        let arr = body.as_array().expect("list body is a JSON array");
+        assert_eq!(arr.len(), 2, "every row for {query:?}, got: {body}");
+        assert!(
+            arr.iter().all(|v| v.get("related").is_none()),
+            "no related member for {query:?}, got: {body}"
+        );
+    }
 }
 
 /// Bind guard: a non-loopback `--addr` without `--allow-remote` must be
