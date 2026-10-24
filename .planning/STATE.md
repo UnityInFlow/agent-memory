@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 Phase: 5 — Portable Export & Import
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-23 — Phase 04 complete, transitioned to Phase 5
+Last activity: 2026-10-23 - Completed quick task 261023-v6w: WR-04: reject memory_list expand_links without limit
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -119,7 +119,7 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-05: T-04-15 revised by user decision option-a (2026-10-23) — search runs the raw FTS5 MATCH first, then one sanitized retry (word tokens quoted and OR-joined) on any FTS5 query-parse error, including the step-time `no such column` class from hyphens/colons; a tokenless query is an empty keyword leg (hybrid answers semantic-only, keyword mode returns empty); identical in both modes, so search never returns InvalidQuery; every search-path internal error is redacted to SEARCH_STORAGE_FAILURE (T-04-19). Supersedes the 04-04 decision that a malformed MATCH is InvalidQuery/400 in hybrid mode.
 - [Phase 04]: 04-06: sweep backfill writes a vector only through a guarded claim (embedding_status = 0 AND content = embedded text) run first in the writer tx; Store::insert_embedding returns bool. Closes REVIEW CR-03, across processes too.
 - [Phase 04]: 04-06: relates_to stored canonically as (min id, max id) and unlinked from either end; supersedes/caused_by stay directed (D-03). Storage-only: MCP/REST responses echo request ids; NotFound names the request's from_id first. No migration (REVIEW WR-03).
-- [Phase 04]: 04-06: WR-04 documented only: the 200 x 10 expansion bound covers search and list-with-limit; unlimited expanded memory_list returns every row. Behaviour choice (reject / default limit / unbounded) is an open API-contract question for Phase 5/6.
+- [Phase 04]: 04-06: WR-04 resolved by user decision option-a (reject, 2026-10-23, quick task 261023-v6w) — memory_list with expand_links and no limit is a client error (MemoryError::InvalidArgument → REST 400 {error} / MCP invalid_params) whose message tells the caller to pass a limit; expand_links with a limit, a list without expand_links, and search (already bounded) are unchanged, so the 200 x 10 expansion bound now covers every expanded response. Supersedes the 04-06 doc-only deferral; closed, nothing left for Phase 5/6.
 - [Phase 04]: 04-07: deny_unknown_fields added to UpdateArgs/UpdateBody only (new v0.1.0 surfaces, REVIEW WR-02); the [03-01] decision stands for the v0.0.1 DTOs, so the v0.1.0 release-notes delta for existing surfaces is unchanged. Over MCP, rmcp 1.8 reports the rejection as a tool error result (isError: true, "failed to deserialize parameters: unknown field ..."), not a JSON-RPC -32602; REST is a 400 {"error"}.
 - [Phase 04]: 04-07: backup temp is pid-qualified and a process-wide BACKUP_LOCK serializes backups within one process, so same-process openers never share a temp; prune tolerates NotFound from a concurrent opener
 - [Phase 04]: 04-07: WR-01 closed with verify-then-rename + tolerate-by-re-probe (no file lock, no new dep); cross-process exclusive lock stays deferred
@@ -147,6 +147,7 @@ Watch items:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261009-hc1 | Release pipeline on GitHub-hosted runners with SLSA provenance, semver-only trigger, all actions SHA-pinned (closes #1); resolves the release-runner decision Phase 3 D-12 deferred to Phase 6 | 2026-10-09 | 9810e31 | [261009-hc1-move-release-yml-to-github-hosted-runner](./quick/261009-hc1-move-release-yml-to-github-hosted-runner/) |
+| 261023-v6w | WR-04: reject `memory_list` with `expand_links` and no `limit` as a client error (MCP `invalid_params`, REST 400); user decision option (a) | 2026-10-23 | 969e891 | [261023-v6w-wr-04-reject-memory-list-expand-links-wi](./quick/261023-v6w-wr-04-reject-memory-list-expand-links-wi/) |
 
 ## Deferred Items
 
