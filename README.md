@@ -76,6 +76,9 @@ agent-memory serve
 # Choose the database file (default: your OS data dir; honors $AGENT_MEMORY_DB).
 agent-memory --db /path/to/memory.db serve
 AGENT_MEMORY_DB=/path/to/memory.db agent-memory serve
+
+# Move the memory elsewhere.
+agent-memory export --output memories.jsonl   # portable JSONL export (see Export & import)
 ```
 
 The server speaks JSON-RPC over **stdout**; all logs go to **stderr**, so stdout
@@ -542,6 +545,200 @@ scope (the project directory containing `.planning` by default; override with
 `--scope`). Re-running the same import is a **no-op**: unchanged items are
 deduplicated on the exact (source, type, content) key and reported as skipped.
 
+## Export & import
+
+Move an agent's whole memory to another machine — or keep a copy that outlives
+a change of embedding model — with one portable JSONL file. No cloud, no
+account:
+
+```bash
+agent-memory export > memories.jsonl                 # to stdout
+agent-memory export --output memories.jsonl          # to a private file (see below)
+agent-memory import --from jsonl memories.jsonl      # on the other machine
+```
+
+Both are **CLI subcommands only** — there is no MCP tool and no REST route for
+either. A file-path read on the unauthenticated REST daemon would be an
+arbitrary-file-read primitive, and the whole corpus must never cross the MCP
+server's JSON-RPC stdout channel. The validation and error contract still live
+in the core library, so any later transport would inherit them unchanged.
+`--scope` is not accepted with `--from jsonl`: every memory in the file carries
+its own scope.
+
+### What travels
+
+A header line, then one record per memory, then one record per link. Every
+row in the database is exported — no scope or type filter, and expired rows are
+included (the importer decides what to skip).
+
+**What does not travel:** embedding vectors, `decay_score`, `base_weight` and
+`embedding_status`. They are derived data: the score is recomputed on read, the
+weight is a function of `type`, and vectors are pinned to the exporting
+machine's model — so they are re-created locally on import, against the
+importing database's own model pin (see *Embeddings* below).
+
+### Format v1
+
+The file is JSON Lines: one JSON object per line, UTF-8, `\n`-terminated. Each
+object carries a `record` tag, and the tag set is closed (`header`, `memory`,
+`link`). Fields appear in the wire order below, so two exports of an unchanged
+database under the same clock are byte-identical. The authoritative definition
+is the `export` module of `agent-memory-core`; this section restates it.
+
+**Header** (line 1, mandatory):
+
+| field | type | meaning |
+|---|---|---|
+| `record` | `"header"` | tag |
+| `format` | string | always `agent-memory-export` |
+| `version` | integer | `1` for files this version writes |
+| `exported_at` | integer | unix seconds at export time |
+| `embedding_model` | string | the source database's embedding-model pin |
+| `embedding_dim` | integer | the source database's embedding-dimension pin |
+| `schema_version` | integer | the source database's schema version |
+| `agent_memory_version` | string | the exporting binary's version |
+| `exported_rows` | integer | number of `memory` records that follow |
+| `exported_links` | integer | number of `link` records that follow |
+
+**Memory** (one per row):
+
+| field | type | meaning |
+|---|---|---|
+| `record` | `"memory"` | tag |
+| `key` | integer | the source row id, used **only** as an export-local key that `link` records refer to — it never becomes an id on import |
+| `type` | string | `DECISION`, `PATTERN`, `ERROR`, `TODO`, `ARCHITECTURE` or `CONSTRAINT` |
+| `content` | string | the memory text, verbatim |
+| `tags` | array of strings | verbatim |
+| `source` | string or `null` | provenance, verbatim |
+| `scope` | string or `null` | verbatim |
+| `created_at` | integer | unix seconds; preserved on import |
+| `last_accessed` | integer | unix seconds; refreshed to import time on import |
+| `access_count` | integer | preserved on import (provenance only) |
+| `expires_at` | integer or `null` | absolute unix seconds; preserved on import |
+
+**Link** (one per relation edge, after all memories):
+
+| field | type | meaning |
+|---|---|---|
+| `record` | `"link"` | tag |
+| `from` | integer | `key` of the source memory |
+| `to` | integer | `key` of the target memory |
+| `kind` | string | `relates_to`, `supersedes` or `caused_by` |
+| `created_at` | integer | unix seconds; preserved on import |
+
+Memories are written in ascending `key` order and links ordered by
+`(from, to, kind)`. `relates_to` endpoints appear exactly as stored — smaller
+key first; directed kinds keep the direction they were given. Optional fields
+(`source`, `scope`, `expires_at`) are always written explicitly as `null`.
+
+### The reader is strict
+
+The `gsd-state` importer is tolerant, because a `STATE.md` is a human-edited
+file. A JSONL export is agent-memory's **own** contract, so any defect means a
+corrupted or hand-edited file — and a half-restored corpus is worse than a
+clear refusal. The whole file is validated first; **any** defect rejects **all**
+of it, and nothing is written (the target database is not even opened):
+
+- a missing or invalid header, a `format` other than `agent-memory-export`, a
+  `version` that is not a positive integer, a second header;
+- a line that is not a JSON object, an unknown `record` tag, an unknown field
+  (a typo, or a field from a newer format), a wrong field type (`"1"` is not an
+  integer);
+- an invalid `type` or `kind`, empty content, a duplicate `key`, a self-link, a
+  link to a `key` that does not appear in the file;
+- a record count that does not match the header's `exported_rows` /
+  `exported_links`.
+
+The message names the 1-based line, for example
+`invalid argument: line 42: unknown variant `memo`, expected one of `header`, `memory`, `link``.
+A hand-written file may omit an optional field (`source`, `scope`,
+`expires_at`), which reads as `null`; expired rows are not malformed (see
+*Timestamps*).
+
+**Version policy.** A file whose `version` is greater than 1 is refused with
+`file is format version N but this binary reads up to version 1 — upgrade agent-memory`.
+An older binary never silently reads a newer format.
+
+### Idempotent, and safe on a non-empty database
+
+Import works into an empty or an already populated database. Each memory is
+deduplicated on the exact `(source, type, content)` key, with `source` kept
+verbatim — so re-running the same import is a **no-op** reported as skipped
+duplicates, and two source rows identical on that key collapse into one
+(counted as a duplicate). Links are remapped through the file's own keys to
+the target database's ids: a pre-existing row never gains an edge it did not
+have, even when its id happens to equal a `key` in the file.
+
+### Timestamps
+
+| column | on import |
+|---|---|
+| `created_at` | preserved (provenance) |
+| `expires_at` | preserved; a row already expired at import time (`expires_at <= now`) is **skipped and counted**, never inserted |
+| `last_accessed` | **refreshed to import time**, so restored memories start decay-fresh instead of ranking as months-stale |
+| `access_count` | preserved (provenance only — it does not affect ranking) |
+| link `created_at` | preserved (edge recency orders relation expansion) |
+
+If the header's `exported_at` is more than an hour ahead of the local clock, a
+clock-skew warning is logged and the import continues.
+
+### Embeddings
+
+The import never contacts Ollama. Every imported row lands **pending
+embedding**, and the existing lifecycle sweep re-embeds it locally against the
+importing database's model pin — 128 rows per tick, the first tick at
+`serve`/`serve-rest` start and then hourly. Until that backfill catches up, a
+large restore is keyword-searchable only; nothing is lost, and vectors from two
+different models are never mixed in one database.
+
+### The report
+
+A successful import prints two lines on stdout:
+
+```text
+imported: 42, skipped duplicates: 3, skipped expired: 1, links imported: 17, links skipped duplicates: 0, links dropped: 2
+42 rows pending embedding — the sweep backfills them on the next serve/serve-rest start (128 per tick)
+```
+
+| count | meaning |
+|---|---|
+| `imported` | memories inserted |
+| `skipped duplicates` | memories already present on the `(source, type, content)` key |
+| `skipped expired` | memories whose `expires_at` had already passed |
+| `links imported` | edges created |
+| `links skipped duplicates` | edges that already existed between the same two rows |
+| `links dropped` | edges whose endpoint was skipped as expired — not an error |
+
+`export` reports `exported N memories and M links` on **stderr**, because
+stdout may be the file.
+
+### `--output` is private and atomic
+
+`export --output PATH` never writes PATH directly. It creates
+`PATH.export-tmp-<pid>` in PATH's own directory with mode `0600` on Unix — the
+corpus is sensitive, and the mode is applied at creation, so there is no
+world-readable instant — streams into it, syncs, and renames it over PATH in
+one step. An existing PATH is replaced; an interrupted export never leaves a
+partial PATH behind. On Windows the file follows its directory's permissions
+(the Windows ACL story ships with the Windows binaries).
+
+Without `--output` the file goes to stdout — handy for piping, but a terminal
+scrollback or a shell log may keep a copy.
+
+### Backup vs export
+
+For a same-machine, full-fidelity copy — vectors included — stop every
+agent-memory process and use SQLite's own backup:
+
+```bash
+sqlite3 memory.db "VACUUM INTO 'memory-backup.db'"
+```
+
+or keep the automatic pre-migration backup described under *Upgrading*. A raw
+database copy pins the schema version and the embedding model, so it is a
+backup, not an interchange format. Use `export` when the memory must move
+machines or survive a change of embedding model.
+
 ## Lifecycle: TTL & decay
 
 A background task sweeps on an interval while the server runs:
@@ -554,7 +751,8 @@ A background task sweeps on an interval while the server runs:
    embedded in batches once it comes back. A memory that is edited or deleted
    while its backfill is in flight is never overwritten with a vector of its
    old text: that write is skipped, and the memory's current content is
-   embedded on a later sweep (or by the edit itself, when Ollama is up).
+   embedded on a later sweep (or by the edit itself, when Ollama is up). Rows
+   restored by `agent-memory import --from jsonl` take this path too.
 
 **Decay never deletes.** A memory with no TTL stays retrievable forever, however
 low its decay score falls — it simply ranks lower. Removal happens only via TTL or
