@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 5
 current_phase_name: Portable Export & Import
 status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-10-25T12:00:53.845Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-10-25T12:22:23.856Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 5 execution started
-state_head: cffe7a2b9765c4bf03a3da469bf2152d342267bb
+state_head: c7bc811eb9ca42257f88d70416e745aeee7f8fa6
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 13
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 5 (Portable Export & Import) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 5 execution started
 
@@ -78,6 +78,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P07 | 12 min | 3 tasks | 7 files |
 | Phase 05 P01 | 14 min | 3 tasks | 10 files |
 | Phase 05 P02 | 13 min | 2 tasks | 8 files |
+| Phase 05 P03 | 16min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,9 @@ Recent decisions affecting current work:
 - [Phase 5]: [Phase 05-02]: Format v1 frozen in export.rs as one strict tagged Record enum (record first, declaration order, deny_unknown_fields; header carries exported_rows/exported_links); wire order golden-tested; D-03 one-way rating recorded as pre-approved
 - [Phase 5]: [Phase 05-02]: Store::export_rows streams every row from ONE pooled connection + ONE read transaction (rusqlite unchecked_transaction) — meta pin, counts, memories ORDER BY id, links ORDER BY from_id,to_id,kind — via a visitor, never a Vec; MemoryService::export flushes inside spawn_blocking and redacts with op export (tenth op string)
 - [Phase 5]: [Phase 05-02]: Research correction: stdout export sink is BufWriter::new(std::io::stdout()) — StdoutLock is !Send and cannot be a Box<dyn Write + Send>; --output publishes via export_file::PendingExport ({target}.export-tmp-{pid} beside the target, create_new + 0600, sync_all then rename, one abort covers every failure)
+- [Phase 5]: 05-03: jsonl importer is add-alongside beside gsd-state — two parser modules, two tolerance policies (strict vs tolerant), shared seam/dedup/writer lane; a third format forces an ImportSource enum
+- [Phase 5]: 05-03: D-11 messages — HeaderProbe format/version are Option (non-header line 1 → 'first record must be the header'), serde's ' at line 1 column N' suffix stripped, InvalidArgument payload lifted before the 'line N:' prefix
+- [Phase 5]: 05-03: import_jsonl runs passes 2+3 in ONE spawn_blocking hop with per-record writer transactions; parse_jsonl is the all-or-nothing gate; the jsonl path never calls the embedder
 
 ### Pending Todos
 
@@ -172,8 +176,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-25T12:00:53.754Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-10-25T12:22:23.769Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
