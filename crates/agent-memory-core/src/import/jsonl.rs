@@ -561,84 +561,44 @@ mod tests {
         let string_tags = MEM1.replace("\"tags\":[]", "\"tags\":\"x\"");
         let float_expiry = MEM1.replace("\"expires_at\":null", "\"expires_at\":1.5");
 
+        let hdr = |body: &str| format!("{{\"record\":\"header\",{body}}}\n");
+        let fmt_x = hdr(r#""format":"x","version":1"#);
+        let no_fmt = hdr(r#""version":1"#);
+        let v0 = hdr(r#""format":"agent-memory-export","version":0"#);
+        let v_str = hdr(r#""format":"agent-memory-export","version":"1""#);
+        let v_frac = hdr(r#""format":"agent-memory-export","version":1.5"#);
+        let v2 = hdr(r#""format":"agent-memory-export","version":2,"later":1"#);
+        let v1_short = hdr(r#""format":"agent-memory-export","version":1"#);
+        let memo = r#"{"record":"memo","key":1}"#;
+
+        // One case per line on purpose: the table IS the D-11 contract, and a
+        // reader should be able to scan name / input / expected prefix across.
+        #[rustfmt::skip]
         let cases: Vec<(&str, String, &str)> = vec![
             ("no header", file(&[MEM1]), "line 1: first record must be the header"),
-            (
-                "not json at all",
-                "garbage\n".to_string(),
-                "line 1: missing or invalid header",
-            ),
-            (
-                "bad format",
-                "{\"record\":\"header\",\"format\":\"x\",\"version\":1}\n".to_string(),
-                "line 1: format must be",
-            ),
-            (
-                "missing format",
-                "{\"record\":\"header\",\"version\":1}\n".to_string(),
-                "line 1: format must be 'agent-memory-export' (missing)",
-            ),
-            (
-                "version 0",
-                "{\"record\":\"header\",\"format\":\"agent-memory-export\",\"version\":0}\n"
-                    .to_string(),
-                "line 1: version must be >= 1",
-            ),
-            (
-                "string version",
-                "{\"record\":\"header\",\"format\":\"agent-memory-export\",\"version\":\"1\"}\n"
-                    .to_string(),
-                "line 1: version must be a positive integer",
-            ),
-            (
-                "fractional version",
-                "{\"record\":\"header\",\"format\":\"agent-memory-export\",\"version\":1.5}\n"
-                    .to_string(),
-                "line 1: version must be a positive integer (got 1.5)",
-            ),
-            (
-                "version 2 + unknown field",
-                "{\"record\":\"header\",\"format\":\"agent-memory-export\",\"version\":2,\"later\":1}\n"
-                    .to_string(),
-                "upgrade agent-memory",
-            ),
-            (
-                "header missing a required field",
-                "{\"record\":\"header\",\"format\":\"agent-memory-export\",\"version\":1}\n"
-                    .to_string(),
-                "line 1: missing field",
-            ),
+            ("not json at all", "garbage\n".to_string(), "line 1: missing or invalid header"),
+            ("bad format", fmt_x, "line 1: format must be 'agent-memory-export' (got 'x')"),
+            ("missing format", no_fmt, "line 1: format must be 'agent-memory-export' (missing)"),
+            ("version 0", v0, "line 1: version must be >= 1 (got 0)"),
+            ("string version", v_str, "line 1: version must be a positive integer (got \"1\")"),
+            ("fractional version", v_frac, "line 1: version must be a positive integer (got 1.5)"),
+            ("version 2 + unknown field", v2, "upgrade agent-memory"),
+            ("header missing a required field", v1_short, "line 1: missing field"),
             ("not an object", file(&[&h10, "[1,2]"]), "line 2: expected a JSON object"),
             ("blank line", file(&[&h10, ""]), "line 2: expected a JSON object"),
-            (
-                "unknown record",
-                file(&[&h10, r#"{"record":"memo","key":1}"#]),
-                "line 2: unknown variant `memo`",
-            ),
+            ("unknown record", file(&[&h10, memo]), "line 2: unknown variant `memo`"),
             ("unknown field", file(&[&h10, &unknown_field]), "line 2: unknown field `bogus`"),
             ("string key", file(&[&h10, &string_key]), "line 2: invalid type: string \"1\""),
             ("bad type", file(&[&h10, &bad_type]), "line 2: invalid memory type 'MEMO'"),
-            (
-                "blank content",
-                file(&[&h10, &blank_content]),
-                "line 2: content must be a non-empty string",
-            ),
+            ("blank content", file(&[&h10, &blank_content]), "line 2: content must be a non-empty string"),
             ("tags not an array", file(&[&h10, &string_tags]), "line 2: invalid type"),
             ("fractional expires_at", file(&[&h10, &float_expiry]), "line 2: invalid type"),
             ("bad kind", file(&[&h11, MEM1, bad_kind]), "line 3: kind must be one of"),
             ("self link", file(&[&h11, MEM1, self_link]), "line 3: from_id and to_id must differ"),
             ("dangling key", file(&[&h11, MEM1, dangling]), "line 3: link key 9 does not appear in the file"),
             ("duplicate key", file(&[&h20, MEM1, MEM1]), "line 3: duplicate memory key 1"),
-            (
-                "declared count mismatch",
-                file(&[&h50, MEM1]),
-                "line 2: file declares 5 memory records but contains 1",
-            ),
-            (
-                "declared link count mismatch",
-                file(&[&h11, MEM1]),
-                "line 2: file declares 1 link records but contains 0",
-            ),
+            ("count mismatch", file(&[&h50, MEM1]), "line 2: file declares 5 memory records but contains 1"),
+            ("link count mismatch", file(&[&h11, MEM1]), "line 2: file declares 1 link records but contains 0"),
             ("duplicate header", file(&[&h00, &h00]), "line 2: duplicate header"),
         ];
         assert!(cases.len() >= 18, "the D-11 table must cover every class");

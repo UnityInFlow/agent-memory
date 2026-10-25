@@ -29,16 +29,19 @@
 //! columns and edge rows are read through a raw side connection so the
 //! assertions see the tables themselves.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::{LinkKind, LinkOutcome, MemoryType, NewMemory};
+use agent_memory_core::domain::{LinkKind, LinkOutcome, MemoryError, MemoryType, NewMemory};
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
 use agent_memory_core::export::{Record, FORMAT_NAME, FORMAT_VERSION};
 use agent_memory_core::import::jsonl::{parse_jsonl, JsonlFile};
-use agent_memory_core::service::{ExportReport, ImportReport, ListArgs, MemoryService};
+use agent_memory_core::service::{
+    ExportReport, ImportReport, ListArgs, MemoryService, SearchArgs, SearchMode,
+};
 use agent_memory_core::store::migrations::LATEST_SCHEMA_VERSION;
 use agent_memory_core::store::sqlite::{register_vec_extension, SqliteStore};
 
@@ -755,4 +758,383 @@ async fn re_importing_the_same_file_is_idempotent() {
     assert_eq!(second, six(0, 3, 0, 0, 2, 0));
     assert_eq!(row_count(&dst.db_path), rows_after_first);
     assert_eq!(edge_count(&dst.db_path), edges_after_first);
+}
+
+// ---------------------------------------------------------------------------
+// Import half — Task 2: kill-tests and edge probes
+// ---------------------------------------------------------------------------
+
+/// A valid v1 header declaring `rows` memories and `links` links, for
+/// hand-built files.
+fn header(rows: u64, links: u64) -> String {
+    format!(
+        r#"{{"record":"header","format":"agent-memory-export","version":1,"exported_at":1000,"embedding_model":"nomic-embed-text","embedding_dim":768,"schema_version":3,"agent_memory_version":"0.0.1","exported_rows":{rows},"exported_links":{links}}}"#
+    )
+}
+
+const MEM1: &str = r#"{"record":"memory","key":1,"type":"DECISION","content":"hand-built first","tags":[],"source":null,"scope":null,"created_at":1,"last_accessed":1,"access_count":0,"expires_at":null}"#;
+const MEM2: &str = r#"{"record":"memory","key":2,"type":"PATTERN","content":"hand-built second","tags":["t"],"source":"s","scope":"sc","created_at":2,"last_accessed":2,"access_count":3,"expires_at":null}"#;
+const LINK12: &str = r#"{"record":"link","from":1,"to":2,"kind":"relates_to","created_at":5}"#;
+
+/// Join lines into a newline-terminated file.
+fn file_from(lines: &[&str]) -> String {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+#[tokio::test]
+async fn importing_into_a_non_empty_db_with_overlapping_rowids_never_attaches_phantom_edges() {
+    // Source: three memories whose ids are exactly 1..=3 (a fresh database),
+    // and one edge 1 -> 2.
+    let src = harness();
+    let a = store(&src, new_memory("source one", MemoryType::Decision)).await;
+    let b = store(&src, new_memory("source two", MemoryType::Pattern)).await;
+    let c = store(&src, new_memory("source three", MemoryType::Todo)).await;
+    assert_eq!((a, b, c), (1, 2, 3), "the file's keys are 1..=3");
+    link(&src, a, b, LinkKind::RelatesTo).await;
+    let (text, _) = export_to_string(&src, "overlap.jsonl").await;
+
+    // Target: three UNRELATED rows already hold ids 1..=3 — exactly the keys
+    // the file's link record names (PITFALLS 18).
+    let dst = harness();
+    let pre: Vec<i64> = vec![
+        store(&dst, new_memory("target x", MemoryType::Error)).await,
+        store(&dst, new_memory("target y", MemoryType::Architecture)).await,
+        store(&dst, new_memory("target z", MemoryType::Constraint)).await,
+    ];
+    assert_eq!(
+        pre,
+        vec![1, 2, 3],
+        "the target's rowids overlap the file's keys"
+    );
+
+    let report = import(&dst, &text).await;
+    assert_eq!(report, six(3, 0, 0, 1, 0, 0));
+
+    for id in &pre {
+        assert_eq!(
+            edges_touching(&dst.db_path, *id),
+            0,
+            "pre-existing row {id} gained a phantom edge"
+        );
+    }
+    let new_a = id_by_content(&dst.db_path, "source one");
+    let new_b = id_by_content(&dst.db_path, "source two");
+    assert!(new_a > 3 && new_b > 3, "restored rows get fresh target ids");
+    assert_eq!(edges_touching(&dst.db_path, new_a), 1);
+    assert_eq!(edges_touching(&dst.db_path, new_b), 1);
+    assert_eq!(orphan_edges(&dst.db_path), 0);
+    assert_eq!(row_count(&dst.db_path), 6);
+    assert_eq!(edge_count(&dst.db_path), 1);
+
+    // Importing the same file again on top of the now-populated target maps
+    // every key onto the restored rows and changes nothing.
+    let again = import(&dst, &text).await;
+    assert_eq!(again, six(0, 3, 0, 0, 1, 0));
+    assert_eq!(row_count(&dst.db_path), 6);
+    assert_eq!(edge_count(&dst.db_path), 1);
+    for id in &pre {
+        assert_eq!(edges_touching(&dst.db_path, *id), 0);
+    }
+}
+
+#[tokio::test]
+async fn link_endpoints_that_dedup_to_existing_rows_attach_to_those_rows() {
+    let shared = || NewMemory {
+        content: "shared decision already on the target".to_string(),
+        mem_type: MemoryType::Decision,
+        tags: vec!["any".to_string()],
+        source: Some("shared-src".to_string()),
+        scope: Some("other-scope".to_string()),
+        ttl_secs: None,
+    };
+
+    // Source: A (key 1) and B (key 2), A -> B.
+    let src = harness();
+    let a = store(&src, shared()).await;
+    let b = store(&src, new_memory("only in the file", MemoryType::Pattern)).await;
+    link(&src, a, b, LinkKind::RelatesTo).await;
+    let (text, _) = export_to_string(&src, "dedup.jsonl").await;
+
+    // Target: a filler row takes id 1, then a row identical to A on the
+    // (source, mem_type, content) key takes id 2 — so A's key (1) and the
+    // existing row's id (2) differ.
+    let dst = harness();
+    let filler = store(&dst, new_memory("unrelated filler row", MemoryType::Error)).await;
+    let existing_a = store(&dst, shared()).await;
+    assert_eq!((filler, existing_a), (1, 2));
+    assert_ne!(existing_a, a, "the existing row's id differs from A's key");
+
+    let report = import(&dst, &text).await;
+    assert_eq!(report.imported, 1, "only B is new");
+    assert_eq!(report.skipped_duplicates, 1, "A dedups to the existing row");
+    assert_eq!(report.links_imported, 1);
+    assert_eq!(report, six(1, 1, 0, 1, 0, 0));
+
+    assert_eq!(
+        edges_touching(&dst.db_path, existing_a),
+        1,
+        "the edge attaches to the EXISTING row A dedups to"
+    );
+    assert_eq!(
+        edges_touching(&dst.db_path, filler),
+        0,
+        "never to the row at A's key"
+    );
+    assert_eq!(
+        row_count(&dst.db_path),
+        3,
+        "grew by exactly one (no second A)"
+    );
+    assert_eq!(
+        id_by_content(&dst.db_path, "shared decision already on the target"),
+        existing_a
+    );
+}
+
+#[tokio::test]
+async fn identical_rows_collapse_to_one_on_import_and_count_a_duplicate() {
+    let twin = || new_memory("the same row stored twice", MemoryType::Architecture);
+    let src = harness();
+    let first = store(&src, twin()).await;
+    let second = store(&src, twin()).await;
+    assert_ne!(first, second, "no uniqueness constraint: two rows exist");
+
+    let (text, report) = export_to_string(&src, "twins.jsonl").await;
+    assert_eq!(report.memories, 2);
+    match &lines(&text)[0] {
+        Record::Header { exported_rows, .. } => assert_eq!(*exported_rows, 2),
+        other => panic!("expected header, got {other:?}"),
+    }
+    assert_eq!(text.lines().count(), 3, "header + two memory records");
+
+    let dst = harness();
+    assert_eq!(import(&dst, &text).await, six(1, 1, 0, 0, 0, 0));
+    assert_eq!(row_count(&dst.db_path), 1, "identical rows collapse (D-07)");
+}
+
+#[tokio::test]
+async fn expired_rows_are_skipped_and_counted_and_their_links_dropped() {
+    // Source at 1_000: A expires at 1_050, B at 11_000, C never.
+    let src = harness();
+    let a = store(
+        &src,
+        NewMemory {
+            ttl_secs: Some(50),
+            ..new_memory("alpha expires soon", MemoryType::Todo)
+        },
+    )
+    .await;
+    let b = store(
+        &src,
+        NewMemory {
+            ttl_secs: Some(10_000),
+            ..new_memory("beta lives long", MemoryType::Decision)
+        },
+    )
+    .await;
+    let c = store(&src, new_memory("gamma is permanent", MemoryType::Pattern)).await;
+    link(&src, a, c, LinkKind::CausedBy).await;
+    link(&src, b, c, LinkKind::Supersedes).await;
+    let (text, _) = export_to_string(&src, "expiry.jsonl").await;
+
+    // Target clock EXACTLY at A's expiry: `expires_at <= now` skips (D-10),
+    // and the edge that needed A is dropped and counted (PITFALLS 19).
+    let dst = harness();
+    dst.clock.set(1_050);
+    let report = import(&dst, &text).await;
+    assert_eq!(report, six(2, 0, 1, 1, 0, 1));
+    let contents: Vec<String> = dst
+        .service
+        .list(ListArgs::default())
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|v| v.content)
+        .collect();
+    assert_eq!(contents.len(), 2);
+    assert!(contents.iter().any(|c| c == "beta lives long"));
+    assert!(contents.iter().any(|c| c == "gamma is permanent"));
+    assert!(
+        !contents.iter().any(|c| c == "alpha expires soon"),
+        "the expired row was never inserted"
+    );
+    assert_eq!(row_count(&dst.db_path), 2);
+    assert_eq!(edge_count(&dst.db_path), 1);
+    assert_eq!(orphan_edges(&dst.db_path), 0);
+
+    // One second earlier the same file restores everything: the boundary is
+    // `<=`, not `<`.
+    let earlier = harness();
+    earlier.clock.set(1_049);
+    assert_eq!(import(&earlier, &text).await, six(3, 0, 0, 2, 0, 0));
+
+    // An ancient row — last touched 400 days before its export — is imported
+    // decay-fresh: last_accessed is refreshed to the target clock and the row
+    // is listed (decay never deletes; PITFALLS 19).
+    let old = harness();
+    let ancient = store(
+        &old,
+        new_memory("ancient wisdom about caches", MemoryType::Pattern),
+    )
+    .await;
+    old.clock.advance(400 * 86_400);
+    let (old_text, _) = export_to_string(&old, "ancient.jsonl").await;
+    assert_eq!(provenance(&old.db_path, ancient).last_accessed, 1_000);
+
+    let fresh = harness();
+    fresh.clock.set(7_777);
+    // Note: the header's exported_at (400 days ahead of 7_777) also exercises
+    // the clock-skew warning path — the import must continue regardless.
+    assert_eq!(import(&fresh, &old_text).await, six(1, 0, 0, 0, 0, 0));
+    let restored = id_by_content(&fresh.db_path, "ancient wisdom about caches");
+    assert_eq!(provenance(&fresh.db_path, restored).last_accessed, 7_777);
+    assert_eq!(
+        provenance(&fresh.db_path, restored).created_at,
+        1_000,
+        "created_at preserved"
+    );
+    let listed = fresh.service.list(ListArgs::default()).await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].content, "ancient wisdom about caches");
+}
+
+#[tokio::test]
+async fn imported_rows_land_pending_and_the_sweep_backfills_them() {
+    let src = harness();
+    store(
+        &src,
+        new_memory("orchid pollination schedule", MemoryType::Pattern),
+    )
+    .await;
+    store(
+        &src,
+        new_memory("granite countertop sealing", MemoryType::Todo),
+    )
+    .await;
+    let (text, _) = export_to_string(&src, "pending.jsonl").await;
+
+    // The target's embedder is UP — and the importer still never calls it.
+    let dst = harness_with(Arc::new(FakeEmbedder::with_vectors(HashMap::new())));
+    assert_eq!(import(&dst, &text).await, six(2, 0, 0, 0, 0, 0));
+    let orchid = id_by_content(&dst.db_path, "orchid pollination schedule");
+    let granite = id_by_content(&dst.db_path, "granite countertop sealing");
+    for id in [orchid, granite] {
+        assert_eq!(
+            status(&dst.db_path, id),
+            0,
+            "imported rows land pending (D-13)"
+        );
+        assert_eq!(
+            vec_rows(&dst.db_path, id),
+            0,
+            "no vector was written inline"
+        );
+    }
+
+    // Exactly one re-embed mechanism: the sweep backfill.
+    dst.service
+        .sweep(dst.clock.now())
+        .await
+        .expect("sweep succeeds");
+    for id in [orchid, granite] {
+        assert_eq!(status(&dst.db_path, id), 1, "the sweep embedded the row");
+        assert_eq!(vec_rows(&dst.db_path, id), 1);
+    }
+
+    let outcome = dst
+        .service
+        .search(SearchArgs {
+            query: "orchid".to_string(),
+            ..SearchArgs::default()
+        })
+        .await
+        .expect("search");
+    assert_eq!(outcome.search_mode, SearchMode::Hybrid);
+    assert!(
+        outcome.results.iter().any(|v| v.id == orchid),
+        "the backfilled row is hybrid-searchable"
+    );
+}
+
+#[tokio::test]
+async fn a_header_only_file_imports_nothing_and_reports_zeros() {
+    let src = harness();
+    let (text, _) = export_to_string(&src, "empty.jsonl").await;
+    assert_eq!(text.lines().count(), 1);
+
+    let dst = harness();
+    store(&dst, new_memory("already here", MemoryType::Decision)).await;
+    let before = row_count(&dst.db_path);
+    assert_eq!(import(&dst, &text).await, ImportReport::default());
+    assert_eq!(import(&dst, &text).await, six(0, 0, 0, 0, 0, 0));
+    assert_eq!(row_count(&dst.db_path), before);
+    assert_eq!(edge_count(&dst.db_path), 0);
+}
+
+#[test]
+fn a_zero_byte_file_is_rejected_at_line_one() {
+    for text in ["", "\n"] {
+        let err = parse_jsonl(text).expect_err("no header");
+        assert!(matches!(err, MemoryError::InvalidArgument(_)), "{err:?}");
+        assert!(
+            err.to_string().starts_with("invalid argument: line 1:"),
+            "{err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn links_are_applied_after_all_memories_regardless_of_file_order() {
+    let link_first = file_from(&[&header(2, 1), LINK12, MEM1, MEM2]);
+    let canonical = file_from(&[&header(2, 1), MEM1, MEM2, LINK12]);
+
+    let shuffled = harness();
+    let report = import(&shuffled, &link_first).await;
+    assert_eq!(report, six(2, 0, 0, 1, 0, 0));
+    let first = id_by_content(&shuffled.db_path, "hand-built first");
+    let second = id_by_content(&shuffled.db_path, "hand-built second");
+    assert_eq!(
+        edges(&shuffled.db_path),
+        vec![(
+            first.min(second),
+            first.max(second),
+            "relates_to".to_string(),
+            5
+        )],
+        "the edge carries the record's own created_at"
+    );
+
+    let ordered = harness();
+    assert_eq!(import(&ordered, &canonical).await, report);
+    assert_eq!(row_count(&ordered.db_path), row_count(&shuffled.db_path));
+    assert_eq!(edge_count(&ordered.db_path), edge_count(&shuffled.db_path));
+}
+
+#[tokio::test]
+async fn nothing_is_written_when_validation_fails() {
+    let dst = harness();
+    store(&dst, new_memory("pre-existing row", MemoryType::Decision)).await;
+    let before = row_count(&dst.db_path);
+
+    // Line 2 is a perfectly valid memory; line 3 is not. The whole file is
+    // refused, so `import_jsonl` is never reached — the only entry point to
+    // the importer's writes takes a fully parsed JsonlFile.
+    let text = file_from(&[&header(2, 0), MEM1, r#"{"record":"memo"}"#]);
+    let err = parse_jsonl(&text).expect_err("line 3 is malformed");
+    assert!(matches!(err, MemoryError::InvalidArgument(_)), "{err:?}");
+    assert!(err.to_string().contains("line 3:"), "{err}");
+
+    assert_eq!(row_count(&dst.db_path), before, "nothing was written");
+    assert_eq!(edge_count(&dst.db_path), 0);
+    assert!(
+        dst.service
+            .list(ListArgs::default())
+            .await
+            .expect("list")
+            .iter()
+            .all(|v| v.content == "pre-existing row"),
+        "the valid line 2 record was NOT imported"
+    );
 }
