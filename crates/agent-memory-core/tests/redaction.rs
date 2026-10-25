@@ -1,7 +1,8 @@
 //! D-14 proof: a storage fault on EVERY non-search `MemoryService` path is
 //! redacted at the service seam — the T-04-19 pattern generalised from
-//! `search` to `store`, `list`, `import`, `forget`, `link`, `unlink`, `update`
-//! and `sweep` (04-REVIEW IN-01 closed).
+//! `search` to `store`, `list`, `import`, `forget`, `link`, `unlink`, `update`,
+//! `sweep`, and the Phase 5 `export` / `import_jsonl` paths (04-REVIEW IN-01
+//! closed; 05-REVIEW IN-02).
 //!
 //! Each test takes the table the operation writes or reads offline (an
 //! `ALTER TABLE … RENAME` on a raw side connection, exactly the hybrid.rs
@@ -20,6 +21,7 @@ use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
 use agent_memory_core::domain::{LinkKind, MemoryError, MemoryPatch, MemoryType, NewMemory};
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
+use agent_memory_core::import::jsonl::parse_jsonl;
 use agent_memory_core::service::{ListArgs, MemoryService};
 use agent_memory_core::store::sqlite::{register_vec_extension, SqliteStore};
 
@@ -215,4 +217,57 @@ async fn sweep_storage_failure_is_redacted() {
         .await
         .expect_err("sweep must fail with the table offline");
     assert_redacted(&err, "sweep");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 paths (05-REVIEW IN-02): `export` and `import_jsonl` get the same
+// take_offline proof as the eight paths above, so a refactor that unwraps
+// either one turns red here instead of leaking engine text to the CLI.
+// ---------------------------------------------------------------------------
+
+/// A valid v1 header declaring `rows` memories and `links` links.
+fn jsonl_header(rows: u64, links: u64) -> String {
+    format!(
+        r#"{{"record":"header","format":"agent-memory-export","version":1,"exported_at":1000,"embedding_model":"nomic-embed-text","embedding_dim":768,"schema_version":3,"agent_memory_version":"0.0.1","exported_rows":{rows},"exported_links":{links}}}"#
+    )
+}
+
+const JSONL_MEM1: &str = r#"{"record":"memory","key":1,"type":"DECISION","content":"redaction first","tags":[],"source":null,"scope":null,"created_at":1,"last_accessed":1,"access_count":0,"expires_at":null}"#;
+const JSONL_MEM2: &str = r#"{"record":"memory","key":2,"type":"PATTERN","content":"redaction second","tags":[],"source":null,"scope":null,"created_at":2,"last_accessed":2,"access_count":0,"expires_at":null}"#;
+const JSONL_LINK12: &str =
+    r#"{"record":"link","from":1,"to":2,"kind":"relates_to","created_at":5}"#;
+
+#[tokio::test]
+async fn export_storage_failure_is_redacted() {
+    let h = harness();
+    store(&h, "exported memory").await;
+    take_offline(&h.db_path, "memories");
+
+    let sink: Box<dyn std::io::Write + Send> = Box::new(Vec::new());
+    let err = h
+        .service
+        .export(sink, "test-0.0.0".to_string())
+        .await
+        .expect_err("export must fail with the table offline");
+    assert_redacted(&err, "export");
+}
+
+#[tokio::test]
+async fn import_jsonl_storage_failure_is_redacted() {
+    let h = harness();
+    // `memories` stays online so pass 2 inserts both rows; pass 3's
+    // `store.link` is the first statement to touch the renamed table.
+    take_offline(&h.db_path, "memory_links");
+
+    let text = format!(
+        "{}\n{JSONL_MEM1}\n{JSONL_MEM2}\n{JSONL_LINK12}\n",
+        jsonl_header(2, 1)
+    );
+    let file = parse_jsonl(&text).expect("the file itself is valid");
+    let err = h
+        .service
+        .import_jsonl(file)
+        .await
+        .expect_err("import_jsonl must fail with the links table offline");
+    assert_redacted(&err, "import");
 }
