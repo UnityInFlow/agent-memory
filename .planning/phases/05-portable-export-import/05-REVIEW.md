@@ -156,3 +156,16 @@ fn find_by_key(&self, source: Option<&str>, mem_type: MemoryType, content: &str,
 _Reviewed: 2026-10-25T12:43:01Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+## Fixes applied (2026-10-25)
+
+All six findings fixed on local `main`, one commit per finding (WR-03 and IN-01 share one, since both land in `find_by_key`). Every commit passed `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` in the main checkout before it was made (final: 286 passed / 0 failed / 2 ignored). No migration, no new crate, no workflow change.
+
+| ID | Status | Commit | Change |
+|---|---|---|---|
+| WR-01 | fixed | `80e905b` | `import_jsonl` pass 3 counts a post-remap self-pair (both keys mapped to one id by D-07 dedup) as `links_dropped` and never calls `store.link` with it. Kill-test `a_link_between_two_rows_that_collapse_on_import_is_dropped_not_miscounted` (report `(1, 1, 0, 0, 0, 1)`, zero `memory_links` rows, re-import idempotent). README `links dropped` row widened to "…or whose two endpoints collapsed into one row". |
+| WR-02 | fixed | `c28fc04` | Pass 1 rejects `access_count < 0` (`line N: access_count must be >= 0 (got -1)`); `bump_access` and `update`'s freshness bump saturate via `CASE WHEN access_count < 9223372036854775807 THEN access_count + 1 ELSE access_count END` (statement change only). Tests: `-1` and `2^63` rows in the malformed table, `i64::MAX` parses in the hostile-input test, direct `bump_access` saturation proof asserting `typeof(access_count) = integer`, and an import → `update` → `export` round trip of an `i64::MAX` row. README strict-list gains the rule. |
+| WR-03 | fixed | `3c28202` | `Store::find_by_key(source, mem_type, content, now)` adds `AND (expires_at IS NULL OR expires_at > ?4)`, so an expired-but-unswept target row is not a dedup hit and imported edges never hang on a row the next sweep deletes. Both service callers (`import`, `import_jsonl`) pass their clock reading. Test: TTL-1 s twin stored, `TestClock` advanced without sweeping, file row with `expires_at: null` + a link imported → `(2, 0, 0, 1, 0, 0)`, no edge on the stale row; after `sweep` the memory and its edge survive. |
+| IN-01 | fixed | `3c28202` | Same probe gains `ORDER BY id LIMIT 1`; trait doc states "the lowest matching live id". Store test asserts the lowest id wins with duplicate live rows. |
+| IN-02 | fixed | `22cd8d7` | `tests/redaction.rs` gains `export_storage_failure_is_redacted` (rename `memories`, export into a `Vec` sink, op `export`) and `import_jsonl_storage_failure_is_redacted` (rename `memory_links`, import a parsed two-memory/one-link file, op `import`). |
+| IN-03 | fixed | `621b29a` | `run_export` reuses `open_service`; with `--output`, `export_file::begin` runs before the open and the open sits inside the one result the existing `abort` covers. CLI test `an_unwritable_output_path_fails_before_the_database_is_created`: non-zero exit, stderr names the output step, `--db` file never created, no temp left (verified to fail against the pre-fix code). |
