@@ -1266,9 +1266,17 @@ impl Store for SqliteStore {
         //
         // The memories_au trigger re-mirrors the FTS5 content row for free.
         // All values bound — never formatted into the SQL (T-04-06).
+        //
+        // The bump saturates at i64::MAX (same expression as bump_access):
+        // SQLite's `+` does not raise on integer overflow, it converts the
+        // result to REAL, and rusqlite's `FromSql for i64` then rejects the
+        // column on every later export_rows read (05-REVIEW WR-02).
         tx.execute(
             "UPDATE memories SET content = ?2, tags = ?3, scope = ?4, expires_at = ?5, \
-                 last_accessed = ?6, access_count = access_count + 1, decay_score = 1.0 \
+                 last_accessed = ?6, \
+                 access_count = CASE WHEN access_count < 9223372036854775807 \
+                                     THEN access_count + 1 ELSE access_count END, \
+                 decay_score = 1.0 \
              WHERE id = ?1",
             params![id, content, tags_json, scope, expires_at, now],
         )?;
@@ -1382,8 +1390,15 @@ impl Store for SqliteStore {
             .map(|i| format!("?{}", i + 2))
             .collect::<Vec<_>>()
             .join(", ");
+        // The increment saturates at i64::MAX: SQLite's `+` silently converts
+        // an overflowing integer to REAL, which rusqlite's `i64` reader then
+        // rejects on every later `export_rows` — one poisoned row would break
+        // the whole backup path (05-REVIEW WR-02). An imported row may carry
+        // any non-negative count verbatim (D-10), so the guard lives here.
         let sql = format!(
-            "UPDATE memories SET last_accessed = ?1, access_count = access_count + 1 \
+            "UPDATE memories SET last_accessed = ?1, \
+                 access_count = CASE WHEN access_count < 9223372036854775807 \
+                                     THEN access_count + 1 ELSE access_count END \
              WHERE id IN ({placeholders})"
         );
         let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);

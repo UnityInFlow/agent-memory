@@ -448,3 +448,63 @@ async fn insert_imported_preserves_provenance_and_lands_pending() {
         found.results
     );
 }
+
+#[test]
+fn bump_access_saturates_at_i64_max_and_keeps_the_column_an_integer() {
+    // 05-REVIEW WR-02: an imported row carries its access_count verbatim
+    // (D-10), so i64::MAX is a legal stored value. SQLite's `+` would overflow
+    // it to REAL (no error), and every later export_rows read of the column
+    // would then fail with InvalidColumnType. The bump must saturate instead.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let store = SqliteStore::open(&db_path).expect("open store");
+
+    let maxed = store
+        .insert_imported(
+            ImportedMemory {
+                content: "counted to the brim".to_string(),
+                mem_type: MemoryType::Pattern,
+                tags: vec![],
+                source: None,
+                scope: None,
+                created_at: 500,
+                access_count: i64::MAX,
+                expires_at: None,
+            },
+            1_000,
+        )
+        .expect("insert maxed row");
+    let ordinary = store
+        .insert(
+            new_memory(MemoryType::Pattern, "counted normally"),
+            None,
+            1_000,
+        )
+        .expect("insert ordinary row");
+
+    store
+        .bump_access(&[maxed, ordinary], 2_000)
+        .expect("bump both rows");
+
+    register_vec_extension().expect("vec0 registers");
+    let conn = rusqlite::Connection::open(&db_path).expect("open raw connection");
+    let (maxed_count, maxed_type): (i64, String) = conn
+        .query_row(
+            "SELECT access_count, typeof(access_count) FROM memories WHERE id = ?1",
+            [maxed],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read maxed row");
+    assert_eq!(maxed_count, i64::MAX, "the bump saturates, never wraps");
+    assert_eq!(maxed_type, "integer", "the column never degrades to REAL");
+    assert_eq!(
+        raw_row(&conn, maxed).last_accessed,
+        2_000,
+        "recency still bumps"
+    );
+    assert_eq!(
+        raw_row(&conn, ordinary).access_count,
+        1,
+        "an ordinary row still increments"
+    );
+}
