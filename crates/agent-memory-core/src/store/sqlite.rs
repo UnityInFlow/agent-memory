@@ -24,6 +24,7 @@ use crate::domain::{
     snippet, ImportedMemory, LinkDirection, LinkKind, LinkOutcome, MemoryError, MemoryPatch,
     MemoryType, MemoryView, NewMemory, RelatedLink, UpdatedMemory,
 };
+use crate::export::{ExportEvent, ExportSnapshot, Record};
 use crate::service::{ListArgs, SearchArgs};
 use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
 use crate::store::Store;
@@ -826,6 +827,100 @@ impl Store for SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn export_rows(
+        &self,
+        visit: &mut dyn FnMut(ExportEvent) -> Result<(), MemoryError>,
+    ) -> Result<(), MemoryError> {
+        let conn = self.reads.get().map_err(MemoryError::Pool)?;
+        // ONE read transaction on ONE pooled connection spans the pin, both
+        // counts, and both row scans, so everything below is one WAL snapshot:
+        // a link committed concurrently can never reference a memory this
+        // export did not also see (T-05-19 / PITFALLS 5). `unchecked` only
+        // because the pooled handle is shared (`&Connection`); nothing else
+        // runs on it while we hold it.
+        let tx = conn.unchecked_transaction()?;
+
+        let embedding_model: String = tx.query_row(
+            "SELECT value FROM meta WHERE key = 'embedding_model'",
+            [],
+            |row| row.get(0),
+        )?;
+        let dim_text: String = tx.query_row(
+            "SELECT value FROM meta WHERE key = 'embedding_dim'",
+            [],
+            |row| row.get(0),
+        )?;
+        // `meta.value` is TEXT; a non-integer dim is corrupt data (internal
+        // tier), never something a client did.
+        let embedding_dim: u32 = dim_text.trim().parse().map_err(|_| {
+            MemoryError::Internal(format!(
+                "meta.embedding_dim is not an integer ({dim_text:?})"
+            ))
+        })?;
+        let memories: i64 = tx.query_row("SELECT count(*) FROM memories", [], |row| row.get(0))?;
+        let links: i64 = tx.query_row("SELECT count(*) FROM memory_links", [], |row| row.get(0))?;
+        visit(ExportEvent::Snapshot(ExportSnapshot {
+            embedding_model,
+            embedding_dim,
+            memories: u64::try_from(memories).unwrap_or(0),
+            links: u64::try_from(links).unwrap_or(0),
+        }))?;
+
+        {
+            // The D-04 memory column list — the wire contract. Deliberately
+            // NOT `base_weight`, `decay_score` or `embedding_status`, and
+            // `vec_memories` is never read: derived data and vectors stay home.
+            let mut stmt = tx.prepare(
+                "SELECT id, mem_type, content, tags, source, scope, created_at, \
+                        last_accessed, access_count, expires_at \
+                 FROM memories ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let tags_json: String = row.get("tags")?;
+                Ok(Record::Memory {
+                    key: row.get("id")?,
+                    mem_type: row.get("mem_type")?,
+                    content: row.get("content")?,
+                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                    source: row.get("source")?,
+                    scope: row.get("scope")?,
+                    created_at: row.get("created_at")?,
+                    last_accessed: row.get("last_accessed")?,
+                    access_count: row.get("access_count")?,
+                    expires_at: row.get("expires_at")?,
+                })
+            })?;
+            for row in rows {
+                visit(ExportEvent::Record(row?))?;
+            }
+        }
+
+        {
+            // Endpoints exactly as stored (relates_to canonical (min, max),
+            // directed kinds as given — D-05); deterministic order so two
+            // exports of one database are byte-identical.
+            let mut stmt = tx.prepare(
+                "SELECT from_id, to_id, kind, created_at FROM memory_links \
+                 ORDER BY from_id, to_id, kind",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Record::Link {
+                    from: row.get("from_id")?,
+                    to: row.get("to_id")?,
+                    kind: row.get("kind")?,
+                    created_at: row.get("created_at")?,
+                })
+            })?;
+            for row in rows {
+                visit(ExportEvent::Record(row?))?;
+            }
+        }
+
+        // Read-only: commit simply ends the snapshot.
+        tx.commit()?;
+        Ok(())
     }
 
     fn find_by_key(

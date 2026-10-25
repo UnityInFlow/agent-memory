@@ -14,6 +14,7 @@ use crate::domain::{
     ImportedMemory, LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView,
     NewMemory, RelatedLink, UpdatedMemory,
 };
+use crate::export::ExportEvent;
 use crate::service::{ListArgs, SearchArgs};
 
 /// Synchronous persistence interface, implemented by [`sqlite::SqliteStore`].
@@ -101,6 +102,45 @@ pub trait Store: Send + Sync {
     /// The returned content is exactly the text the caller must embed AND pass
     /// back to [`Store::insert_embedding`] as `expected_content`.
     fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError>;
+
+    /// Stream the whole corpus for a portable export (DIST-04), driving
+    /// `visit` with the format-v1 inputs in file order. Nothing is collected:
+    /// each row is visited lazily as it is stepped, so the corpus is never
+    /// buffered (Phase 5 D-02).
+    ///
+    /// Exactly ONE pooled read connection and ONE read transaction span the
+    /// entire call, and inside it, in order:
+    ///
+    /// 1. one [`ExportEvent::Snapshot`] — the `meta` pin (`embedding_model`,
+    ///    `embedding_dim`) plus `count(*)` of `memories` and `memory_links`;
+    /// 2. one [`ExportEvent::Record`] holding a `Record::Memory` per row of
+    ///    `SELECT id, mem_type, content, tags, source, scope, created_at,
+    ///    last_accessed, access_count, expires_at FROM memories ORDER BY id`
+    ///    — every row present, expired rows included, no filter (D-06);
+    ///    `key` is the row id, `type` is the stored string as-is (D-04);
+    /// 3. one `Record::Link` per row of `SELECT from_id, to_id, kind,
+    ///    created_at FROM memory_links ORDER BY from_id, to_id, kind`,
+    ///    endpoints exactly as stored (D-05).
+    ///
+    /// Why one snapshot (PITFALLS 5 / T-05-19): two statements on two pooled
+    /// connections could straddle a concurrent `link` whose endpoint was
+    /// inserted after the memories SELECT ran, yielding a link record whose
+    /// key is absent from the file — which the strict importer then rejects.
+    /// In WAL mode a single read transaction sees one consistent snapshot, and
+    /// the `memory_links` foreign keys guarantee every endpoint in that
+    /// snapshot is also a memory in it. The header counts come from the same
+    /// snapshot, so they always equal the records that follow.
+    ///
+    /// `embedding_dim` is TEXT in `meta`; a value that does not parse as an
+    /// integer is corrupt data and surfaces as
+    /// `MemoryError::Internal("meta.embedding_dim is not an integer (…)")` —
+    /// never a client-tier error. Tags decode with the `row_to_view`
+    /// convention (an undecodable tags column reads as no tags). The first
+    /// `Err` returned by `visit` aborts the stream and is returned unchanged.
+    fn export_rows(
+        &self,
+        visit: &mut dyn FnMut(ExportEvent) -> Result<(), MemoryError>,
+    ) -> Result<(), MemoryError>;
 
     /// The INTEROP-01 idempotency probe: which row, if any, carries exactly
     /// this `(source, mem_type, content)` key? `MemoryService::import` checks
