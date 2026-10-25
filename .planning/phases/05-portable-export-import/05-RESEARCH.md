@@ -666,23 +666,25 @@ async fn a_storage_fault_on_store_is_redacted() {
 | A7 | Passing `agent_memory_version` from the binary (not `env!` in core) matches D-03's intent of "<CARGO_PKG_VERSION>" | Pattern 4 / Pitfall 9 | None functionally while both crates are `0.0.1`; matters at the Phase 6 bump |
 | A8 | `access_count` needs no extra bounds check (any `i64` accepted) | Pattern 3 | Negligible — provenance-only field (D-10) |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Header `exported_rows`/`exported_links` counts (CONTEXT discretion)**
+> All four resolved by the orchestrator (auto mode, recommended options) and carried into the plans — see the inline `— RESOLVED:` markers.
+
+1. **Header `exported_rows`/`exported_links` counts (CONTEXT discretion)** — RESOLVED: included in format v1 (05-02 Task 1 `Record::Header { exported_rows, exported_links }`; 05-03 Task 1 parser count check)
    - What we know: additive only if decided now (D-11 rejects unknown fields later); the exporter knows the counts only after streaming, but the header is line 1.
    - What's unclear: whether a pre-count query (`SELECT count(*)`) inside the same read snapshot is worth two extra statements.
    - Recommendation: include them — two `count(*)` on the same snapshot are cheap, and the importer can then reject a truncated file (`line N: file ends after 12 of 40 declared memory records`) — a real integrity check for a copied file. If omitted, it is gone for v1.
 
-2. **Where the clock-skew warning lives**
+2. **Where the clock-skew warning lives** — RESOLVED: `tracing::warn!` inside core `import_jsonl` (05-03 Task 1 `clock_skew_message`); reaches the CLI's stderr through the binary's subscriber
    - What we know: D-10 says "the CLI prints … to stderr"; core has `tracing::warn!` (stderr in the binary) and the injected clock.
    - Recommendation: emit it in `import_jsonl` via `tracing::warn!` (testable with the `TestClock`), which reaches stderr through the binary's subscriber — the CLI needs no extra code.
 
-3. **`LinkOutcome` change scope**
+3. **`LinkOutcome` change scope** — RESOLVED: `LinkOutcome::Linked { created: bool }` accepted as a core-API, non-wire change (05-01 Task 2)
    - What we know: 7 sites; not a wire change.
    - What's unclear: whether the user considers `LinkOutcome` part of the Phase 4 "closed" contract.
    - Recommendation: proceed (it is `pub` in core, not on the wire); mention in the plan's summary.
 
-4. **`SqliteStore::open` errors on the CLI** still print raw `sqlite error:` text via anyhow (e.g. unreadable DB path). D-14 scopes redaction to `MemoryService` methods; `open` is outside. Recommendation: leave as is (local stderr, no transport), note in the README sentence as "every service response".
+4. **`SqliteStore::open` errors on the CLI** still print raw `sqlite error:` text via anyhow (e.g. unreadable DB path). D-14 scopes redaction to `MemoryService` methods; `open` is outside. Recommendation: leave as is (local stderr, no transport). — RESOLVED: left as is, accepted as threat T-05-14 (05-01); the README scopes D-14 to every request the daemon serves and every CLI import/export.
 
 ## Environment Availability
 
