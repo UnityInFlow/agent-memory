@@ -21,8 +21,8 @@ use rusqlite_migration::Migrations;
 
 use crate::decay::{DecayConfig, RankWeights, PINNED_HALF_LIFE_MULTIPLIER};
 use crate::domain::{
-    snippet, LinkDirection, LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType,
-    MemoryView, NewMemory, RelatedLink, UpdatedMemory,
+    snippet, ImportedMemory, LinkDirection, LinkKind, LinkOutcome, MemoryError, MemoryPatch,
+    MemoryType, MemoryView, NewMemory, RelatedLink, UpdatedMemory,
 };
 use crate::service::{ListArgs, SearchArgs};
 use crate::store::migrations::{migrations, LATEST_SCHEMA_VERSION};
@@ -592,6 +592,56 @@ fn match_with_sanitized_retry(
     }
 }
 
+/// The column values of one `memories` row about to be inserted, as bound by
+/// [`insert_row`]. A struct rather than positional arguments so the two
+/// callers cannot transpose a column and the helper stays under clippy's
+/// argument limit.
+struct MemoryRow<'a> {
+    mem_type: MemoryType,
+    content: &'a str,
+    /// The tags array already serialised with `serde_json`.
+    tags_json: &'a str,
+    source: Option<&'a str>,
+    scope: Option<&'a str>,
+    access_count: i64,
+    created_at: i64,
+    last_accessed: i64,
+    expires_at: Option<i64>,
+    embedding_status: i64,
+}
+
+/// THE one `memories` INSERT, shared by [`Store::insert`] (fresh rows: counts
+/// zeroed, both timestamps `now`) and [`Store::insert_imported`] (restored
+/// rows: provenance preserved, `last_accessed` refreshed, always pending).
+/// Keeping a single statement is what stops the two paths drifting in column
+/// order or defaults (Phase 5 T-05-15). `base_weight` follows the type pin and
+/// `decay_score` starts at 1.0 for every row. Runs inside the caller's writer
+/// transaction and returns the new rowid; the `memories_ai` trigger mirrors
+/// the content into FTS5 on the same statement.
+fn insert_row(tx: &rusqlite::Transaction<'_>, row: &MemoryRow<'_>) -> Result<i64, rusqlite::Error> {
+    let base_weight = if row.mem_type.is_pinned() { 2.0 } else { 1.0 };
+    tx.execute(
+        "INSERT INTO memories \
+         (mem_type, content, tags, source, scope, base_weight, decay_score, \
+          access_count, created_at, last_accessed, expires_at, embedding_status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            row.mem_type.as_wire_str(),
+            row.content,
+            row.tags_json,
+            row.source,
+            row.scope,
+            base_weight,
+            row.access_count,
+            row.created_at,
+            row.last_accessed,
+            row.expires_at,
+            row.embedding_status,
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
 impl Store for SqliteStore {
     fn insert(
         &self,
@@ -600,7 +650,6 @@ impl Store for SqliteStore {
         now: i64,
     ) -> Result<i64, MemoryError> {
         let tags_json = serde_json::to_string(&new.tags).unwrap_or_else(|_| "[]".to_string());
-        let base_weight = if new.mem_type.is_pinned() { 2.0 } else { 1.0 };
         let expires_at = new.ttl_secs.map(|ttl| now + ttl);
         let embedding_status: i64 = i64::from(embedding.is_some());
 
@@ -612,24 +661,21 @@ impl Store for SqliteStore {
             .lock()
             .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO memories \
-             (mem_type, content, tags, source, scope, base_weight, decay_score, \
-              access_count, created_at, last_accessed, expires_at, embedding_status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, 0, ?7, ?7, ?8, ?9)",
-            params![
-                new.mem_type.as_wire_str(),
-                new.content,
-                tags_json,
-                new.source,
-                new.scope,
-                base_weight,
-                now,
+        let id = insert_row(
+            &tx,
+            &MemoryRow {
+                mem_type: new.mem_type,
+                content: &new.content,
+                tags_json: &tags_json,
+                source: new.source.as_deref(),
+                scope: new.scope.as_deref(),
+                access_count: 0,
+                created_at: now,
+                last_accessed: now,
                 expires_at,
                 embedding_status,
-            ],
+            },
         )?;
-        let id = tx.last_insert_rowid();
         if let Some(vector) = embedding {
             // Vector blob bound via bytemuck (safe zero-copy f32→u8 cast),
             // never formatted into the SQL (T-02-01).
@@ -639,6 +685,40 @@ impl Store for SqliteStore {
                 params![id, blob],
             )?;
         }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn insert_imported(&self, m: ImportedMemory, now: i64) -> Result<i64, MemoryError> {
+        let tags_json = serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string());
+
+        // Same writer lane and single transaction as `insert`, through the same
+        // shared statement. The file's provenance columns are bound as-is;
+        // `last_accessed` is the import-time clock (D-10). There is no vector
+        // write and `embedding_status` is hard-coded pending: restored rows are
+        // re-embedded only by the sweep backfill against the LOCAL model pin
+        // (D-13, PITFALLS 17), so a file written beside another model can never
+        // mix vectors into this corpus.
+        let mut conn = self
+            .writer
+            .lock()
+            .map_err(|_| MemoryError::Internal("writer lock poisoned".into()))?;
+        let tx = conn.transaction()?;
+        let id = insert_row(
+            &tx,
+            &MemoryRow {
+                mem_type: m.mem_type,
+                content: &m.content,
+                tags_json: &tags_json,
+                source: m.source.as_deref(),
+                scope: m.scope.as_deref(),
+                access_count: m.access_count,
+                created_at: m.created_at,
+                last_accessed: now,
+                expires_at: m.expires_at,
+                embedding_status: 0,
+            },
+        )?;
         tx.commit()?;
         Ok(id)
     }

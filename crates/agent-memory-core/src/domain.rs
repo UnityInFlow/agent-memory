@@ -255,6 +255,38 @@ pub struct NewMemory {
     pub ttl_secs: Option<i64>,
 }
 
+/// A memory restored from a portable format-v1 file (INTEROP-02), the input
+/// of [`crate::store::Store::insert_imported`].
+///
+/// Unlike [`NewMemory`] — which is stamped with the clock and carries a
+/// relative `ttl_secs` — this type carries ABSOLUTE timestamps copied from the
+/// file, because a restored row keeps its provenance (Phase 5 D-10):
+/// `created_at`, `access_count` and `expires_at` are preserved exactly.
+/// `last_accessed` is deliberately NOT a field: it is refreshed to the
+/// import-time `now` so restored memories start decay-fresh instead of
+/// arriving months stale and unfindable by rank (PITFALLS 19). The row always
+/// lands with `embedding_status = 0` for the sweep backfill (D-13) — there is
+/// no embedding to carry.
+///
+/// A dedicated type (rather than optional overrides on `NewMemory`) keeps the
+/// fifteen existing `NewMemory` construction sites untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedMemory {
+    pub content: String,
+    pub mem_type: MemoryType,
+    pub tags: Vec<String>,
+    pub source: Option<String>,
+    pub scope: Option<String>,
+    /// Preserved from the file: when the memory was originally stored.
+    pub created_at: i64,
+    /// Preserved from the file: provenance only — `decay_score` depends solely
+    /// on `last_accessed`, so this changes no ranking.
+    pub access_count: i64,
+    /// Preserved from the file, absolute. The importer skips a row whose
+    /// `expires_at <= now` before it ever reaches the store (D-10).
+    pub expires_at: Option<i64>,
+}
+
 /// The full stored record as persisted in the `memories` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Memory {
