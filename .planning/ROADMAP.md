@@ -104,7 +104,7 @@ Plans:
   3. Imported rows land with `embedding_status = 0` and become semantically searchable after the existing sweep backfill re-embeds them — no embedding vectors travel in the file.
   4. Expired items in the file are skipped and counted, and the import report states imported/skipped/duplicate counts; malformed files (bad header/version/rows) are rejected as client errors through the Phase 3 seam, never a 500 or crash.
 
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans executed
 
 Plans:
 **Wave 1**
@@ -121,7 +121,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 05-04-PLAN.md — README "Export & import" section (format v1 spec, timestamp policy, pending embeddings, backup-vs-export) + spawned-binary CLI round trip (DIST-04, INTEROP-02)
+- [x] 05-04-PLAN.md — README "Export & import" section (format v1 spec, timestamp policy, pending embeddings, backup-vs-export) + spawned-binary CLI round trip (DIST-04, INTEROP-02)
 
 ### Phase 6: Distribution & v0.1.0 Release
 
@@ -148,5 +148,5 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
 | 4. Memory Update, Relations & Hybrid Search | v1.1 | 7/7 | Complete    | 2026-10-23 |
-| 5. Portable Export & Import | v1.1 | 3/4 | In Progress|  |
+| 5. Portable Export & Import | v1.1 | 4/4 | In Progress|  |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
