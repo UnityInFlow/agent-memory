@@ -6,6 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Core domain, store, and decay logic for the agent-memory MCP server"
+readme = "../../README.md"
+keywords = ["mcp", "memory", "agent", "sqlite", "claude"]
+categories = ["command-line-utilities", "database"]
 
 [features]
 # Exposes TestClock to dependents (e.g. the binary crate's integration tests)
