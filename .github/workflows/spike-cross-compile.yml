@@ -110,9 +110,9 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ matrix.tool }}" in
-            zigbuild) cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory ;;
-            xwin)     cargo xwin build --release --locked --target ${{ matrix.target }} -p agent-memory ;;
-            mingw)    cargo build --release --locked --target ${{ matrix.target }} -p agent-memory ;;
+            zigbuild) cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory-mcp ;;
+            xwin)     cargo xwin build --release --locked --target ${{ matrix.target }} -p agent-memory-mcp ;;
+            mingw)    cargo build --release --locked --target ${{ matrix.target }} -p agent-memory-mcp ;;
           esac
 
       - name: Smoke test (suffix- and host-arch-aware)
