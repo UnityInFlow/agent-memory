@@ -644,8 +644,9 @@ of it, and nothing is written (the target database is not even opened):
 - a line that is not a JSON object, an unknown `record` tag, an unknown field
   (a typo, or a field from a newer format), a wrong field type (`"1"` is not an
   integer);
-- an invalid `type` or `kind`, empty content, a duplicate `key`, a self-link, a
-  link to a `key` that does not appear in the file;
+- an invalid `type` or `kind`, empty content, a negative `access_count`, a
+  duplicate `key`, a self-link, a link to a `key` that does not appear in the
+  file;
 - a record count that does not match the header's `exported_rows` /
   `exported_links`.
 

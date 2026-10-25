@@ -35,7 +35,9 @@ use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::{LinkKind, LinkOutcome, MemoryError, MemoryType, NewMemory};
+use agent_memory_core::domain::{
+    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, NewMemory,
+};
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
 use agent_memory_core::export::{Record, FORMAT_NAME, FORMAT_VERSION};
 use agent_memory_core::import::jsonl::{parse_jsonl, JsonlFile};
@@ -946,6 +948,48 @@ async fn a_link_between_two_rows_that_collapse_on_import_is_dropped_not_miscount
     // Re-importing is still idempotent and still reports the drop.
     assert_eq!(import(&dst, &text).await, six(0, 2, 0, 0, 0, 1));
     assert_eq!(edge_count(&dst.db_path), 0);
+}
+
+#[tokio::test]
+async fn an_access_count_at_i64_max_imports_survives_a_bump_and_still_exports() {
+    // 05-REVIEW WR-02: access_count is carried verbatim (D-10) and is the one
+    // preserved column later used in arithmetic. Before the saturating bump,
+    // one `update` of this row overflowed the column to REAL and every later
+    // `export` of the WHOLE database failed with the redacted storage error.
+    let maxed = MEM1.replace("\"access_count\":0", "\"access_count\":9223372036854775807");
+    let text = file_from(&[&header(1, 0), &maxed]);
+
+    let dst = harness();
+    assert_eq!(import(&dst, &text).await, six(1, 0, 0, 0, 0, 0));
+    let id = id_by_content(&dst.db_path, "hand-built first");
+    assert_eq!(provenance(&dst.db_path, id).access_count, i64::MAX);
+
+    // The freshness bump that rides on `update` (D-09) must saturate.
+    dst.clock.set(5_000);
+    let updated = dst
+        .service
+        .update(
+            id,
+            MemoryPatch {
+                tags: Some(Some(vec!["touched".to_string()])),
+                ..MemoryPatch::default()
+            },
+        )
+        .await
+        .expect("update succeeds")
+        .expect("the row exists");
+    assert_eq!(updated.view.id, id);
+    let after = provenance(&dst.db_path, id);
+    assert_eq!(after.access_count, i64::MAX, "saturated, not wrapped");
+    assert_eq!(after.last_accessed, 5_000, "recency still refreshed");
+
+    // The backup path still works, and the record carries the exact value.
+    let (exported, report) = export_to_string(&dst, "maxed.jsonl").await;
+    assert_eq!(report.memories, 1);
+    match &lines(&exported)[1] {
+        Record::Memory { access_count, .. } => assert_eq!(*access_count, i64::MAX),
+        other => panic!("expected a memory record, got {other:?}"),
+    }
 }
 
 #[tokio::test]

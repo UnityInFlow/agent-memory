@@ -43,7 +43,9 @@
 //! [`ImportedMemory`] that has no such field. `created_at`, `access_count`
 //! and `expires_at` are carried verbatim; whether a row is expired is decided
 //! by the importer against the local clock, not here (expired rows are not
-//! malformed).
+//! malformed). `access_count` must be `>= 0` — it is the one preserved column
+//! the store later increments, and the store's bump saturates at `i64::MAX`,
+//! so no file value can push the column out of integer range.
 
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -311,6 +313,16 @@ pub fn parse_jsonl(text: &str) -> Result<JsonlFile, MemoryError> {
                 if content.trim().is_empty() {
                     return Err(invalid_line(line_no, "content must be a non-empty string"));
                 }
+                // `access_count` is the one preserved column later used in
+                // arithmetic (the recency bump), so it is bounded here like
+                // every other field (05-REVIEW WR-02). The upper bound is the
+                // column's own i64 range, which serde already enforces.
+                if access_count < 0 {
+                    return Err(invalid_line(
+                        line_no,
+                        format!("access_count must be >= 0 (got {access_count})"),
+                    ));
+                }
                 if !keys.insert(key) {
                     return Err(invalid_line(line_no, format!("duplicate memory key {key}")));
                 }
@@ -560,6 +572,9 @@ mod tests {
         let dangling = r#"{"record":"link","from":1,"to":9,"kind":"relates_to","created_at":1}"#;
         let string_tags = MEM1.replace("\"tags\":[]", "\"tags\":\"x\"");
         let float_expiry = MEM1.replace("\"expires_at\":null", "\"expires_at\":1.5");
+        let negative_access = MEM1.replace("\"access_count\":0", "\"access_count\":-1");
+        let huge_access =
+            MEM1.replace("\"access_count\":0", "\"access_count\":9223372036854775808");
 
         let hdr = |body: &str| format!("{{\"record\":\"header\",{body}}}\n");
         let fmt_x = hdr(r#""format":"x","version":1"#);
@@ -593,6 +608,8 @@ mod tests {
             ("blank content", file(&[&h10, &blank_content]), "line 2: content must be a non-empty string"),
             ("tags not an array", file(&[&h10, &string_tags]), "line 2: invalid type"),
             ("fractional expires_at", file(&[&h10, &float_expiry]), "line 2: invalid type"),
+            ("negative access_count", file(&[&h10, &negative_access]), "line 2: access_count must be >= 0 (got -1)"),
+            ("access_count above i64", file(&[&h10, &huge_access]), "line 2: invalid value"),
             ("bad kind", file(&[&h11, MEM1, bad_kind]), "line 3: kind must be one of"),
             ("self link", file(&[&h11, MEM1, self_link]), "line 3: from_id and to_id must differ"),
             ("dangling key", file(&[&h11, MEM1, dangling]), "line 3: link key 9 does not appear in the file"),
@@ -630,5 +647,12 @@ mod tests {
         let nul = MEM1.replace("\"content\":\"a\"", "\"content\":\"a\\u0000b\"");
         let parsed = parse_jsonl(&file(&[&header(1, 0), &nul])).expect("NUL is data");
         assert_eq!(parsed.memories[0].memory.content, "a\u{0}b");
+
+        // `access_count` at exactly i64::MAX is in range and carried verbatim
+        // (05-REVIEW WR-02): the store's bump saturates, so this row can never
+        // overflow the column into REAL and poison a later export.
+        let max_access = MEM1.replace("\"access_count\":0", "\"access_count\":9223372036854775807");
+        let parsed = parse_jsonl(&file(&[&header(1, 0), &max_access])).expect("i64::MAX parses");
+        assert_eq!(parsed.memories[0].memory.access_count, i64::MAX);
     }
 }

@@ -284,7 +284,9 @@ pub trait Store: Send + Sync {
     fn related(&self, id: i64, cap: usize) -> Result<Vec<RelatedLink>, MemoryError>;
 
     /// Bump the recency of the given ids: set `last_accessed = now` and increment
-    /// `access_count`. Runs on the writer lane. A no-op for an empty id slice.
+    /// `access_count`, saturating at `i64::MAX` so the column can never leave
+    /// integer range (an imported row carries its count verbatim — D-10).
+    /// Runs on the writer lane. A no-op for an empty id slice.
     fn bump_access(&self, ids: &[i64], now: i64) -> Result<(), MemoryError>;
 
     /// Delete every TTL-expired row (`expires_at IS NOT NULL AND expires_at < now`)
