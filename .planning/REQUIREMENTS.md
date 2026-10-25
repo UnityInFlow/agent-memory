@@ -34,14 +34,16 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Distribution (DIST)
 
-- [ ] **DIST-05**: Linux musl binaries (x86_64/aarch64) build via a target-suffixed CFLAGS typedef shim (`-Du_int*_t=uint*_t`) on the existing zigbuild pipeline — removable when sqlite-vec PR #199 ships in a pinned release
-- [ ] **DIST-03**: A Windows x86_64 binary is published — toolchain decided by an early spike (cargo-xwin/msvc preferred, mingw-w64/gnu fallback); artifact-presence smoke only (no Windows runner in the fleet), marked best-effort in release notes
-- [ ] **DIST-06**: Product release v0.1.0 published: checksummed tarballs for all supported targets + updated Homebrew formula, with release notes covering the tag-match behavioral change
+- [ ] **DIST-06**: Product release v0.1.0 published: checksummed tarballs for all supported targets + updated Homebrew formula, with release notes covering the tag-match behavioral change. *Re-scoped 2026-10-25 (issue #7): "all supported targets" = the six `release.yml` builds (four required + the best-effort musl pair); also covers the crates.io publish of `agent-memory-core` + `agent-memory-mcp` (#9) and CHANGELOG/SECURITY.md (#8).*
+
+*DIST-05 (hard musl) and DIST-03 (Windows) moved to v0.2.0 on 2026-10-25 by the owner decision on issue #7 — see Future Requirements.*
 
 ## Future Requirements
 
 Acknowledged but deferred — not in this milestone.
 
+- **DIST-05** *(moved from v1.1 Phase 6 to v0.2.0, 2026-10-25, issue #7)*: Linux musl binaries (x86_64/aarch64) as a **hard** release target via a target-suffixed CFLAGS typedef shim (`-Du_int*_t=uint*_t`) on the existing zigbuild pipeline — removable when sqlite-vec PR #199 ships in a pinned release. Until then the musl legs stay best-effort, as in v0.0.1. Toolchain verdict already recorded (Phase 3 D-11).
+- **DIST-03** *(moved from v1.1 Phase 6 to v0.2.0, 2026-10-25, issue #7)*: A Windows x86_64 binary is published — cargo-xwin 0.23.0 / `x86_64-pc-windows-msvc` (Phase 3 D-11 verdict; mingw-w64/gnu proven fallback); artifact-presence smoke only, best-effort label in release notes.
 - **SEARCH-06**: Request-level `mode` override (`keyword | semantic | hybrid`) — cheap additive, revisit if agents need deterministic keyword testing
 - **MCP-08**: LLM auto-arbitration on write (mem0 AUDN-style) — heavy, non-local
 - Bi-temporal invalidation (Zep-style) — complexity not justified at local scale
@@ -58,7 +60,7 @@ Acknowledged but deferred — not in this milestone.
 
 ## Traceability
 
-Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped to Phases 3-6.
+Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped to Phases 3-6; re-scoped 2026-10-25 (issue #7): 10 stay in v1.1, DIST-05 and DIST-03 moved to v0.2.0.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
@@ -71,10 +73,11 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 | SEARCH-05 | Phase 4 | Complete |
 | DIST-04 | Phase 5 | Complete |
 | INTEROP-02 | Phase 5 | Complete |
-| DIST-05 | Phase 6 | Pending |
-| DIST-03 | Phase 6 | Pending |
-| DIST-06 | Phase 6 | Pending |
+| DIST-05 | v0.2.0 (moved from Phase 6, 2026-10-25, #7) | Deferred |
+| DIST-03 | v0.2.0 (moved from Phase 6, 2026-10-25, #7) | Deferred |
+| DIST-06 | Phase 6 (v0.1.0 release, #7) | Pending |
 
 ---
 *Requirements defined: 2026-07-12 from approved v2 backlog + 4-dimension research (research/SUMMARY.md)*
 *Traceability filled: 2026-07-12 by roadmap creation (Phases 3-6)*
+*Traceability updated: 2026-10-25 — Phase 6 re-scoped to the v0.1.0 release (owner decision on issue #7); DIST-05/DIST-03 → v0.2.0*

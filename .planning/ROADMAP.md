@@ -7,7 +7,7 @@
 
 ## Overview
 
-v1.1 closes the deferred v2 backlog on the shipped v0.0.1 codebase: better recall (decay-aware hybrid RRF search), a richer MCP surface (`memory_update`, flat typed relations), hardened input validation at the shared service seam, and wider distribution (musl + Windows binaries, portable JSONL export/import) — shipping as product release v0.1.0. The build order follows the research-verified dependency chain: the validation seam lands first (every later surface routes new inputs through it) alongside the milestone's only feasibility unknown, the Windows/musl cross-compile spikes; the relations schema and update semantics land next with hybrid RRF running as an independent parallel track; export freezes its format v1 only after relations exist so link edges are in the contract from day one; and distribution ships last on the toolchains the Phase 3 spikes already proved.
+v1.1 closes the deferred v2 backlog on the shipped v0.0.1 codebase: better recall (decay-aware hybrid RRF search), a richer MCP surface (`memory_update`, flat typed relations), hardened input validation at the shared service seam, and wider distribution (musl + Windows binaries, portable JSONL export/import) — shipping as product release v0.1.0. The build order follows the research-verified dependency chain: the validation seam lands first (every later surface routes new inputs through it) alongside the milestone's only feasibility unknown, the Windows/musl cross-compile spikes; the relations schema and update semantics land next with hybrid RRF running as an independent parallel track; export freezes its format v1 only after relations exist so link edges are in the contract from day one; and distribution ships last on the toolchains the Phase 3 spikes already proved. *(2026-10-25: Phase 6 re-scoped to the v0.1.0 release per issue #7 — Windows binaries and hard musl move to v0.2.0.)*
 
 ## Phases
 
@@ -29,7 +29,7 @@ Full phase details: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md)
 - [x] **Phase 3: API Hardening & Toolchain Spikes** - Out-of-bounds limit/ttl rejected as client errors and exact tag matching at the shared service seam, plus early Windows/musl cross-compile spikes answering the milestone's only feasibility unknown (completed 2026-07-12)
 - [x] **Phase 4: Memory Update, Relations & Hybrid Search** - `memory_update` with same-transaction re-embed, flat typed links with cascade, migration 0003 hygiene, and decay-aware hybrid RRF as a parallel track (completed 2026-10-23)
 - [x] **Phase 5: Portable Export & Import** - Versioned JSONL export (link edges included, embeddings excluded) and idempotent cross-machine import with sweep-backfill re-embedding (completed 2026-10-25)
-- [ ] **Phase 6: Distribution & v0.1.0 Release** - musl + Windows binaries on the spike-chosen toolchains and the checksummed v0.1.0 release with Homebrew update and behavioral-change release notes
+- [ ] **Phase 6: v0.1.0 Release (launch plan #7)** - *Re-scoped 2026-10-25 (owner decision on #7):* v0.1.0 ships from `main` on the six targets `release.yml` already builds, with CHANGELOG, SECURITY.md, the `agent-memory-mcp` crates.io rename + Trusted Publishing, and the Homebrew bump; Windows binaries and hard musl move to v0.2.0
 
 ## Phase Details
 
@@ -127,17 +127,26 @@ Plans:
 
 - [x] 05-05-PLAN.md — Gap wave 5: held-out race test for the 05-02 one-snapshot backstop truth (`a_concurrent_link_committed_mid_export_cannot_produce_a_dangling_key`: a memory + link committed mid-export are invisible to that snapshot and present in the next) + recorded live-Ollama realism run (export A → import B → first-sweep backfill → hybrid paraphrase search, `05-05-realism.sh`) (DIST-04, INTEROP-02)
 
-### Phase 6: Distribution & v0.1.0 Release
+### Phase 6: v0.1.0 Release (launch plan #7)
 
-**Goal**: As a user on Windows or musl-based Linux, I want to install agent-memory v0.1.0 from a pre-built binary, so that the memory daemon runs on my platform without a Rust toolchain.
+> **Re-scoped 2026-10-25** by the owner decision recorded on GitHub issue #7: v0.1.0 ships from
+> today's `main` (Phases 3-5, including JSONL export/import) following the launch plan and issues
+> #7-#15. **DIST-03 (Windows binaries) and DIST-05 (musl as a hard target) move to v0.2.0** — the
+> two musl legs stay best-effort in `release.yml`, exactly as for v0.0.1. The Phase 3 toolchain
+> verdicts (D-11) stay valid input for v0.2.0. Scope below is the pre-tag + tag work of #8 and #9
+> plus the Homebrew bump (#10); README rewrite/demo (#11/#12), directories (#13/#14) and launch
+> posts (#15) follow the tag and are tracked on GitHub, not as Phase 6 plans.
+
+**Goal**: As a user of Claude Code, Codex or Cursor, I want to install agent-memory v0.1.0 from crates.io, Homebrew or a checksummed tarball, so that every v1.1 feature (update, relations, hybrid search, export/import) is available without building from source.
 **Mode:** mvp
-**Depends on**: Phase 3 (spike toolchain verdicts), Phases 4-5 (shipped binary must contain all v1.1 features)
-**Requirements**: DIST-05, DIST-03, DIST-06
+**Depends on**: Phases 4-5 (shipped binary must contain all v1.1 features)
+**Requirements**: DIST-06
 **Success Criteria** (what must be TRUE):
 
-  1. Linux musl tarballs (x86_64/aarch64) build green on the existing zigbuild pipeline via the target-suffixed CFLAGS typedef shim (`-Du_int*_t=uint*_t`) and ship checksummed on the release — shim documented as removable when sqlite-vec PR #199 lands in a pinned release.
-  2. A Windows x86_64 binary is published on the release using the Phase 3 spike-chosen toolchain, with artifact-presence smoke only (no Windows runner in the fleet) and a best-effort label in the release notes.
-  3. Product release v0.1.0 is published: checksummed tarballs for all supported targets, `brew install unityinflow/tap/agent-memory` installs the new version, and release notes call out the behavioral changes (exact tag match, new 400s on bounds, `"hybrid"` search mode).
+  1. Both crates are at 0.1.0; the binary crate is published as `agent-memory-mcp` (the executable stays `agent-memory`) and `agent-memory-core` is published beside it; packaging dry-runs are green before the tag, and `.github/workflows/publish-crates.yml` publishes both from the tag via crates.io Trusted Publishing (OIDC, no org secret), skipping a version already on crates.io (#9).
+  2. `CHANGELOG.md` (Keep a Changelog, `v0.0.1..v0.1.0`) and `SECURITY.md` (GitHub private advisories) are on `main` before the tag (#8, closes #2).
+  3. Product release v0.1.0 is published by `release.yml`: the four required tarballs (macOS arm64/x86_64, Linux gnu x86_64/aarch64) plus the musl pair when the best-effort legs succeed, `SHA256SUMS.txt` and a verifying SLSA attestation; release notes call out the behavioral changes (exact tag match, new 400s on bounds, `"hybrid"` search mode).
+  4. `brew install unityinflow/tap/agent-memory` installs 0.1.0 (#10).
 
 **Plans**: TBD
 
@@ -153,4 +162,4 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
 | 4. Memory Update, Relations & Hybrid Search | v1.1 | 7/7 | Complete    | 2026-10-23 |
 | 5. Portable Export & Import | v1.1 | 5/5 | Complete    | 2026-10-25 |
-| 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
+| 6. v0.1.0 Release (launch plan #7) | v1.1 | 0/? | Not started | - |

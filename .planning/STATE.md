@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Hardening & Interop
 current_phase: 6
-current_phase_name: Distribution & v0.1.0 Release
+current_phase_name: v0.1.0 Release (launch plan #7)
 status: planning
-stopped_at: Phase 5 complete, ready to plan Phase 6
+stopped_at: Phase 6 re-scoped to the v0.1.0 release (#7); pre-tag work of #8/#9 in progress on local main
 last_updated: "2026-10-25T13:51:46.548Z"
 last_activity: 2026-10-25
-last_activity_desc: Phase 5 complete, transitioned to Phase 6
+last_activity_desc: Phase 5 secured (05-SECURITY.md, threats_open 0); Phase 6 re-scoped per issue #7
 state_head: fe18db796014dc9d885859771ee089ce7ba895df
 progress:
   total_phases: 4
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 5 — Portable Export & Import
+**Current focus:** Phase 6 — v0.1.0 Release (launch plan #7)
 
 ## Current Position
 
-Phase: 6 — Distribution & v0.1.0 Release
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-25 — Phase 5 complete, transitioned to Phase 6
+Phase: 6 — v0.1.0 Release (launch plan #7)
+Plan: Not planned (pre-tag work of issues #8/#9 done directly on local main per owner instruction)
+Status: Pre-tag work in progress
+Last activity: 2026-10-25 — Phase 5 secured; Phase 6 re-scoped (Windows + hard musl → v0.2.0)
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -141,6 +141,7 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-04: README Export & import section is one ## with ten ### subsections in plan order; sweep cadence documented as the shipped 'then hourly' (SWEEP_INTERVAL 3600 s); tests/cli.rs is realism-only (zero coverage by design, like tests/rest.rs) and pins the exact report strings
 - [Phase 05]: 05-04: phase-end gates recorded — cargo llvm-cov 95.61% lines (floor 80), D-01 transport grep empty, sql/ + Cargo.lock + .github/ unchanged across all phase-5 commits
 - [Phase 5]: [05-05]: Gap 1 (DIST-04 backstop truth 2.8) closed with a channel-ordered race test driving Store::export_rows directly — WAL snapshot isolation proven, no production change; every wait bounded by recv_timeout
+- [Phase 6 re-scope, 2026-10-25]: Owner decision on issue #7 — v0.1.0 ships from today's `main` (includes Phase 5 export/import) following `docs/reviews/2026-10-24-launch-plan.md` and issues #7-#15. Binary crate renamed `agent-memory-mcp` (executable stays `agent-memory`); DIST-03 (Windows) and DIST-05 (hard musl) move to v0.2.0, musl legs stay best-effort; REST code stays but leaves the README top and demo (#11/#12). Phase 6 requirement set is DIST-06 only.
 - [Phase 5]: [05-05]: Gap 2 (INTEROP-02 live re-embed) closed by a recorded run of the real binary against local nomic-embed-text (05-05-realism.sh, exit 0: backfilled=3 on first sweep tick, search_mode hybrid, target rank 0) — stays a script, never a cargo test
 
 ### Pending Todos
@@ -153,7 +154,7 @@ None yet.
 
 None open. The v1.0 carried notes are now scheduled in this milestone:
 
-- musl Linux binaries (sqlite-vec BSD typedefs) → DIST-05, Phase 6 (CFLAGS shim spiked in Phase 3).
+- musl Linux binaries (sqlite-vec BSD typedefs) → DIST-05, moved to v0.2.0 on 2026-10-25 (#7); musl legs stay best-effort in v0.1.0 (CFLAGS shim spiked in Phase 3).
 - REST boundary-value hardening (limit/ttl_secs extremes, tag LIKE over-match; 02-REVIEW WR-01/WR-02/WR-07) → API-02/API-03, Phase 3.
 
 Watch items:
@@ -174,7 +175,8 @@ Items acknowledged and carried forward:
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| Distribution | DIST-03 Windows binaries | Picked up in v1.1 — Phase 6 (spiked Phase 3) | Roadmap (2026-06-24) |
+| Distribution | DIST-03 Windows binaries | Moved to v0.2.0 (spiked Phase 3; re-deferred by #7) | Roadmap (2026-06-24); re-deferred 2026-10-25 |
+| Distribution | DIST-05 musl as a hard target | Moved to v0.2.0 (best-effort legs in v0.1.0) | Phase 6 re-scope (2026-10-25, #7) |
 | Search | SEARCH-04 hybrid RRF fusion | Picked up in v1.1 — Phase 4 | Roadmap (2026-06-24) |
 | Interface | MCP-06 memory_update / relation tools | Picked up in v1.1 — Phase 4 | Roadmap (2026-06-24) |
 | Distribution | DIST-04 portable export | Picked up in v1.1 — Phase 5 | Roadmap (2026-06-24) |
@@ -184,9 +186,9 @@ Items acknowledged and carried forward:
 ## Session Continuity
 
 Last session: 2026-10-25T13:42:17.195Z
-Stopped at: Phase 5 complete, ready to plan Phase 6
+Stopped at: Phase 6 re-scoped; pre-tag work of #8/#9 on local main (no push/tag)
 Resume file: None
 
 ## Operator Next Steps
 
-- `/gsd-discuss-phase 3` to lock in Phase 3 decisions, then `/gsd-plan-phase 3`
+- Owner: first manual crates.io publish of both crates, configure Trusted Publishing, then push `main` and tag `v0.1.0` (see issue #9)
