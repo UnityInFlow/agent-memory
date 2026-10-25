@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 5
 current_phase_name: Portable Export & Import
 status: verifying
-stopped_at: "Completed 05-04-PLAN.md (phase 5: 4/4 plans executed, awaiting phase verification)"
-last_updated: "2026-10-25T12:35:43.184Z"
+stopped_at: "Completed 05-05-PLAN.md (phase 5: 5/5 plans executed, awaiting phase re-verification)"
+last_updated: "2026-10-25T13:42:17.331Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 5 execution started
-state_head: 6eb354a22f3d43233969dfe876d68cacb33002f3
+state_head: d52c1ff396e87ad52868b94f9b18671b2014980f
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 14
+  completed_plans: 14
 ---
 
 # Project State
@@ -80,6 +80,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 05 P02 | 13 min | 2 tasks | 8 files |
 | Phase 05 P03 | 16min | 2 tasks | 6 files |
 | Phase 05 P04 | 9 min | 2 tasks | 2 files |
+| Phase 05 P05 | 6 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,8 @@ Recent decisions affecting current work:
 - [Phase 5]: 05-03: import_jsonl runs passes 2+3 in ONE spawn_blocking hop with per-record writer transactions; parse_jsonl is the all-or-nothing gate; the jsonl path never calls the embedder
 - [Phase 05]: 05-04: README Export & import section is one ## with ten ### subsections in plan order; sweep cadence documented as the shipped 'then hourly' (SWEEP_INTERVAL 3600 s); tests/cli.rs is realism-only (zero coverage by design, like tests/rest.rs) and pins the exact report strings
 - [Phase 05]: 05-04: phase-end gates recorded — cargo llvm-cov 95.61% lines (floor 80), D-01 transport grep empty, sql/ + Cargo.lock + .github/ unchanged across all phase-5 commits
+- [Phase 5]: [05-05]: Gap 1 (DIST-04 backstop truth 2.8) closed with a channel-ordered race test driving Store::export_rows directly — WAL snapshot isolation proven, no production change; every wait bounded by recv_timeout
+- [Phase 5]: [05-05]: Gap 2 (INTEROP-02 live re-embed) closed by a recorded run of the real binary against local nomic-embed-text (05-05-realism.sh, exit 0: backfilled=3 on first sweep tick, search_mode hybrid, target rank 0) — stays a script, never a cargo test
 
 ### Pending Todos
 
@@ -179,8 +182,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-25T12:35:43.091Z
-Stopped at: Completed 05-04-PLAN.md (phase 5: 4/4 plans executed, awaiting phase verification)
+Last session: 2026-10-25T13:42:17.195Z
+Stopped at: Completed 05-05-PLAN.md (phase 5: 5/5 plans executed, awaiting phase re-verification)
 Resume file: None
 
 ## Operator Next Steps
