@@ -8,7 +8,7 @@ While the version is `0.x`, a minor bump (`0.0.x` → `0.1.0`) may change contra
 every such change is listed under **Changed** and in the README's
 *Behavioral changes in v0.1.0* section.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-10-25
 
 Generated from `git log v0.0.1..main` (133 commits). Highlights: update and
 relations tools, hybrid search, and portable JSONL export/import.
@@ -90,6 +90,9 @@ relations tools, hybrid search, and portable JSONL export/import.
   either end.
 - Pre-migration backups are race-safe across processes opening the same
   database.
+- The MCP `initialize` reply now identifies the server as `agent-memory`, with
+  this release's version, a display title and the repository URL, instead of
+  the MCP SDK's own identity (`rmcp` `1.8.0`).
 
 ### Security
 
