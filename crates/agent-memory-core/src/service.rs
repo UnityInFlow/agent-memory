@@ -599,9 +599,10 @@ impl MemoryService {
     ///    as the edge time (D-05): `Linked { created: true }` counts
     ///    `links_imported`, `Linked { created: false }` counts
     ///    `links_skipped_duplicates`, and a link whose endpoint is not in the
-    ///    map (skipped as expired) or no longer exists counts
-    ///    `links_dropped`. Links are applied after ALL memories regardless of
-    ///    their position in the file.
+    ///    map (skipped as expired), no longer exists, or whose two endpoints
+    ///    collapsed onto ONE row through D-07 dedup (a post-remap self-pair,
+    ///    never handed to the store) counts `links_dropped`. Links are
+    ///    applied after ALL memories regardless of their position in the file.
     ///
     /// Each insert and link is its own writer transaction (the shape of
     /// `insert` / `link`), so a storage fault mid-pass leaves a partial
@@ -675,6 +676,18 @@ impl MemoryService {
             } in links
             {
                 match (ids.get(&from), ids.get(&to)) {
+                    (Some(a), Some(b)) if a == b => {
+                        // Both endpoints collapsed onto one row (D-07: two
+                        // file rows identical on the dedup key map to the
+                        // same id), so the edge has no second endpoint any
+                        // more. Count it as dropped, like an expired
+                        // endpoint, instead of handing the store a self-link:
+                        // `INSERT OR IGNORE` treats the 0003
+                        // `CHECK (from_id != to_id)` violation as an
+                        // ignorable conflict and would report it as a
+                        // "duplicate" that never existed (05-REVIEW WR-01).
+                        report.links_dropped += 1;
+                    }
                     (Some(a), Some(b)) => match store.link(*a, *b, kind, created_at)? {
                         LinkOutcome::Linked { created: true } => report.links_imported += 1,
                         LinkOutcome::Linked { created: false } => {

@@ -915,6 +915,40 @@ async fn identical_rows_collapse_to_one_on_import_and_count_a_duplicate() {
 }
 
 #[tokio::test]
+async fn a_link_between_two_rows_that_collapse_on_import_is_dropped_not_miscounted() {
+    // 05-REVIEW WR-01: the parser only rejects self-links on FILE keys. Two
+    // distinct keys that dedup to the same target id would reach the store as
+    // `link(N, N)`, which `INSERT OR IGNORE` swallows under the 0003 CHECK as
+    // a phantom "duplicate". The importer must count it as dropped instead.
+    let twin = || new_memory("the same row stored twice and linked", MemoryType::Decision);
+    let src = harness();
+    let first = store(&src, twin()).await;
+    let second = store(&src, twin()).await;
+    link(&src, first, second, LinkKind::RelatesTo).await;
+
+    let (text, report) = export_to_string(&src, "linked-twins.jsonl").await;
+    assert_eq!((report.memories, report.links), (2, 1));
+    assert_eq!(text.lines().count(), 4, "header + two memories + one link");
+
+    let dst = harness();
+    assert_eq!(
+        import(&dst, &text).await,
+        six(1, 1, 0, 0, 0, 1),
+        "the collapsed edge is dropped, never a 'skipped duplicate'"
+    );
+    assert_eq!(row_count(&dst.db_path), 1);
+    assert_eq!(
+        edge_count(&dst.db_path),
+        0,
+        "no self-link ever reaches the store"
+    );
+
+    // Re-importing is still idempotent and still reports the drop.
+    assert_eq!(import(&dst, &text).await, six(0, 2, 0, 0, 0, 1));
+    assert_eq!(edge_count(&dst.db_path), 0);
+}
+
+#[tokio::test]
 async fn expired_rows_are_skipped_and_counted_and_their_links_dropped() {
     // Source at 1_000: A expires at 1_050, B at 11_000, C never.
     let src = harness();

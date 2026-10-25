@@ -707,7 +707,7 @@ imported: 42, skipped duplicates: 3, skipped expired: 1, links imported: 17, lin
 | `skipped expired` | memories whose `expires_at` had already passed |
 | `links imported` | edges created |
 | `links skipped duplicates` | edges that already existed between the same two rows |
-| `links dropped` | edges whose endpoint was skipped as expired — not an error |
+| `links dropped` | edges whose endpoint was skipped as expired or whose two endpoints collapsed into one row — not an error |
 
 `export` reports `exported N memories and M links` on **stderr**, because
 stdout may be the file.
