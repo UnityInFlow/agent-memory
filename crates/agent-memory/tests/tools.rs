@@ -66,7 +66,8 @@ impl Server {
         }
     }
 
-    fn initialize(&mut self) {
+    /// Run the initialize handshake and return the server's initialize reply.
+    fn initialize(&mut self) -> serde_json::Value {
         self.send(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -77,12 +78,13 @@ impl Server {
                 "clientInfo": { "name": "tools-test", "version": "0.0.0" }
             }
         }));
-        let _ = self.read_response(1);
+        let response = self.read_response(1);
         // The initialized notification has no id and expects no response.
         self.send(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         }));
+        response
     }
 
     /// Call a tool by name and read its response, matching the given request id.
@@ -114,6 +116,39 @@ fn tool_text(response: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("no text content in tool result: {response}"))
         .to_string()
+}
+
+/// Pins the MCP identity that clients display and log: the initialize reply must
+/// name agent-memory and its own version, never fall back to the SDK's identity.
+#[test]
+fn initialize_reports_agent_memory_server_info_over_stdio() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+
+    let mut server = Server::spawn(&db_path);
+    let response = server.initialize();
+    let server_info = response
+        .pointer("/result/serverInfo")
+        .unwrap_or_else(|| panic!("no serverInfo in initialize reply: {response}"));
+
+    assert_eq!(
+        server_info.get("name").and_then(|v| v.as_str()),
+        Some("agent-memory")
+    );
+    assert_eq!(
+        server_info.get("version").and_then(|v| v.as_str()),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        server_info.get("title").and_then(|v| v.as_str()),
+        Some("Agent Memory")
+    );
+    assert_eq!(
+        server_info.get("websiteUrl").and_then(|v| v.as_str()),
+        Some("https://github.com/UnityInFlow/agent-memory")
+    );
+
+    server.shutdown();
 }
 
 #[test]

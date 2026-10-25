@@ -496,10 +496,13 @@ impl MemoryMcp {
 impl ServerHandler for MemoryMcp {
     fn get_info(&self) -> ServerInfo {
         // ServerInfo (InitializeResult) is #[non_exhaustive]; start from Default
-        // and set the fields we care about.
+        // and set the fields we care about. rmcp's default Implementation reports
+        // the SDK's own crate name and version, so ours is set explicitly.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.server_info = Implementation::from_build_env();
+        info.server_info = Implementation::new("agent-memory", env!("CARGO_PKG_VERSION"))
+            .with_title("Agent Memory")
+            .with_website_url(env!("CARGO_PKG_REPOSITORY"));
         info.instructions = Some(
             "Persistent typed agent memory: store, list, search, update, link/unlink, and forget typed memories."
                 .to_string(),
