@@ -27,11 +27,16 @@
 //! boxed-writer path is exercised end to end. Round trips use TWO harnesses —
 //! a source and a target — each with its own database and clock. Stored
 //! columns and edge rows are read through a raw side connection so the
-//! assertions see the tables themselves.
+//! assertions see the tables themselves. The store is also exposed as an
+//! `Arc<SqliteStore>` so the one-snapshot concurrency proof (gap closure
+//! 05-05) can drive `Store::export_rows` and a writer thread against one
+//! store.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
@@ -39,13 +44,14 @@ use agent_memory_core::domain::{
     LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, NewMemory,
 };
 use agent_memory_core::embed::{Embedder, FakeEmbedder};
-use agent_memory_core::export::{Record, FORMAT_NAME, FORMAT_VERSION};
+use agent_memory_core::export::{ExportEvent, ExportSnapshot, Record, FORMAT_NAME, FORMAT_VERSION};
 use agent_memory_core::import::jsonl::{parse_jsonl, JsonlFile};
 use agent_memory_core::service::{
     ExportReport, ImportReport, ListArgs, MemoryService, SearchArgs, SearchMode,
 };
 use agent_memory_core::store::migrations::LATEST_SCHEMA_VERSION;
 use agent_memory_core::store::sqlite::{register_vec_extension, SqliteStore};
+use agent_memory_core::store::Store;
 
 /// The literal passed as `agent_memory_version` — the core crate has no say
 /// in the binary's version (RESEARCH Pitfall 9), so the test pins what it
@@ -54,6 +60,7 @@ const TEST_VERSION: &str = "test-0.0.0";
 
 struct Harness {
     service: MemoryService,
+    store: Arc<SqliteStore>,
     clock: Arc<TestClock>,
     db_path: PathBuf,
     dir: tempfile::TempDir,
@@ -66,16 +73,17 @@ fn harness() -> Harness {
 fn harness_with(embedder: Arc<dyn Embedder>) -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
-    let store = SqliteStore::open(&db_path).expect("open store");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
     let clock = Arc::new(TestClock::new(1_000));
     let service = MemoryService::new(
-        Arc::new(store),
+        store.clone(),
         clock.clone() as Arc<dyn Clock>,
         embedder,
         DecayConfig::default(),
     );
     Harness {
         service,
+        store,
         clock,
         db_path,
         dir,
@@ -416,6 +424,190 @@ async fn two_exports_of_an_unchanged_database_are_byte_identical() {
     assert_eq!(first, second);
     assert_eq!(first_report, second_report);
     assert_eq!(first.lines().count(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Export half — gap closure 05-05: one-snapshot concurrency proof
+// ---------------------------------------------------------------------------
+
+/// Serialise a header followed by the records that were streamed after it as
+/// one format-v1 file: one `serde_json` line per record, newline-terminated.
+fn record_lines(header: Record, records: &[Record]) -> String {
+    let mut text = String::new();
+    for record in std::iter::once(&header).chain(records.iter()) {
+        text.push_str(&serde_json::to_string(record).expect("record serialises"));
+        text.push('\n');
+    }
+    text
+}
+
+/// Held-out evidence for the 05-02 backstop truth (D-06 / D-02, T-05-19,
+/// PITFALLS 5): every row of an export streams from ONE read transaction on
+/// ONE pooled connection, so the header counts and the link records can never
+/// straddle a concurrent write.
+///
+/// The writer thread is a real second connection lane — the store's writer
+/// mutex — racing the exporter's read-pool connection, exactly the
+/// MCP-server-plus-REST-daemon situation. Ordering is decided only by the two
+/// channel hand-offs (`go`: exporter → writer, fired on the first memory
+/// record; `done`: writer → exporter, carrying the new id); every wait is
+/// bounded by `recv_timeout`, so a blocked write (a deadlock between the open
+/// snapshot and the writer) fails fast with a named message instead of hanging
+/// the suite. WAL snapshot isolation is what makes the committed row invisible
+/// to the open export while a fresh connection already sees it.
+#[tokio::test]
+async fn a_concurrent_link_committed_mid_export_cannot_produce_a_dangling_key() {
+    let h = harness();
+    let ((a, _b, _c), _) = seed_round_trip_source(&h).await;
+    assert_eq!(row_count(&h.db_path), 3);
+    assert_eq!(edge_count(&h.db_path), 2);
+
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<i64>();
+    let writer_store = h.store.clone();
+    let now = h.clock.now();
+    // A std::thread, not a tokio task: `Store` methods are synchronous and the
+    // exporter below blocks the current-thread runtime while it waits.
+    let writer = std::thread::spawn(move || {
+        go_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the exporter never reached its first memory record within 10 s");
+        let new_id = writer_store
+            .insert(
+                new_memory("delta arrived mid-export", MemoryType::Pattern),
+                None,
+                now,
+            )
+            .expect("a concurrent insert must not block behind the open read snapshot");
+        let outcome = writer_store
+            .link(new_id, a, LinkKind::CausedBy, now)
+            .expect("a concurrent link must not block behind the open read snapshot");
+        assert_eq!(outcome, LinkOutcome::Linked { created: true });
+        done_tx
+            .send(new_id)
+            .expect("the exporter is waiting for the committed id");
+        new_id
+    });
+
+    let mut fired = false;
+    let mut snapshot: Option<ExportSnapshot> = None;
+    let mut records: Vec<Record> = Vec::new();
+    let mut new_id_seen: Option<i64> = None;
+    h.store
+        .export_rows(&mut |event: ExportEvent| -> Result<(), MemoryError> {
+            match event {
+                ExportEvent::Snapshot(s) => snapshot = Some(s),
+                ExportEvent::Record(record) => {
+                    if !fired && matches!(record, Record::Memory { .. }) {
+                        fired = true;
+                        go_tx.send(()).expect("the writer thread is waiting on go");
+                        let new_id = done_rx.recv_timeout(Duration::from_secs(10)).expect(
+                            "the writer did not commit within 10 s while the export snapshot \
+                             was open — the write blocked behind the reader (deadlock)",
+                        );
+                        // A FRESH raw connection already sees the commit while
+                        // this export's read transaction is still open.
+                        assert_eq!(
+                            row_count(&h.db_path),
+                            4,
+                            "the writer's memory is committed while the snapshot is open"
+                        );
+                        assert_eq!(
+                            edge_count(&h.db_path),
+                            3,
+                            "the writer's link is committed while the snapshot is open"
+                        );
+                        new_id_seen = Some(new_id);
+                    }
+                    records.push(record);
+                }
+            }
+            Ok(())
+        })
+        .expect("export_rows succeeds with a writer racing it");
+
+    let new_id = writer.join().expect("the writer thread completed");
+    assert_eq!(new_id_seen, Some(new_id), "the hand-off carried the new id");
+
+    // Snapshot isolation: the writer's commit is invisible to THIS export.
+    let snapshot = snapshot.expect("the snapshot event was emitted first");
+    assert_eq!(snapshot.memories, 3);
+    assert_eq!(snapshot.links, 2);
+    let mut memory_records = 0;
+    let mut link_records = 0;
+    for record in &records {
+        match record {
+            Record::Header { .. } => panic!("the store never emits a header record"),
+            Record::Memory { key, .. } => {
+                memory_records += 1;
+                assert_ne!(
+                    *key, new_id,
+                    "the mid-export memory leaked into the snapshot"
+                );
+            }
+            Record::Link { from, to, .. } => {
+                link_records += 1;
+                assert!(
+                    *from != new_id && *to != new_id,
+                    "the mid-export link leaked into the snapshot: {from} -> {to}"
+                );
+            }
+        }
+    }
+    assert_eq!(memory_records, 3);
+    assert_eq!(link_records, 2);
+
+    // The raced file — header mirrored from the snapshot (as the service does)
+    // plus every visited record — is accepted by the strict reader with exact
+    // counts and no dangling key.
+    let header = Record::Header {
+        format: FORMAT_NAME.to_string(),
+        version: FORMAT_VERSION,
+        exported_at: h.clock.now(),
+        embedding_model: snapshot.embedding_model.clone(),
+        embedding_dim: snapshot.embedding_dim,
+        schema_version: LATEST_SCHEMA_VERSION,
+        agent_memory_version: TEST_VERSION.to_string(),
+        exported_rows: snapshot.memories,
+        exported_links: snapshot.links,
+    };
+    let raced = record_lines(header, &records);
+    let parsed = parse_jsonl(&raced).expect(
+        "the raced export must parse as format v1 — a dangling link key or a count \
+         mismatch here means two snapshots were straddled",
+    );
+    assert_eq!(parsed.memories.len(), 3);
+    assert_eq!(parsed.links.len(), 2);
+
+    // The NEXT snapshot sees both the memory and the edge.
+    let (text, report) = export_to_string(&h, "after-race.jsonl").await;
+    assert_eq!(
+        report,
+        ExportReport {
+            memories: 4,
+            links: 3
+        }
+    );
+    let after = lines(&text);
+    assert!(
+        after.iter().any(|record| matches!(
+            record,
+            Record::Memory { key, content, .. }
+                if *key == new_id && content == "delta arrived mid-export"
+        )),
+        "the next export carries the mid-export memory:\n{text}"
+    );
+    assert!(
+        after.iter().any(|record| matches!(
+            record,
+            Record::Link { from, to, kind, .. }
+                if *from == new_id && *to == a && kind == "caused_by"
+        )),
+        "the next export carries the mid-export link:\n{text}"
+    );
+    let parsed = parse_jsonl(&text).expect("the next export parses as format v1");
+    assert_eq!(parsed.memories.len(), 4);
+    assert_eq!(parsed.links.len(), 3);
 }
 
 // ---------------------------------------------------------------------------
