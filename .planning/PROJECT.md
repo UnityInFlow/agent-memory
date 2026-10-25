@@ -39,6 +39,12 @@ An agent can persist a structured memory and retrieve the right one later — ac
 - ✓ Pre-built binaries (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew formula — Phase 2
 - ✓ Input validation at the shared MemoryService seam — limit (1–200) and ttl_secs (1–3155760000) rejected as REST 400 / MCP invalid_params, never 500, never a silent clamp (API-02) — Validated in Phase 3 (v1.1)
 - ✓ Exact tag matching via json_each equality on all three query paths — 'rustling' no longer matches tag=rust (API-03, behavioral change recorded for v0.1.0 notes) — Validated in Phase 3 (v1.1)
+- ✓ `memory_update` merge-patch with same-transaction FTS re-mirror + vector re-embed; unknown id is clean not-found data (MCP-06) — Validated in Phase 4 (v1.1)
+- ✓ Flat typed relations `memory_link`/`memory_unlink` (relates_to symmetric, supersedes/caused_by directed), opt-in 1-hop expansion, cascade on forget/TTL (MCP-07) — Validated in Phase 4 (v1.1)
+- ✓ Migration 0003 with hygiene: frozen 0001/0002 fixture test, pre-migration online backup, friendly newer-schema refusal (STORE-05) — Validated in Phase 4 (v1.1)
+- ✓ Decay-aware hybrid RRF search (`search_mode: "hybrid"`, k=60), keyword degrade byte-identical to v1.0, forgiving FTS5 query handling (SEARCH-04, SEARCH-05) — Validated in Phase 4 (v1.1)
+- ✓ `agent-memory export` writes format-v1 JSONL (versioned header with embedding model/dim and counts, memory + link records keyed by export-local ids, no vectors), stdout or atomic 0600 `--output` (DIST-04) — Validated in Phase 5 (v1.1)
+- ✓ `agent-memory import --from jsonl` restores idempotently into empty or non-empty databases with key→id link remapping, expired rows skipped and counted, rows landing `embedding_status = 0` for the sweep backfill, malformed files rejected as `InvalidArgument("line N: …")` with nothing written (INTEROP-02) — Validated in Phase 5 (v1.1)
 
 ### Active
 
@@ -53,7 +59,7 @@ An agent can persist a structured memory and retrieve the right one later — ac
 
 ## Context
 
-- **Current state (v1.1 Phase 3 complete, 2026-07-12):** API hardening landed on the shipped v0.0.1 codebase (validation seam + exact tag matching, 7/7 must-haves verified); CI revived on GitHub-hosted `ubuntu-latest` (D-12); cross-compile spike answered the milestone's feasibility unknown — all 4 legs GREEN, Phase 6 adopts cargo-xwin 0.23.0/msvc with mingw-w64/gnu fallback and the musl CFLAGS shim proven. Next: Phase 4 (memory_update, relations, hybrid RRF).
+- **Current state (v1.1 Phase 5 complete, 2026-10-25):** Phases 3–5 landed on the shipped v0.0.1 codebase: validation seam + exact tag matching (Phase 3); `memory_update`, flat typed relations, migration 0003 hygiene and decay-aware hybrid RRF (Phase 4, 28/28 must-haves); portable JSONL export/import with format v1 frozen, plus storage-error redaction on every service path (Phase 5, 35/35 must-haves, live-Ollama round trip observed). CI on GitHub-hosted `ubuntu-latest` (D-12); release pipeline on GitHub-hosted runners with SLSA provenance (quick task 261009-hc1). Suite: 287 passed / 0 failed / 2 ignored, 95.6 % line coverage. Next: Phase 6 (musl + Windows binaries on the spike-chosen toolchains, v0.1.0 release).
 - **v1.0 baseline (shipped 2026-07-12):** v0.0.1 released publicly — GitHub Release with 4 checksummed target tarballs (macOS arm64/x86_64, Linux x86_64/aarch64 gnu) + Homebrew tap (`brew install unityinflow/tap/agent-memory`). ~5,400 LOC Rust across `agent-memory-core` + `agent-memory` crates; clippy `-D warnings` clean; >80% coverage CI gate; 25/25 STRIDE threats closed. Known v2 debt: musl binaries (sqlite-vec BSD typedefs), Windows (cfg(unix) refactor), REST boundary-value hardening, SEARCH-04 hybrid RRF, MCP-06 update/relations, DIST-04 export.
 - **Ecosystem position:** Tool 10 of 20 in UnityInFlow. Phase 3. Its own `CLAUDE.md` marks it *"Planned — no strict blocking dependencies,"* so it can proceed in parallel with the active Phase 2 close-out (budget-breaker starter, kore v0.1.0).
 - **Why it exists:** Every agent tool reinvents state storage (GSD has STATE.md, Superpowers has skill context, RTK has its own SQLite DB). Switching runtimes loses all project context. A standard MCP memory API works across tools and survives sessions.
@@ -91,6 +97,10 @@ An agent can persist a structured memory and retrieve the right one later — ac
 | Two-tier error taxonomy at the store seam (InvalidQuery → 400/invalid_params; internal → 500/internal_error) | Bad client input must never read as a server fault, on either transport | ✓ Good — proven live at 4 layers (02-05) |
 | Phase 6 Windows toolchain: cargo-xwin 0.23.0/msvc first, mingw-w64/gnu as proven fallback; musl via zigbuild + `-Du_int*_t` CFLAGS shim | Phase 3 spike ran all 4 legs GREEN in one hosted dispatch (run 29196226289) — feasibility unknown answered before distribution work | ✓ Verdict recorded in spike-cross-compile.yml header |
 | CI on GitHub-hosted `ubuntu-latest` for this public repo (ecosystem D-02 exception) | OPS-02 makes org self-hosted runners unreachable from public repos; the gate was silently dead | ✓ Good — first green runs since going public (D-12) |
+| Export/import are CLI-only in v0.1.0; malformed files are `InvalidArgument` in core (Phase 5 D-01/D-11) | An MCP export would route the corpus through the JSON-RPC stdout channel and a REST import is an arbitrary-file-read primitive; keeping the error in core preserves the two-tier taxonomy for any later transport | ✓ Good — strict all-or-nothing parser, nothing written on failure, 25-row malformed table |
+| JSONL format v1 is a frozen one-way contract: header (format/version/model/dim/schema/counts), memory and link records, derived fields and vectors excluded (Phase 5 D-03..D-06) | A shipped tool's export is a compatibility contract from the first file written; vectors are model-pinned derived data the sweep rebuilds for free | ✓ Good — goldens pin the wire order; any change needs `version: 2` + a reader for 1 |
+| Import identity stays `(source, mem_type, content)`, links remap through a key→id map, created_at/expires_at/access_count preserved, last_accessed refreshed, expired rows skipped-and-counted, rows land pending and never embed inline (Phase 5 D-07..D-10, D-13) | Zero new schema; a preserved stale `last_accessed` would make a restore unfindable by rank; one re-embed mechanism, zero mixing risk | ✓ Good — review-driven hardening: post-remap self-links dropped, `access_count` bounded + saturating bump, dedup probe ignores expired-but-unswept rows |
+| Storage-engine error text is redacted at the `MemoryService` seam on every public method, both transports and CLI (Phase 5 D-14, closes 04-REVIEW IN-01) | One seam beats two transport mappers; `SEARCH_STORAGE_FAILURE` text kept byte-identical so Phase 4 goldens hold | ✓ Good — 10 fault-injection tests incl. export/import, `/health`, MCP |
 
 ## Evolution
 
@@ -110,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-12 after v1.1 Phase 3 (API hardening & toolchain spikes complete)*
+*Last updated: 2026-10-25 after v1.1 Phase 5 (portable export & import complete; Phase 4 validations recorded retroactively)*
