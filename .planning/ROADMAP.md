@@ -28,7 +28,7 @@ Full phase details: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md)
 
 - [x] **Phase 3: API Hardening & Toolchain Spikes** - Out-of-bounds limit/ttl rejected as client errors and exact tag matching at the shared service seam, plus early Windows/musl cross-compile spikes answering the milestone's only feasibility unknown (completed 2026-07-12)
 - [x] **Phase 4: Memory Update, Relations & Hybrid Search** - `memory_update` with same-transaction re-embed, flat typed links with cascade, migration 0003 hygiene, and decay-aware hybrid RRF as a parallel track (completed 2026-10-23)
-- [ ] **Phase 5: Portable Export & Import** - Versioned JSONL export (link edges included, embeddings excluded) and idempotent cross-machine import with sweep-backfill re-embedding
+- [x] **Phase 5: Portable Export & Import** - Versioned JSONL export (link edges included, embeddings excluded) and idempotent cross-machine import with sweep-backfill re-embedding (completed 2026-10-25)
 - [ ] **Phase 6: Distribution & v0.1.0 Release** - musl + Windows binaries on the spike-chosen toolchains and the checksummed v0.1.0 release with Homebrew update and behavioral-change release notes
 
 ## Phase Details
@@ -152,5 +152,5 @@ Phases execute in numeric order: 3 → 4 → 5 → 6
 | 2. Semantic Search, Interop & Release | v1.0 | 5/5 | Complete | 2026-07-12 |
 | 3. API Hardening & Toolchain Spikes | v1.1 | 2/2 | Complete    | 2026-07-12 |
 | 4. Memory Update, Relations & Hybrid Search | v1.1 | 7/7 | Complete    | 2026-10-23 |
-| 5. Portable Export & Import | v1.1 | 5/5 | In Progress|  |
+| 5. Portable Export & Import | v1.1 | 5/5 | Complete    | 2026-10-25 |
 | 6. Distribution & v0.1.0 Release | v1.1 | 0/? | Not started | - |
