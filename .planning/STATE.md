@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 5
 current_phase_name: Portable Export & Import
 status: executing
-stopped_at: Phase 5 context gathered
-last_updated: "2026-10-25T11:22:19.617Z"
-last_activity: 2026-10-23
-last_activity_desc: Phase 04 complete, transitioned to Phase 5
-state_head: e45113cebc347f2b034cf7870133557e11e88070
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-10-25T11:41:56.528Z"
+last_activity: 2026-10-25
+last_activity_desc: Phase 5 execution started
+state_head: 5994d3817c5ed2db4e96c8145e0872a051b80b6c
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 13
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12)
 
 **Core value:** An agent can persist a structured memory and retrieve the right one later — across sessions and tools — over a standard MCP interface, with no cloud.
-**Current focus:** Phase 04 — Memory Update, Relations & Hybrid Search
+**Current focus:** Phase 5 — Portable Export & Import
 
 ## Current Position
 
-Phase: 5 (Portable Export & Import) — READY TO EXECUTE
-Plan: Not started
+Phase: 5 (Portable Export & Import) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-10-23 - Completed quick task 261023-v6w: WR-04: reject memory_list expand_links without limit
+Last activity: 2026-10-25 — Phase 5 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -76,6 +76,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P05 | 10 min | 3 tasks | 12 files |
 | Phase 04 P06 | 7 min | 3 tasks | 9 files |
 | Phase 04 P07 | 12 min | 3 tasks | 7 files |
+| Phase 05 P01 | 14 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-07: deny_unknown_fields added to UpdateArgs/UpdateBody only (new v0.1.0 surfaces, REVIEW WR-02); the [03-01] decision stands for the v0.0.1 DTOs, so the v0.1.0 release-notes delta for existing surfaces is unchanged. Over MCP, rmcp 1.8 reports the rejection as a tool error result (isError: true, "failed to deserialize parameters: unknown field ..."), not a JSON-RPC -32602; REST is a 400 {"error"}.
 - [Phase 04]: 04-07: backup temp is pid-qualified and a process-wide BACKUP_LOCK serializes backups within one process, so same-process openers never share a temp; prune tolerates NotFound from a concurrent opener
 - [Phase 04]: 04-07: WR-01 closed with verify-then-rename + tolerate-by-re-probe (no file lock, no new dep); cross-process exclusive lock stays deferred
+- [Phase 05-01]: redact_storage_error(op, e) at the MemoryService seam on all nine methods (store, list, search, import, forget, link, unlink, update, sweep) via *_unredacted inner fns; transport mappers byte-identical; closes 04-REVIEW IN-01 (D-14)
+- [Phase 05-01]: Store::exists -> Store::find_by_key(Option<i64>) with the same NULL-safe (source, mem_type, content) key (D-07); LinkOutcome::Linked { created: bool } from tx.changes() across 7 sites, storage-only not a wire change (D-12)
+- [Phase 05-01]: ImportedMemory + Store::insert_imported (no embedding parameter, always embedding_status 0, last_accessed = now, created_at/access_count/expires_at preserved) behind one shared insert_row helper; importer skips expires_at <= now, sweep deletes < now (D-10, D-13)
 
 ### Pending Todos
 
@@ -164,9 +168,9 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-25T10:11:50.084Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-portable-export-import/05-CONTEXT.md
+Last session: 2026-10-25T11:41:56.437Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
