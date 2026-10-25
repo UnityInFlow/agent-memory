@@ -46,6 +46,12 @@ async fn import_loads_typed_searchable_memories_idempotently() {
     let first = service.import(parsed.drafts).await.expect("first import");
     assert_eq!(first.imported, 9);
     assert_eq!(first.skipped_duplicates, 0);
+    // The gsd-state path has no expiry and no links: the four jsonl-only
+    // counts are always zero here (Phase 5 D-12).
+    assert_eq!(first.skipped_expired, 0);
+    assert_eq!(first.links_imported, 0);
+    assert_eq!(first.links_skipped_duplicates, 0);
+    assert_eq!(first.links_dropped, 0);
 
     // Per-type counts through the normal list path.
     let count = |mem_type: Option<MemoryType>, tag: Option<&str>| {

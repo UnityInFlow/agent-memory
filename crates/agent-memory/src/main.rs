@@ -78,21 +78,26 @@ enum Command {
         #[arg(long)]
         allow_remote: bool,
     },
-    /// Import memories from an external file (INTEROP-01). Re-running the same
-    /// import is a no-op: duplicates are skipped on the exact
-    /// (source, type, content) key.
+    /// Import memories from an external file: a GSD STATE.md (INTEROP-01) or
+    /// an agent-memory export (INTEROP-02). Re-running the same import is a
+    /// no-op: duplicates are skipped on the exact (source, type, content) key.
+    /// A jsonl import also recreates every link, lands every row pending
+    /// embedding (the sweep re-embeds locally), skips rows already expired,
+    /// and rejects a malformed file by line before anything is written.
     Import {
-        /// Source format. Supported: gsd-state (a GSD .planning/STATE.md file).
+        /// Source format. Supported: gsd-state (a GSD .planning/STATE.md
+        /// file), jsonl (an agent-memory export).
         #[arg(long)]
         from: String,
 
         /// Path to the file to import.
         path: PathBuf,
 
-        /// Scope stamped on every imported memory. Default: the GSD project
-        /// directory name — the parent of the nearest `.planning` component in
-        /// the (canonicalized) path — or the current directory's name when the
-        /// path has no `.planning` ancestor.
+        /// gsd-state only: scope stamped on every imported memory. Default:
+        /// the GSD project directory name — the parent of the nearest
+        /// `.planning` component in the (canonicalized) path — or the current
+        /// directory's name when the path has no `.planning` ancestor. A
+        /// jsonl file carries each memory's own scope, so --scope is rejected.
         #[arg(long)]
         scope: Option<String>,
     },
@@ -231,10 +236,20 @@ async fn serve_rest(
     Ok(())
 }
 
-/// Run a one-shot import (INTEROP-01): parse the file into typed drafts, wire
-/// the store/embedder exactly like [`serve`], import idempotently, and print
-/// the report to STDOUT. stdout is sanctioned here — this is a CLI subcommand,
-/// not the MCP transport (MCP-05 applies only to `serve`).
+/// Run a one-shot import: parse the file into typed records, wire the
+/// store/embedder exactly like [`serve`], import idempotently, and print the
+/// report to STDOUT. stdout is sanctioned here — this is a CLI subcommand, not
+/// the MCP transport (MCP-05 applies only to `serve`).
+///
+/// Two formats, two tolerance policies (Phase 5 D-11):
+///
+/// - `gsd-state` (INTEROP-01): the tolerant STATE.md scraper; malformed
+///   bullets are skip-counted and reported.
+/// - `jsonl` (INTEROP-02): the strict format-v1 reader. The WHOLE file is
+///   parsed and validated BEFORE the database is resolved or opened, so a
+///   malformed file never creates or touches a database and the error names
+///   the offending line. The embedder is constructed but never called: every
+///   imported row lands pending and the sweep re-embeds it locally (D-13).
 async fn run_import(
     db_flag: Option<PathBuf>,
     ollama_url: String,
@@ -242,32 +257,75 @@ async fn run_import(
     path: PathBuf,
     scope: Option<String>,
 ) -> anyhow::Result<()> {
-    if from != "gsd-state" {
-        anyhow::bail!("unsupported --from value {from:?} (supported formats: gsd-state)");
+    match from.as_str() {
+        "gsd-state" => {
+            let text = read_import_file(&path)?;
+            let scope = scope.unwrap_or_else(|| default_scope_for(&path));
+            let parsed = agent_memory_core::import::gsd_state::parse_gsd_state(&text, Some(scope));
+
+            let service = open_service(db_flag, ollama_url)?;
+            let report = service.import(parsed.drafts).await.context("importing")?;
+            println!(
+                "imported: {}, skipped duplicates: {}, malformed lines skipped: {}",
+                report.imported, report.skipped_duplicates, parsed.skipped
+            );
+        }
+        "jsonl" => {
+            if scope.is_some() {
+                anyhow::bail!(
+                    "--scope applies only to --from gsd-state (a jsonl file carries each memory's own scope)"
+                );
+            }
+            let text = read_import_file(&path)?;
+            // Validate the whole file first (D-08 pass 1): a defect is
+            // reported by line and the database is never even opened.
+            let file = agent_memory_core::import::jsonl::parse_jsonl(&text)
+                .with_context(|| format!("validating {}", path.display()))?;
+
+            let service = open_service(db_flag, ollama_url)?;
+            let report = service.import_jsonl(file).await.context("importing")?;
+            println!(
+                "imported: {}, skipped duplicates: {}, skipped expired: {}, links imported: {}, links skipped duplicates: {}, links dropped: {}",
+                report.imported,
+                report.skipped_duplicates,
+                report.skipped_expired,
+                report.links_imported,
+                report.links_skipped_duplicates,
+                report.links_dropped
+            );
+            let pending = report.imported;
+            println!(
+                "{pending} rows pending embedding — the sweep backfills them on the next serve/serve-rest start (128 per tick)"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "unsupported --from value {other:?} (supported formats: gsd-state, jsonl)"
+            );
+        }
     }
+    Ok(())
+}
 
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let scope = scope.unwrap_or_else(|| default_scope_for(&path));
-    let parsed = agent_memory_core::import::gsd_state::parse_gsd_state(&text, Some(scope));
+/// Read an import file to a string with the path in the error context.
+fn read_import_file(path: &std::path::Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+}
 
+/// Resolve the DB path, open the store and build the service with the real
+/// clock and the Ollama embedder — the one-shot subcommand wiring shared by
+/// both import formats.
+fn open_service(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<MemoryService> {
     let db_path = resolve_db_path(db_flag).context("resolving database path")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
     let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url));
-    let service = MemoryService::new(
+    Ok(MemoryService::new(
         Arc::new(store),
         Arc::new(SystemClock),
         embedder,
         DecayConfig::default(),
-    );
-
-    let report = service.import(parsed.drafts).await.context("importing")?;
-    println!(
-        "imported: {}, skipped duplicates: {}, malformed lines skipped: {}",
-        report.imported, report.skipped_duplicates, parsed.skipped
-    );
-    Ok(())
+    ))
 }
 
 /// Run a one-shot export (DIST-04): wire the store/embedder exactly like

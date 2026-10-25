@@ -24,6 +24,7 @@ use crate::domain::{
 };
 use crate::embed::Embedder;
 use crate::export::{ExportEvent, Record, FORMAT_NAME, FORMAT_VERSION};
+use crate::import::jsonl::{JsonlFile, JsonlLink, JsonlMemory};
 use crate::store::migrations::LATEST_SCHEMA_VERSION;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
@@ -175,15 +176,50 @@ pub struct SearchOutcome {
     pub results: Vec<MemoryView>,
 }
 
-/// Outcome of one [`MemoryService::import`] batch (INTEROP-01): how many drafts
-/// landed as new rows and how many were dropped as exact duplicates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+/// Outcome of one import — [`MemoryService::import`] (INTEROP-01, gsd-state
+/// drafts) or [`MemoryService::import_jsonl`] (INTEROP-02, a format-v1 file).
+/// The gsd-state path only ever populates the first two counts and reports
+/// zeros for the rest (Phase 5 D-12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ImportReport {
-    /// Drafts inserted as new memories.
+    /// Drafts (or memory records) inserted as new memories.
     pub imported: usize,
-    /// Drafts skipped because an identical `(source, mem_type, content)` row
-    /// already exists — the idempotency guarantee.
+    /// Drafts (or memory records) skipped because an identical
+    /// `(source, mem_type, content)` row already exists — the idempotency
+    /// guarantee.
     pub skipped_duplicates: usize,
+    /// Memory records whose `expires_at <= now` at import time: never inserted
+    /// (D-10). Always `0` for gsd-state drafts, which carry no expiry.
+    pub skipped_expired: usize,
+    /// Link records that created a new edge.
+    pub links_imported: usize,
+    /// Link records whose edge already existed (an idempotent re-import).
+    pub links_skipped_duplicates: usize,
+    /// Link records dropped because an endpoint was skipped as expired, or
+    /// vanished between the memories pass and the links pass.
+    pub links_dropped: usize,
+}
+
+/// How far ahead of the local clock an export header's `exported_at` may sit
+/// before the import logs a clock-skew warning (D-10): one hour.
+pub const CLOCK_SKEW_TOLERANCE_SECS: i64 = 3600;
+
+/// `Some(warning)` iff `exported_at` is more than
+/// [`CLOCK_SKEW_TOLERANCE_SECS`] ahead of `now`. Expiry and freshness of the
+/// imported rows are evaluated against THIS machine's clock, so a source
+/// machine running fast can make fresh rows look expired; the warning names
+/// both clocks so the user can check them. Never an error — the import
+/// continues.
+pub(crate) fn clock_skew_message(exported_at: i64, now: i64) -> Option<String> {
+    let delta = exported_at.saturating_sub(now);
+    if delta <= CLOCK_SKEW_TOLERANCE_SECS {
+        return None;
+    }
+    Some(format!(
+        "export header exported_at {exported_at} is {delta}s ahead of this machine's clock \
+         ({now}); check both clocks — expiry and freshness of imported rows are computed \
+         against this machine"
+    ))
 }
 
 /// Outcome of one [`MemoryService::export`] (DIST-04): how many memory and
@@ -498,6 +534,7 @@ impl MemoryService {
             return Ok(ImportReport {
                 imported: 0,
                 skipped_duplicates,
+                ..ImportReport::default()
             });
         }
 
@@ -532,7 +569,127 @@ impl MemoryService {
         Ok(ImportReport {
             imported,
             skipped_duplicates,
+            ..ImportReport::default()
         })
+    }
+
+    /// Restore a parsed format-v1 export file (INTEROP-02; D-07, D-08, D-10,
+    /// D-12, D-13) — passes 2 and 3 of the two-pass import. Pass 1, the
+    /// all-or-nothing validation, is [`crate::import::jsonl::parse_jsonl`]:
+    /// this method only accepts a [`JsonlFile`] that already parsed whole, so
+    /// a malformed file can never reach a write.
+    ///
+    /// Both passes run in ONE `spawn_blocking` hop over the store, with ONE
+    /// clock reading as `now`:
+    ///
+    /// 2. **Memories pass**, in file order. A record with
+    ///    `expires_at <= now` is skipped and counted as `skipped_expired` —
+    ///    never inserted for the sweep to delete later (note the `<=`: the
+    ///    sweep deletes `expires_at < now`, so a row expiring exactly now is
+    ///    skipped here and would not yet be swept). Otherwise the record is
+    ///    deduped through [`Store::find_by_key`] on `(source, mem_type,
+    ///    content)` — a hit maps the export-local `key` to the EXISTING row's
+    ///    id and counts `skipped_duplicates`; a miss inserts via
+    ///    [`Store::insert_imported`] (preserved `created_at`, `access_count`,
+    ///    `expires_at`; `last_accessed` refreshed to `now`) and maps the key
+    ///    to the new id. The `key → id` map is the ONLY way a file key is ever
+    ///    read; a key is never written as an id (PITFALLS 18).
+    /// 3. **Links pass**. Each link's endpoints are looked up in the map and
+    ///    linked through [`Store::link`] with the record's own `created_at`
+    ///    as the edge time (D-05): `Linked { created: true }` counts
+    ///    `links_imported`, `Linked { created: false }` counts
+    ///    `links_skipped_duplicates`, and a link whose endpoint is not in the
+    ///    map (skipped as expired) or no longer exists counts
+    ///    `links_dropped`. Links are applied after ALL memories regardless of
+    ///    their position in the file.
+    ///
+    /// Each insert and link is its own writer transaction (the shape of
+    /// `insert` / `link`), so a storage fault mid-pass leaves a partial
+    /// import — which a re-run completes idempotently, since every record
+    /// dedups. Validation, not writing, is the all-or-nothing gate.
+    ///
+    /// **This path never embeds inline** (D-13): every imported row lands
+    /// `embedding_status = 0` with no vector, and the sweep backfill
+    /// ([`BACKFILL_BATCH`] per tick) re-embeds it against the LOCAL `meta`
+    /// pin — exactly one re-embed mechanism, so a vector produced by the
+    /// source machine's model can never enter this corpus (PITFALLS 17).
+    ///
+    /// A header `exported_at` more than [`CLOCK_SKEW_TOLERANCE_SECS`] ahead
+    /// of `now` logs one `tracing` warning and the import continues (D-10).
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] with
+    /// `op = "import"` (D-14).
+    pub async fn import_jsonl(&self, file: JsonlFile) -> Result<ImportReport, MemoryError> {
+        self.import_jsonl_unredacted(file)
+            .await
+            .map_err(|e| redact_storage_error("import", e))
+    }
+
+    /// The body of [`Self::import_jsonl`], before its errors are tiered for
+    /// the wire.
+    async fn import_jsonl_unredacted(&self, file: JsonlFile) -> Result<ImportReport, MemoryError> {
+        let now = self.clock.now();
+        if let Some(msg) = clock_skew_message(file.header.exported_at, now) {
+            tracing::warn!("{msg}");
+        }
+        let JsonlFile {
+            memories, links, ..
+        } = file;
+
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || -> Result<ImportReport, MemoryError> {
+            let mut report = ImportReport::default();
+            // Export-local key -> this database's id. Only keys that landed
+            // (inserted or deduped) are present; expired keys are absent.
+            let mut ids: HashMap<i64, i64> = HashMap::new();
+
+            // Pass 2: memories.
+            for JsonlMemory { key, memory } in memories {
+                if memory.expires_at.is_some_and(|t| t <= now) {
+                    report.skipped_expired += 1;
+                    continue;
+                }
+                match store.find_by_key(
+                    memory.source.as_deref(),
+                    memory.mem_type,
+                    &memory.content,
+                )? {
+                    Some(existing) => {
+                        report.skipped_duplicates += 1;
+                        ids.insert(key, existing);
+                    }
+                    None => {
+                        let id = store.insert_imported(memory, now)?;
+                        report.imported += 1;
+                        ids.insert(key, id);
+                    }
+                }
+            }
+
+            // Pass 3: links, through the map only.
+            for JsonlLink {
+                from,
+                to,
+                kind,
+                created_at,
+            } in links
+            {
+                match (ids.get(&from), ids.get(&to)) {
+                    (Some(a), Some(b)) => match store.link(*a, *b, kind, created_at)? {
+                        LinkOutcome::Linked { created: true } => report.links_imported += 1,
+                        LinkOutcome::Linked { created: false } => {
+                            report.links_skipped_duplicates += 1
+                        }
+                        LinkOutcome::NotFound { .. } => report.links_dropped += 1,
+                    },
+                    (None, _) | (_, None) => report.links_dropped += 1,
+                }
+            }
+
+            Ok(report)
+        })
+        .await
+        .map_err(MemoryError::Join)?
     }
 
     /// Write the whole corpus to `out` as a format-v1 JSONL export (DIST-04):
@@ -981,6 +1138,30 @@ mod tests {
             ),
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clock_skew_message_fires_only_beyond_the_tolerance() {
+        let now = 1_700_000_000;
+        assert_eq!(clock_skew_message(now, now), None);
+        assert_eq!(
+            clock_skew_message(now - 86_400, now),
+            None,
+            "a past export is normal"
+        );
+        assert_eq!(
+            clock_skew_message(now + CLOCK_SKEW_TOLERANCE_SECS, now),
+            None,
+            "exactly the tolerance is still fine"
+        );
+        let msg =
+            clock_skew_message(now + 3_601, now).expect("one second past the tolerance warns");
+        assert!(msg.contains("ahead of this machine's clock"), "{msg}");
+        assert!(msg.contains("3601s"), "names the delta: {msg}");
+        assert!(
+            msg.contains(&now.to_string()),
+            "names the local clock: {msg}"
+        );
     }
 
     #[test]
