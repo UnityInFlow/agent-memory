@@ -11,8 +11,8 @@ pub mod sqlite;
 
 use crate::decay::{DecayConfig, RankWeights};
 use crate::domain::{
-    LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView, NewMemory,
-    RelatedLink, UpdatedMemory,
+    ImportedMemory, LinkKind, LinkOutcome, MemoryError, MemoryPatch, MemoryType, MemoryView,
+    NewMemory, RelatedLink, UpdatedMemory,
 };
 use crate::service::{ListArgs, SearchArgs};
 
@@ -30,6 +30,30 @@ pub trait Store: Send + Sync {
         embedding: Option<Vec<f32>>,
         now: i64,
     ) -> Result<i64, MemoryError>;
+
+    /// Insert a memory restored from a portable file (INTEROP-02), returning
+    /// its assigned id. The same single writer transaction and the same
+    /// `memories` INSERT as [`Store::insert`] — one shared statement, so the
+    /// two paths cannot drift — but with the file's provenance preserved
+    /// (Phase 5 D-10):
+    ///
+    /// - `created_at`, `access_count` and `expires_at` are written exactly as
+    ///   carried by `m`;
+    /// - `last_accessed = now` (refreshed, so the restored row starts
+    ///   decay-fresh) and `decay_score = 1.0`;
+    /// - `base_weight` follows the type pin, as for any insert;
+    /// - there is NO embedding parameter: the row ALWAYS lands
+    ///   `embedding_status = 0` and no vector row is written. Restored rows are
+    ///   re-embedded only by the sweep backfill against the local model pin
+    ///   (D-13) — exactly one re-embed mechanism, never a mixed corpus.
+    ///
+    /// Expiry is the caller's rule, not this method's: the JSONL importer
+    /// skips and counts a row whose `expires_at <= now` BEFORE calling this,
+    /// whereas [`Store::sweep_expired`] deletes `expires_at < now`. Both
+    /// predicates are named here so the boundary is deliberate: a row whose
+    /// `expires_at == now` is never inserted by an import, and a row inserted
+    /// with `expires_at > now` is deleted by the first sweep after it passes.
+    fn insert_imported(&self, m: ImportedMemory, now: i64) -> Result<i64, MemoryError>;
 
     /// K-nearest-neighbor candidate selection over `vec_memories` (SEARCH-02).
     /// Returns `(view, cosine_distance)` pairs, nearest first, oversampled

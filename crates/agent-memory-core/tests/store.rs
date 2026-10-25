@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use agent_memory_core::clock::{Clock, TestClock};
 use agent_memory_core::decay::DecayConfig;
-use agent_memory_core::domain::{MemoryType, NewMemory};
+use agent_memory_core::domain::{ImportedMemory, MemoryType, NewMemory};
 use agent_memory_core::embed::FakeEmbedder;
-use agent_memory_core::service::{ListArgs, MemoryService};
-use agent_memory_core::store::sqlite::SqliteStore;
+use agent_memory_core::service::{ListArgs, MemoryService, SearchArgs};
+use agent_memory_core::store::sqlite::{register_vec_extension, SqliteStore};
 use agent_memory_core::store::Store;
 
 const ALL_TYPES: [&str; 6] = [
@@ -281,5 +281,170 @@ fn find_by_key_returns_the_matching_id_null_safely() {
             .expect("probe other content"),
         None,
         "content is part of the key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 store contract (D-10 / D-13): a restored row keeps its provenance,
+// starts decay-fresh, and always lands pending for the sweep backfill
+// ---------------------------------------------------------------------------
+
+/// Every stored column of one `memories` row, read through a raw connection
+/// so the assertions see the table itself, not a view of it.
+#[derive(Debug)]
+struct RawRow {
+    mem_type: String,
+    content: String,
+    tags: String,
+    source: Option<String>,
+    scope: Option<String>,
+    base_weight: f64,
+    decay_score: f64,
+    access_count: i64,
+    created_at: i64,
+    last_accessed: i64,
+    expires_at: Option<i64>,
+    embedding_status: i64,
+}
+
+fn raw_row(conn: &rusqlite::Connection, id: i64) -> RawRow {
+    conn.query_row(
+        "SELECT mem_type, content, tags, source, scope, base_weight, decay_score, \
+         access_count, created_at, last_accessed, expires_at, embedding_status \
+         FROM memories WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(RawRow {
+                mem_type: r.get(0)?,
+                content: r.get(1)?,
+                tags: r.get(2)?,
+                source: r.get(3)?,
+                scope: r.get(4)?,
+                base_weight: r.get(5)?,
+                decay_score: r.get(6)?,
+                access_count: r.get(7)?,
+                created_at: r.get(8)?,
+                last_accessed: r.get(9)?,
+                expires_at: r.get(10)?,
+                embedding_status: r.get(11)?,
+            })
+        },
+    )
+    .expect("read raw row")
+}
+
+fn vec_rows(conn: &rusqlite::Connection, id: i64) -> i64 {
+    conn.query_row(
+        "SELECT count(*) FROM vec_memories WHERE memory_id = ?1",
+        [id],
+        |r| r.get(0),
+    )
+    .expect("count vector rows")
+}
+
+#[tokio::test]
+async fn insert_imported_preserves_provenance_and_lands_pending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let now = 1_000;
+
+    let id = store
+        .insert_imported(
+            ImportedMemory {
+                content: "restored decision".to_string(),
+                mem_type: MemoryType::Decision,
+                tags: vec!["a".to_string(), "b".to_string()],
+                source: Some("gsd-state".to_string()),
+                scope: Some("proj".to_string()),
+                created_at: 500,
+                access_count: 7,
+                expires_at: Some(9_000),
+            },
+            now,
+        )
+        .expect("insert imported row");
+
+    register_vec_extension().expect("vec0 registers");
+    let conn = rusqlite::Connection::open(&db_path).expect("open raw connection");
+    let row = raw_row(&conn, id);
+    assert_eq!(row.created_at, 500, "created_at is preserved (D-10)");
+    assert_eq!(
+        row.last_accessed, now,
+        "last_accessed is refreshed to now (D-10)"
+    );
+    assert_eq!(row.access_count, 7, "access_count is preserved (D-10)");
+    assert_eq!(
+        row.expires_at,
+        Some(9_000),
+        "expires_at is preserved (D-10)"
+    );
+    assert_eq!(
+        row.embedding_status, 0,
+        "always pending for the sweep (D-13)"
+    );
+    assert_eq!(row.decay_score, 1.0);
+    assert_eq!(row.base_weight, 2.0, "DECISION is a pinned type");
+    assert_eq!(row.tags, "[\"a\",\"b\"]");
+    assert_eq!(row.source.as_deref(), Some("gsd-state"));
+    assert_eq!(row.scope.as_deref(), Some("proj"));
+    assert_eq!(row.mem_type, "DECISION");
+    assert_eq!(row.content, "restored decision");
+    assert_eq!(
+        vec_rows(&conn, id),
+        0,
+        "no vector row is ever written (D-13)"
+    );
+
+    // An unpinned type with every optional column absent.
+    let id2 = store
+        .insert_imported(
+            ImportedMemory {
+                content: "restored pattern".to_string(),
+                mem_type: MemoryType::Pattern,
+                tags: vec![],
+                source: None,
+                scope: None,
+                created_at: 600,
+                access_count: 0,
+                expires_at: None,
+            },
+            now,
+        )
+        .expect("insert second imported row");
+    let row2 = raw_row(&conn, id2);
+    assert_eq!(row2.base_weight, 1.0, "PATTERN is not pinned");
+    assert_eq!(row2.source, None);
+    assert_eq!(row2.scope, None);
+    assert_eq!(row2.expires_at, None);
+    assert_eq!(row2.embedding_status, 0);
+
+    // Visible through the normal read path: the FTS trigger fired on the
+    // shared INSERT, so a keyword search finds the restored row at once.
+    let clock = Arc::new(TestClock::new(now));
+    let service = MemoryService::new(
+        store,
+        clock,
+        Arc::new(FakeEmbedder::failing()),
+        DecayConfig::default(),
+    );
+    let listed = service.list(ListArgs::default()).await.expect("list");
+    assert!(
+        listed
+            .iter()
+            .any(|v| v.id == id && v.content == "restored decision"),
+        "the restored row is listed: {listed:?}"
+    );
+    let found = service
+        .search(SearchArgs {
+            query: "restored".to_string(),
+            ..SearchArgs::default()
+        })
+        .await
+        .expect("keyword search");
+    assert!(
+        found.results.iter().any(|v| v.id == id),
+        "the restored row is keyword-searchable: {:?}",
+        found.results
     );
 }
