@@ -175,9 +175,12 @@ impl std::convert::TryFrom<&str> for LinkKind {
 /// before `to_id`), so a client never sees a foreign-key failure (T-04-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkOutcome {
-    /// The edge exists now — freshly created, or already present (a duplicate
-    /// link is an idempotent no-op success).
-    Linked,
+    /// The edge exists now. `created` is `true` when the row was inserted by
+    /// this call and `false` when the stored edge already existed — the D-02
+    /// idempotent no-op, still a success. The distinction is storage-only
+    /// (transports emit the same JSON either way); the JSONL importer counts
+    /// the `false` case as `links_skipped_duplicates` (Phase 5 D-12).
+    Linked { created: bool },
     /// No memory with `missing_id` exists; nothing was written.
     NotFound { missing_id: i64 },
 }

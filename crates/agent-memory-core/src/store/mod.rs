@@ -78,17 +78,23 @@ pub trait Store: Send + Sync {
     /// back to [`Store::insert_embedding`] as `expected_content`.
     fn pending_embeddings(&self, limit: usize) -> Result<Vec<(i64, String)>, MemoryError>;
 
-    /// The INTEROP-01 idempotency probe: does a row with exactly this
-    /// `(source, mem_type, content)` key already exist? `MemoryService::import`
-    /// checks it before every insert so re-importing the same file is a no-op.
+    /// The INTEROP-01 idempotency probe: which row, if any, carries exactly
+    /// this `(source, mem_type, content)` key? `MemoryService::import` checks
+    /// it before every insert so re-importing the same file is a no-op.
     /// `source` is `Option` and compared NULL-safely: a `None` source matches a
     /// stored NULL source, never an empty string (CR-01).
-    fn exists(
+    ///
+    /// The matching row's id is returned so an importer can map an
+    /// export-local key onto the EXISTING row instead of inserting a second
+    /// copy (Phase 5 D-07 / INTEROP-02); `None` means no such row. The key
+    /// itself is unchanged — the exact three-column, NULL-safe match, no new
+    /// identity column.
+    fn find_by_key(
         &self,
         source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
-    ) -> Result<bool, MemoryError>;
+    ) -> Result<Option<i64>, MemoryError>;
 
     /// List stored memories newest-first, honoring optional type/tag/scope filters
     /// and an optional limit. `now` is reserved for on-read decay recomputation in
@@ -181,7 +187,8 @@ pub trait Store: Send + Sync {
     /// as (smaller id, larger id), so linking b→a after a→b is the same
     /// symmetric relation (REVIEW WR-03); `supersedes` / `caused_by` as given
     /// (D-03 directed identity). A duplicate of the stored row is an idempotent
-    /// no-op that still returns [`LinkOutcome::Linked`]. Canonicalisation is
+    /// no-op that returns `LinkOutcome::Linked { created: false }`; a fresh
+    /// insert returns `created: true` (Phase 5 D-12). Canonicalisation is
     /// storage-only: callers echo the request's ids on the wire, and
     /// [`LinkOutcome`] carries no stored ids. The self-link check belongs to
     /// the service seam and has already run.
