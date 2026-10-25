@@ -1,18 +1,23 @@
 [package]
-name = "agent-memory"
+# crates.io name: `agent-memory` is taken by an unrelated project (#9). The
+# executable stays `agent-memory` via the [[bin]] below.
+name = "agent-memory-mcp"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Persistent typed agent memory: an MCP stdio server over embedded SQLite"
+readme = "../../README.md"
+keywords = ["mcp", "memory", "agent", "sqlite", "claude"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "agent-memory"
 path = "src/main.rs"
 
 [dependencies]
-agent-memory-core = { path = "../agent-memory-core" }
+agent-memory-core = { version = "0.1.0", path = "../agent-memory-core" }
 axum.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
@@ -27,7 +32,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 # Test builds only: exposes the core crate's FakeEmbedder/TestClock so the
 # in-process MCP and REST tests can drive the hybrid (embedder-up) search path.
-agent-memory-core = { path = "../agent-memory-core", features = ["test-clock"] }
+agent-memory-core = { version = "0.1.0", path = "../agent-memory-core", features = ["test-clock"] }
 tempfile.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

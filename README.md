@@ -4,6 +4,9 @@
 
 Tool 10 in the [UnityInFlow](https://github.com/UnityInFlow) ecosystem.
 
+- crates.io: [`agent-memory-mcp`](https://crates.io/crates/agent-memory-mcp) (installs the `agent-memory` executable)
+- MCP Registry name: `mcp-name: io.github.UnityInFlow/agent-memory`
+
 AI agents forget everything between sessions. `agent-memory` is a small
 [MCP](https://modelcontextprotocol.io) stdio server backed by an embedded SQLite
 database: any MCP-speaking runtime can store, search, list, update, and forget
@@ -54,6 +57,17 @@ then extract:
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # (sha256sum on Linux)
 tar -xzf agent-memory-<triple>.tar.gz
 ./agent-memory --version
+```
+
+### From crates.io
+
+Requires a stable Rust toolchain. The crate is `agent-memory-mcp` (the name
+`agent-memory` on crates.io belongs to an unrelated project); the executable it
+installs is still `agent-memory`:
+
+```bash
+cargo install agent-memory-mcp --locked
+agent-memory --version
 ```
 
 ### From source

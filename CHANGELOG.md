@@ -60,6 +60,11 @@ relations tools, hybrid search, and portable JSONL export/import.
 
 ### Changed
 
+- **The binary crate is now `agent-memory-mcp`.** The crates.io name
+  `agent-memory` belongs to an unrelated project. Install with
+  `cargo install agent-memory-mcp`. The executable, the Homebrew formula and
+  the release tarball names stay `agent-memory`. `agent-memory-core` is
+  published beside it (#9).
 - **Tag filtering is an exact, case-sensitive match** instead of a substring
   match: `tag=rust` no longer matches `rustling`. This applies to search (both
   modes) and list.
