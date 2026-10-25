@@ -5,16 +5,16 @@ milestone_name: Hardening & Interop
 current_phase: 5
 current_phase_name: Portable Export & Import
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-10-25T11:41:56.528Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-10-25T12:00:53.845Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 5 execution started
-state_head: 5994d3817c5ed2db4e96c8145e0872a051b80b6c
+state_head: cffe7a2b9765c4bf03a3da469bf2152d342267bb
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 13
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 ## Current Position
 
 Phase: 5 (Portable Export & Import) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 5 execution started
 
@@ -77,6 +77,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 04 P06 | 7 min | 3 tasks | 9 files |
 | Phase 04 P07 | 12 min | 3 tasks | 7 files |
 | Phase 05 P01 | 14 min | 3 tasks | 10 files |
+| Phase 05 P02 | 13 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 05-01]: redact_storage_error(op, e) at the MemoryService seam on all nine methods (store, list, search, import, forget, link, unlink, update, sweep) via *_unredacted inner fns; transport mappers byte-identical; closes 04-REVIEW IN-01 (D-14)
 - [Phase 05-01]: Store::exists -> Store::find_by_key(Option<i64>) with the same NULL-safe (source, mem_type, content) key (D-07); LinkOutcome::Linked { created: bool } from tx.changes() across 7 sites, storage-only not a wire change (D-12)
 - [Phase 05-01]: ImportedMemory + Store::insert_imported (no embedding parameter, always embedding_status 0, last_accessed = now, created_at/access_count/expires_at preserved) behind one shared insert_row helper; importer skips expires_at <= now, sweep deletes < now (D-10, D-13)
+- [Phase 5]: [Phase 05-02]: Format v1 frozen in export.rs as one strict tagged Record enum (record first, declaration order, deny_unknown_fields; header carries exported_rows/exported_links); wire order golden-tested; D-03 one-way rating recorded as pre-approved
+- [Phase 5]: [Phase 05-02]: Store::export_rows streams every row from ONE pooled connection + ONE read transaction (rusqlite unchecked_transaction) — meta pin, counts, memories ORDER BY id, links ORDER BY from_id,to_id,kind — via a visitor, never a Vec; MemoryService::export flushes inside spawn_blocking and redacts with op export (tenth op string)
+- [Phase 5]: [Phase 05-02]: Research correction: stdout export sink is BufWriter::new(std::io::stdout()) — StdoutLock is !Send and cannot be a Box<dyn Write + Send>; --output publishes via export_file::PendingExport ({target}.export-tmp-{pid} beside the target, create_new + 0600, sync_all then rename, one abort covers every failure)
 
 ### Pending Todos
 
@@ -168,8 +172,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-25T11:41:56.437Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-10-25T12:00:53.754Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

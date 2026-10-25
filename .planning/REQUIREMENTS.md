@@ -29,7 +29,7 @@ Each maps to a roadmap phase. IDs continue from the v1.0 numbering (archived in 
 
 ### Portability (DIST / INTEROP)
 
-- [ ] **DIST-04**: User can export all memories to a versioned JSONL file (header records format version + embedding model/dim; embeddings excluded as derived data; relation edges included with export-local key remapping)
+- [x] **DIST-04**: User can export all memories to a versioned JSONL file (header records format version + embedding model/dim; embeddings excluded as derived data; relation edges included with export-local key remapping)
 - [ ] **INTEROP-02**: User can import that JSONL on another machine — idempotent re-run, imported rows land `embedding_status = 0` and re-embed via the existing sweep backfill, expired items skipped and counted
 
 ### Distribution (DIST)
@@ -69,7 +69,7 @@ Mapped by roadmap creation 2026-07-12. Coverage: 12/12 v1.1 requirements mapped 
 | STORE-05 | Phase 4 | Complete |
 | SEARCH-04 | Phase 4 | Complete |
 | SEARCH-05 | Phase 4 | Complete |
-| DIST-04 | Phase 5 | Pending |
+| DIST-04 | Phase 5 | Complete |
 | INTEROP-02 | Phase 5 | Pending |
 | DIST-05 | Phase 6 | Pending |
 | DIST-03 | Phase 6 | Pending |
