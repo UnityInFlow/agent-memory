@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Hardening & Interop
 current_phase: 5
 current_phase_name: Portable Export & Import
-status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-10-25T12:22:23.856Z"
+status: verifying
+stopped_at: "Completed 05-04-PLAN.md (phase 5: 4/4 plans executed, awaiting phase verification)"
+last_updated: "2026-10-25T12:35:43.184Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 5 execution started
-state_head: c7bc811eb9ca42257f88d70416e745aeee7f8fa6
+state_head: 6eb354a22f3d43233969dfe876d68cacb33002f3
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 13
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 
 Phase: 5 (Portable Export & Import) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-25 — Phase 5 execution started
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
@@ -79,6 +79,7 @@ Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 | Phase 05 P01 | 14 min | 3 tasks | 10 files |
 | Phase 05 P02 | 13 min | 2 tasks | 8 files |
 | Phase 05 P03 | 16min | 2 tasks | 6 files |
+| Phase 05 P04 | 9 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -135,6 +136,8 @@ Recent decisions affecting current work:
 - [Phase 5]: 05-03: jsonl importer is add-alongside beside gsd-state — two parser modules, two tolerance policies (strict vs tolerant), shared seam/dedup/writer lane; a third format forces an ImportSource enum
 - [Phase 5]: 05-03: D-11 messages — HeaderProbe format/version are Option (non-header line 1 → 'first record must be the header'), serde's ' at line 1 column N' suffix stripped, InvalidArgument payload lifted before the 'line N:' prefix
 - [Phase 5]: 05-03: import_jsonl runs passes 2+3 in ONE spawn_blocking hop with per-record writer transactions; parse_jsonl is the all-or-nothing gate; the jsonl path never calls the embedder
+- [Phase 05]: 05-04: README Export & import section is one ## with ten ### subsections in plan order; sweep cadence documented as the shipped 'then hourly' (SWEEP_INTERVAL 3600 s); tests/cli.rs is realism-only (zero coverage by design, like tests/rest.rs) and pins the exact report strings
+- [Phase 05]: 05-04: phase-end gates recorded — cargo llvm-cov 95.61% lines (floor 80), D-01 transport grep empty, sql/ + Cargo.lock + .github/ unchanged across all phase-5 commits
 
 ### Pending Todos
 
@@ -176,8 +179,8 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-10-25T12:22:23.769Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-10-25T12:35:43.091Z
+Stopped at: Completed 05-04-PLAN.md (phase 5: 4/4 plans executed, awaiting phase verification)
 Resume file: None
 
 ## Operator Next Steps
