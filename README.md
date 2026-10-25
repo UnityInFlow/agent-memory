@@ -457,9 +457,12 @@ axum's default body rejection: a **plain-text** (not JSON) response with 422
 for a missing or wrongly typed field, 400 for malformed JSON, and 415 for a
 missing `Content-Type`. A body that does deserialize is validated as above, so
 an out-of-bounds `limit`/`ttl_secs` or an unknown `type` on those routes is
-still a 400 `{"error"}`. A storage failure during search reports a generic
-internal error (HTTP 500 / MCP `internal_error`, `search failed due to a
-storage error`); the detail goes only to the server's stderr log.
+still a 400 `{"error"}`. A storage failure on any request the daemon serves —
+and on any CLI `import`/`export` — reports a generic internal error (HTTP 500
+/ MCP `internal_error`) shaped
+`<operation> failed due to a storage error (details are in the server log)`;
+the engine detail (SQLite error text, table and column names) goes only to
+the server's stderr log.
 
 ```bash
 curl -X PATCH localhost:7437/api/memories/42 \
@@ -485,7 +488,7 @@ VPN/SSH tunnel or an authenticating reverse proxy.
 
 ## Behavioral changes in v0.1.0
 
-Three deliberate contract changes from v0.0.1 (all apply identically to MCP
+Four deliberate contract changes from v0.0.1 (all apply identically to MCP
 and REST):
 
 1. **Tag filtering is now an exact, case-sensitive match** instead of a
@@ -509,6 +512,14 @@ and REST):
      if FTS5 cannot parse it is it retried once as its words OR-ed together.
    - Exact keyword hits now surface alongside paraphrase matches, so result
      order can differ from v0.0.1's embedding-only ranking.
+4. **Storage faults on every surface now report a generic message** —
+   `<operation> failed due to a storage error (details are in the server log)`
+   — instead of echoing the storage engine's text. v0.0.1 returned
+   `sqlite error: …` strings (with table and column names) on non-search 500s
+   / `internal_error`s; v0.1.0 redacts `store`, `list` (including `/health`),
+   `update`, `link`/`unlink`, `forget`, `import` and the sweep exactly as it
+   already did for `search`. Clients that parsed those strings must stop — the
+   detail is in the server's stderr log.
 
 ## Import from GSD
 

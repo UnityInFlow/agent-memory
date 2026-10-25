@@ -888,6 +888,68 @@ mod tests {
         }
     }
 
+    /// Take the `memories` table offline underneath a live state (the T-04-19
+    /// RENAME recipe, now against the main table): every store/list statement
+    /// fails at prepare time with the engine's `no such table` text, which
+    /// must never reach the REST client (D-14).
+    fn take_memories_offline(dir: &tempfile::TempDir) {
+        agent_memory_core::store::sqlite::register_vec_extension().expect("register vec0");
+        rusqlite::Connection::open(dir.path().join("mem.db"))
+            .expect("open db")
+            .execute_batch("ALTER TABLE memories RENAME TO memories_offline;")
+            .expect("rename memories table");
+    }
+
+    #[tokio::test]
+    async fn health_storage_failure_is_500_without_sqlite_text() {
+        // D-14 (04-REVIEW IN-01): /health is a one-row list through the
+        // service, so its storage fault is redacted at the same seam.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        take_memories_offline(&dir);
+
+        let resp = match health_handler(State(state)).await {
+            Ok(_) => panic!("a missing memories table must fail the health check"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        let error = body["error"].as_str().expect("500 body carries an error");
+        assert!(
+            error.contains("list failed due to a storage error"),
+            "{body}"
+        );
+        assert!(
+            !error.to_lowercase().contains("sqlite"),
+            "no SQLite text may reach the client: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_storage_failure_is_500_without_sqlite_text() {
+        // D-14 (04-REVIEW IN-01): a write-path storage fault is redacted too —
+        // v0.0.1 echoed `sqlite error: no such table: memories` here.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&dir);
+        take_memories_offline(&dir);
+
+        let resp = match store_handler(State(state), Json(store_request("x", "DECISION"))).await {
+            Ok(_) => panic!("a missing memories table must fail the store"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        let error = body["error"].as_str().expect("500 body carries an error");
+        assert!(
+            error.contains("store failed due to a storage error"),
+            "{body}"
+        );
+        assert!(
+            !error.to_lowercase().contains("sqlite"),
+            "no SQLite text may reach the client: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn search_with_zero_limit_returns_400_never_500() {
         // API-02 / D-01: an out-of-bounds limit is CLIENT input — 400 with the

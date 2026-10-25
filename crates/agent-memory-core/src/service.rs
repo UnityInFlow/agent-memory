@@ -26,24 +26,38 @@ use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
 
 /// The only message a client ever sees for a storage-tier search failure
-/// (T-04-19). The underlying error goes to the stderr log, never to a response
-/// body, so no SQLite text (table/column names, engine detail) leaks out of
-/// any search path. Both transports surface it on the internal tier (REST 500
-/// / MCP `internal_error`).
+/// (T-04-19). It is exactly the [`redact_storage_error`] template at
+/// `op = "search"` — a unit test pins the two together so they can never
+/// drift — and is kept as a named constant because Phase 4's golden tests
+/// assert equality against it. The underlying error goes to the stderr log,
+/// never to a response body, so no SQLite text (table/column names, engine
+/// detail) leaks out of any search path. Both transports surface it on the
+/// internal tier (REST 500 / MCP `internal_error`).
 pub const SEARCH_STORAGE_FAILURE: &str =
     "search failed due to a storage error (details are in the server log)";
 
-/// Tier every search-path error for the wire — the ONE place this happens.
+/// Tier every service-path error for the wire — the ONE place storage-engine
+/// text is stripped (D-14, closing 04-REVIEW IN-01).
 ///
 /// - Client tier (`InvalidType`, `InvalidQuery`, `InvalidArgument`) passes
 ///   through: its text echoes only client input and public bounds.
 /// - Crate-authored internal text (`Internal`, `SchemaTooNew`) passes through.
 /// - Storage-engine errors (`Sqlite`, `Pool`, `Join`, `Migration`) are logged
-///   with full detail, then replaced by [`SEARCH_STORAGE_FAILURE`].
+///   at error level with full detail, then replaced by
+///   `MemoryError::Internal("<op> failed due to a storage error (details are
+///   in the server log)")`.
+///
+/// Why the seam and not the transport mappers: every public
+/// [`MemoryService`] method delegates to a `*_unredacted` body and maps its
+/// result through this helper, so MCP, REST — including `/health`, which is a
+/// one-row `list` — and the CLI (`import`) are covered by ONE change, the way
+/// Phase 3 D-06 put validation here and Phase 4 T-04-19 put the search
+/// redaction here. The two transport mappers stay as they are and keep
+/// matching every variant exhaustively.
 ///
 /// No catch-all arm: a new [`MemoryError`] variant must be tiered here at
 /// compile time.
-fn redact_search_error(e: MemoryError) -> MemoryError {
+fn redact_storage_error(op: &str, e: MemoryError) -> MemoryError {
     match e {
         MemoryError::InvalidType(_)
         | MemoryError::InvalidQuery(_)
@@ -53,8 +67,10 @@ fn redact_search_error(e: MemoryError) -> MemoryError {
         | MemoryError::Pool(_)
         | MemoryError::Join(_)
         | MemoryError::Migration(_) => {
-            tracing::error!(error = %e, "search failed with a storage error");
-            MemoryError::Internal(SEARCH_STORAGE_FAILURE.to_string())
+            tracing::error!(op, error = %e, "storage error");
+            MemoryError::Internal(format!(
+                "{op} failed due to a storage error (details are in the server log)"
+            ))
         }
     }
 }
@@ -206,7 +222,17 @@ impl MemoryService {
     /// Pitfall 5). Storing NEVER fails because Ollama is down: on embed failure
     /// the row lands with `embedding_status = 0` and exactly one loud warning is
     /// emitted (Pitfall 4 — loud, not silent; SEARCH-03).
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14): a
+    /// storage fault reaches the client only as the generic internal error.
     pub async fn store(&self, new: NewMemory) -> Result<i64, MemoryError> {
+        self.store_unredacted(new)
+            .await
+            .map_err(|e| redact_storage_error("store", e))
+    }
+
+    /// The body of [`Self::store`], before its errors are tiered for the wire.
+    async fn store_unredacted(&self, new: NewMemory) -> Result<i64, MemoryError> {
         // API-02 / D-02: reject a bad TTL FIRST — before the embed call, so a
         // bad request never costs an Ollama round-trip (D-06 seam).
         crate::domain::validate_ttl(new.ttl_secs)?;
@@ -241,7 +267,17 @@ impl MemoryService {
     /// `200 × MAX_EXPANDED_LINKS` bound therefore covers every expanded
     /// response. A list without `expand_links` still returns every row when
     /// `limit` is omitted.
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14) —
+    /// this also covers REST `/health`, which is a one-row list.
     pub async fn list(&self, args: ListArgs) -> Result<Vec<MemoryView>, MemoryError> {
+        self.list_unredacted(args)
+            .await
+            .map_err(|e| redact_storage_error("list", e))
+    }
+
+    /// The body of [`Self::list`], before its errors are tiered for the wire.
+    async fn list_unredacted(&self, args: ListArgs) -> Result<Vec<MemoryView>, MemoryError> {
         // API-02 / D-01: a present limit must be 1..=200. An omitted limit
         // stays unlimited (v1.0 behavior, RESEARCH Pitfall 6) only without
         // `expand_links`; range validation runs first.
@@ -293,17 +329,17 @@ impl MemoryService {
     /// attach the 1-hop expansion when `expand_links` is set.
     ///
     /// Every error, from either arm and from the expansion, leaves through
-    /// [`redact_search_error`]: a storage failure reaches the client only as
-    /// [`MemoryError::Internal`] carrying [`SEARCH_STORAGE_FAILURE`], with the
-    /// detail in the stderr log (T-04-19).
+    /// [`redact_storage_error`] (D-14): a storage failure reaches the client
+    /// only as [`MemoryError::Internal`] carrying [`SEARCH_STORAGE_FAILURE`],
+    /// with the detail in the stderr log (T-04-19).
     pub async fn search(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
         self.search_unredacted(args)
             .await
-            .map_err(redact_search_error)
+            .map_err(|e| redact_storage_error("search", e))
     }
 
     /// The body of [`Self::search`], before its errors are tiered for the wire
-    /// by [`redact_search_error`].
+    /// by [`redact_storage_error`].
     async fn search_unredacted(&self, args: SearchArgs) -> Result<SearchOutcome, MemoryError> {
         // API-02 / D-01: validate before any embed hop — an out-of-bounds
         // limit rejects with MemoryError::InvalidArgument; the old silent
@@ -391,7 +427,17 @@ impl MemoryService {
     ///    fails because Ollama is down (SEARCH-03; the sweep backfills later).
     /// 3. **Insert** — new drafts land via the standard [`Store::insert`]
     ///    path, all stamped with one clock reading.
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14), so
+    /// the CLI importer prints the generic message, never engine text.
     pub async fn import(&self, drafts: Vec<NewMemory>) -> Result<ImportReport, MemoryError> {
+        self.import_unredacted(drafts)
+            .await
+            .map_err(|e| redact_storage_error("import", e))
+    }
+
+    /// The body of [`Self::import`], before its errors are tiered for the wire.
+    async fn import_unredacted(&self, drafts: Vec<NewMemory>) -> Result<ImportReport, MemoryError> {
         // API-02 / D-02 + RESEARCH Pitfall 3: import() builds rows via
         // store.insert, bypassing store() — validate every draft through the
         // SAME shared helper here, before the dedup hop, so future import
@@ -570,7 +616,16 @@ impl MemoryService {
 
     /// Delete a memory by id (MCP-04 / D-06). Returns `true` if a row was deleted,
     /// `false` for an unknown id (clean not-found, never an error).
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14).
     pub async fn forget(&self, id: i64) -> Result<bool, MemoryError> {
+        self.forget_unredacted(id)
+            .await
+            .map_err(|e| redact_storage_error("forget", e))
+    }
+
+    /// The body of [`Self::forget`], before its errors are tiered for the wire.
+    async fn forget_unredacted(&self, id: i64) -> Result<bool, MemoryError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.forget(id))
             .await
@@ -589,7 +644,21 @@ impl MemoryService {
     /// not-found data, never an error); linking an edge that already exists is
     /// an idempotent [`LinkOutcome::Linked`] (D-02). The edge is stamped with
     /// the injected clock, which orders 1-hop expansion (D-07).
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14).
     pub async fn link(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+    ) -> Result<LinkOutcome, MemoryError> {
+        self.link_unredacted(from_id, to_id, kind)
+            .await
+            .map_err(|e| redact_storage_error("link", e))
+    }
+
+    /// The body of [`Self::link`], before its errors are tiered for the wire.
+    async fn link_unredacted(
         &self,
         from_id: i64,
         to_id: i64,
@@ -607,7 +676,21 @@ impl MemoryService {
     /// `true` if it was removed, `false` if no such edge existed — the clean
     /// not-found of [`MemoryService::forget`], never an error (D-02). A
     /// self-pair simply never matches an edge, so it is a not-found too.
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14).
     pub async fn unlink(
+        &self,
+        from_id: i64,
+        to_id: i64,
+        kind: LinkKind,
+    ) -> Result<bool, MemoryError> {
+        self.unlink_unredacted(from_id, to_id, kind)
+            .await
+            .map_err(|e| redact_storage_error("unlink", e))
+    }
+
+    /// The body of [`Self::unlink`], before its errors are tiered for the wire.
+    async fn unlink_unredacted(
         &self,
         from_id: i64,
         to_id: i64,
@@ -631,7 +714,20 @@ impl MemoryService {
     /// (`embedding_status = 0`) and the sweep backfills it (SEARCH-03). The
     /// store applies the patch, the vector swap and the freshness bump (D-09)
     /// in one writer transaction.
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14).
     pub async fn update(
+        &self,
+        id: i64,
+        patch: MemoryPatch,
+    ) -> Result<Option<UpdatedMemory>, MemoryError> {
+        self.update_unredacted(id, patch)
+            .await
+            .map_err(|e| redact_storage_error("update", e))
+    }
+
+    /// The body of [`Self::update`], before its errors are tiered for the wire.
+    async fn update_unredacted(
         &self,
         id: i64,
         patch: MemoryPatch,
@@ -685,7 +781,18 @@ impl MemoryService {
     /// both the background interval task and `tests/ttl.rs`. The blocking
     /// `DecayEngine::sweep` runs on a `spawn_blocking` thread (Pitfall 2); the
     /// embed call is async, OUTSIDE `spawn_blocking` (Pitfall 5).
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] (D-14). The
+    /// background sweep task only logs the result, and the engine detail has
+    /// already gone to the error log inside the helper, so nothing is lost.
     pub async fn sweep(&self, now: i64) -> Result<SweepReport, MemoryError> {
+        self.sweep_unredacted(now)
+            .await
+            .map_err(|e| redact_storage_error("sweep", e))
+    }
+
+    /// The body of [`Self::sweep`], before its errors are tiered for the wire.
+    async fn sweep_unredacted(&self, now: i64) -> Result<SweepReport, MemoryError> {
         let store = self.store.clone();
         let engine = DecayEngine::new(self.decay_cfg);
         let report = tokio::task::spawn_blocking(move || engine.sweep(store.as_ref(), now))
@@ -747,3 +854,53 @@ impl MemoryService {
 /// How many pending rows one sweep tick backfills (bounded so a huge corpus
 /// embeds incrementally instead of one giant request — T-02-03).
 const BACKFILL_BATCH: usize = 128;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A storage-tier error with no client-input cause — the variant the seam
+    /// must strip.
+    fn storage_error() -> MemoryError {
+        MemoryError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    #[test]
+    fn storage_error_redaction_search_text_equals_the_constant() {
+        // The constant Phase 4's goldens assert against IS the template at
+        // op = "search"; this pins them together so neither can drift.
+        match redact_storage_error("search", storage_error()) {
+            MemoryError::Internal(m) => assert_eq!(m, SEARCH_STORAGE_FAILURE),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        match redact_storage_error("store", storage_error()) {
+            MemoryError::Internal(m) => assert_eq!(
+                m,
+                "store failed due to a storage error (details are in the server log)"
+            ),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn storage_error_redaction_passes_client_and_crate_text_through() {
+        let pass_through = [
+            MemoryError::InvalidArgument("x".to_string()),
+            MemoryError::InvalidType("x".to_string()),
+            MemoryError::InvalidQuery("x".to_string()),
+            MemoryError::Internal("y".to_string()),
+            MemoryError::SchemaTooNew {
+                db_version: 9,
+                binary_version: 3,
+            },
+        ];
+        for err in pass_through {
+            let before = err.to_string();
+            let after = redact_storage_error("store", err).to_string();
+            assert_eq!(
+                after, before,
+                "client/crate text must pass through unchanged"
+            );
+        }
+    }
+}

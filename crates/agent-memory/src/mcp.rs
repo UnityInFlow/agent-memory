@@ -1343,6 +1343,40 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn memory_store_storage_failure_is_internal_error_without_sqlite_text() {
+        // D-14 (04-REVIEW IN-01): a write-path storage fault — the `memories`
+        // table renamed away underneath the server — reaches the agent only
+        // as the generic internal error, like search since T-04-19.
+        let internal_error_code = McpError::internal_error("x", None).code;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = test_server(&dir);
+        agent_memory_core::store::sqlite::register_vec_extension().expect("register vec0");
+        rusqlite::Connection::open(dir.path().join("mem.db"))
+            .expect("open db")
+            .execute_batch("ALTER TABLE memories RENAME TO memories_offline;")
+            .expect("rename memories table");
+
+        let args: StoreArgs = serde_json::from_value(serde_json::json!({
+            "content": "will not land",
+            "type": "DECISION"
+        }))
+        .expect("store args deserialize");
+        let err = server
+            .memory_store(Parameters(args))
+            .await
+            .expect_err("a missing memories table must fail the store");
+        assert_eq!(err.code, internal_error_code, "{err:?}");
+        assert!(
+            err.message.contains("store failed due to a storage error"),
+            "{err:?}"
+        );
+        assert!(
+            !err.message.to_lowercase().contains("sqlite"),
+            "no SQLite text may reach the agent: {err:?}"
+        );
+    }
+
     #[test]
     fn map_mcp_error_splits_client_and_internal_tiers() {
         let invalid_params_code = McpError::invalid_params("x", None).code;
