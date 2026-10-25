@@ -328,13 +328,21 @@ fn open_service(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<
     ))
 }
 
-/// Run a one-shot export (DIST-04): wire the store/embedder exactly like
-/// [`run_import`] (the embedder is constructed but never called — vectors do
-/// not travel), then stream the format-v1 JSONL document to STDOUT or, with
-/// `--output`, into a private temp file beside the target that is renamed
-/// into place only after the whole stream is flushed and synced (D-02). The
-/// report line goes to STDERR, always: stdout may BE the file here, so the
-/// convention is the reverse of `import`'s.
+/// Run a one-shot export (DIST-04): wire the store/embedder through
+/// [`open_service`], the same block [`run_import`] uses (the embedder is
+/// constructed but never called — vectors do not travel), then stream the
+/// format-v1 JSONL document to STDOUT or, with `--output`, into a private
+/// temp file beside the target that is renamed into place only after the
+/// whole stream is flushed and synced (D-02). The report line goes to
+/// STDERR, always: stdout may BE the file here, so the convention is the
+/// reverse of `import`'s.
+///
+/// With `--output`, the target path is validated (`export_file::begin`)
+/// BEFORE the database is opened, matching `import --from jsonl`, which
+/// validates the file before opening: an unwritable `--output` must never
+/// resolve, create and migrate a database first (05-REVIEW IN-03). If the
+/// open fails after `begin`, the pending temp is aborted like any other
+/// failure between `begin` and `commit`.
 ///
 /// The stdout sink is `BufWriter::new(std::io::stdout())`: the `Stdout`
 /// handle is `Send`, whereas `StdoutLock` is not and cannot cross into the
@@ -345,21 +353,12 @@ async fn run_export(
     ollama_url: String,
     output: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let db_path = resolve_db_path(db_flag).context("resolving database path")?;
-    let store = SqliteStore::open(&db_path)
-        .with_context(|| format!("opening database at {}", db_path.display()))?;
-    let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url));
-    let service = MemoryService::new(
-        Arc::new(store),
-        Arc::new(SystemClock),
-        embedder,
-        DecayConfig::default(),
-    );
     // The binary's own version, not the core crate's (Pitfall 9).
     let version = env!("CARGO_PKG_VERSION").to_string();
 
     let report = match output {
         None => {
+            let service = open_service(db_flag, ollama_url)?;
             let sink: Box<dyn std::io::Write + Send> =
                 Box::new(std::io::BufWriter::new(std::io::stdout()));
             service.export(sink, version).await.context("exporting")?
@@ -367,10 +366,11 @@ async fn run_export(
         Some(path) => {
             let pending = export_file::begin(&path)
                 .with_context(|| format!("creating export file beside {}", path.display()))?;
-            // Everything that can fail between `begin` and `commit` runs under
-            // one result, so exactly one abort covers every failure and the
-            // temp never outlives an error.
+            // Everything that can fail between `begin` and `commit` — opening
+            // the database included — runs under one result, so exactly one
+            // abort covers every failure and the temp never outlives an error.
             let streamed: anyhow::Result<_> = async {
+                let service = open_service(db_flag, ollama_url)?;
                 let file = pending
                     .writer()
                     .context("duplicating the export file handle")?;
