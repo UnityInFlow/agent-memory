@@ -13,6 +13,7 @@
 //! hybrid result set is a valid `Hybrid` answer).
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 
 use crate::clock::Clock;
@@ -22,6 +23,8 @@ use crate::domain::{
     UpdatedMemory, MAX_EXPANDED_LINKS, MAX_LIMIT, MIN_LIMIT,
 };
 use crate::embed::Embedder;
+use crate::export::{ExportEvent, Record, FORMAT_NAME, FORMAT_VERSION};
+use crate::store::migrations::LATEST_SCHEMA_VERSION;
 use crate::store::sqlite::DEFAULT_SEARCH_LIMIT;
 use crate::store::Store;
 
@@ -181,6 +184,27 @@ pub struct ImportReport {
     /// Drafts skipped because an identical `(source, mem_type, content)` row
     /// already exists — the idempotency guarantee.
     pub skipped_duplicates: usize,
+}
+
+/// Outcome of one [`MemoryService::export`] (DIST-04): how many memory and
+/// link records were written after the header. Equal to the header's
+/// `exported_rows` / `exported_links`, which come from the same read snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ExportReport {
+    /// `memory` records written.
+    pub memories: u64,
+    /// `link` records written.
+    pub links: u64,
+}
+
+/// Write one record as one JSON line. Writer and serialiser failures are
+/// crate-authored `Internal` text (they name no storage engine), so they pass
+/// [`redact_storage_error`] unchanged.
+fn write_record_line(out: &mut dyn Write, rec: &Record) -> Result<(), MemoryError> {
+    let fail =
+        |e: &dyn std::fmt::Display| MemoryError::Internal(format!("export write failed: {e}"));
+    serde_json::to_writer(&mut *out, rec).map_err(|e| fail(&e))?;
+    out.write_all(b"\n").map_err(|e| fail(&e))
 }
 
 /// The core memory service: validates input, stamps timestamps from the injected
@@ -509,6 +533,80 @@ impl MemoryService {
             imported,
             skipped_duplicates,
         })
+    }
+
+    /// Write the whole corpus to `out` as a format-v1 JSONL export (DIST-04):
+    /// the header line, then one line per memory in ascending id order, then
+    /// one line per link (see [`crate::export`] for the contract).
+    ///
+    /// Streams one line per record through the boxed writer inside ONE
+    /// `spawn_blocking` hop — the corpus is never buffered as a document
+    /// (D-02) — and reads everything from ONE store snapshot via
+    /// [`Store::export_rows`], so the header counts always match the records
+    /// that follow and no link can name a key the file lacks (T-05-19). The
+    /// writer is flushed inside the blocking task before this returns, so a
+    /// `BufWriter` caller never loses its tail (Pitfall 8). The embedder is
+    /// never touched: vectors do not travel (D-04).
+    ///
+    /// `agent_memory_version` is a parameter because the binary and this core
+    /// crate have separate versions (Pitfall 9) — the CLI passes its own
+    /// `CARGO_PKG_VERSION`. `exported_at` is the injected clock.
+    ///
+    /// Errors are tiered for the wire by [`redact_storage_error`] with
+    /// `op = "export"` (D-14): a storage fault reaches the CLI only as the
+    /// generic message; a writer I/O failure is the crate-authored
+    /// `export write failed: …`.
+    pub async fn export(
+        &self,
+        out: Box<dyn Write + Send>,
+        agent_memory_version: String,
+    ) -> Result<ExportReport, MemoryError> {
+        self.export_unredacted(out, agent_memory_version)
+            .await
+            .map_err(|e| redact_storage_error("export", e))
+    }
+
+    /// The body of [`Self::export`], before its errors are tiered for the wire.
+    async fn export_unredacted(
+        &self,
+        mut out: Box<dyn Write + Send>,
+        agent_memory_version: String,
+    ) -> Result<ExportReport, MemoryError> {
+        let now = self.clock.now();
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || -> Result<ExportReport, MemoryError> {
+            let mut report = ExportReport::default();
+            store.export_rows(&mut |event| match event {
+                ExportEvent::Snapshot(snapshot) => {
+                    // The header is built from the SAME snapshot the rows come
+                    // from, so its counts are exact for this file.
+                    report = ExportReport {
+                        memories: snapshot.memories,
+                        links: snapshot.links,
+                    };
+                    let header = Record::Header {
+                        format: FORMAT_NAME.to_string(),
+                        version: FORMAT_VERSION,
+                        exported_at: now,
+                        embedding_model: snapshot.embedding_model,
+                        embedding_dim: snapshot.embedding_dim,
+                        schema_version: LATEST_SCHEMA_VERSION,
+                        agent_memory_version: agent_memory_version.clone(),
+                        exported_rows: snapshot.memories,
+                        exported_links: snapshot.links,
+                    };
+                    write_record_line(out.as_mut(), &header)
+                }
+                ExportEvent::Record(record) => write_record_line(out.as_mut(), &record),
+            })?;
+            // Flush INSIDE the blocking task: a BufWriter dropped unflushed
+            // would silently lose the tail of the file (Pitfall 8).
+            out.flush()
+                .map_err(|e| MemoryError::Internal(format!("export write failed: {e}")))?;
+            Ok(report)
+        })
+        .await
+        .map_err(MemoryError::Join)?
     }
 
     /// The hybrid ranking (SEARCH-04/05), before truncation: every fusion

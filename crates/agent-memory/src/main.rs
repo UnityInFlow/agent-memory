@@ -95,6 +95,10 @@ enum Command {
         #[arg(long)]
         scope: Option<String>,
     },
+    /// Export every memory and link as format-v1 JSONL (DIST-04): a header
+    /// line, one record per memory, one record per link; embedding vectors are
+    /// never included. Writes to stdout by default.
+    Export,
 }
 
 #[tokio::main]
@@ -123,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Import { from, path, scope } => {
             run_import(cli.db, cli.ollama_url, from, path, scope).await
         }
+        Command::Export => run_export(cli.db, cli.ollama_url).await,
     }
 }
 
@@ -254,6 +259,36 @@ async fn run_import(
         "imported: {}, skipped duplicates: {}, malformed lines skipped: {}",
         report.imported, report.skipped_duplicates, parsed.skipped
     );
+    Ok(())
+}
+
+/// Run a one-shot export (DIST-04): wire the store/embedder exactly like
+/// [`run_import`] (the embedder is constructed but never called — vectors do
+/// not travel), then stream the format-v1 JSONL document to STDOUT. The
+/// report line goes to STDERR, always: stdout IS the file here, so the
+/// convention is the reverse of `import`'s.
+///
+/// The stdout sink is `BufWriter::new(std::io::stdout())`: the `Stdout`
+/// handle is `Send`, whereas `StdoutLock` is not and cannot cross into the
+/// service's blocking task. The service flushes the writer before returning.
+async fn run_export(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<()> {
+    let db_path = resolve_db_path(db_flag).context("resolving database path")?;
+    let store = SqliteStore::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+    let embedder: Arc<dyn Embedder> = Arc::new(OllamaClient::new(ollama_url));
+    let service = MemoryService::new(
+        Arc::new(store),
+        Arc::new(SystemClock),
+        embedder,
+        DecayConfig::default(),
+    );
+
+    let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(std::io::stdout()));
+    // The binary's own version, not the core crate's (Pitfall 9).
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let report = service.export(sink, version).await.context("exporting")?;
+    let (memories, links) = (report.memories, report.links);
+    eprintln!("exported {memories} memories and {links} links");
     Ok(())
 }
 
