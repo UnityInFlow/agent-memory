@@ -5,6 +5,7 @@
 //! `anyhow` is used at these binary edges; the core library uses `thiserror`.
 
 mod config;
+mod export_file;
 mod mcp;
 mod rest;
 mod serde_util;
@@ -98,7 +99,14 @@ enum Command {
     /// Export every memory and link as format-v1 JSONL (DIST-04): a header
     /// line, one record per memory, one record per link; embedding vectors are
     /// never included. Writes to stdout by default.
-    Export,
+    Export {
+        /// Write to PATH instead of stdout. The file is created private (0600
+        /// on Unix) as a temp file in PATH's directory and renamed into place;
+        /// an existing PATH is replaced; an interrupted export never leaves a
+        /// partial PATH.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -127,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Import { from, path, scope } => {
             run_import(cli.db, cli.ollama_url, from, path, scope).await
         }
-        Command::Export => run_export(cli.db, cli.ollama_url).await,
+        Command::Export { output } => run_export(cli.db, cli.ollama_url, output).await,
     }
 }
 
@@ -264,14 +272,21 @@ async fn run_import(
 
 /// Run a one-shot export (DIST-04): wire the store/embedder exactly like
 /// [`run_import`] (the embedder is constructed but never called — vectors do
-/// not travel), then stream the format-v1 JSONL document to STDOUT. The
-/// report line goes to STDERR, always: stdout IS the file here, so the
+/// not travel), then stream the format-v1 JSONL document to STDOUT or, with
+/// `--output`, into a private temp file beside the target that is renamed
+/// into place only after the whole stream is flushed and synced (D-02). The
+/// report line goes to STDERR, always: stdout may BE the file here, so the
 /// convention is the reverse of `import`'s.
 ///
 /// The stdout sink is `BufWriter::new(std::io::stdout())`: the `Stdout`
 /// handle is `Send`, whereas `StdoutLock` is not and cannot cross into the
-/// service's blocking task. The service flushes the writer before returning.
-async fn run_export(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Result<()> {
+/// service's blocking task. The service flushes the writer before returning,
+/// so `commit`'s `sync_all` sees every byte.
+async fn run_export(
+    db_flag: Option<PathBuf>,
+    ollama_url: String,
+    output: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let db_path = resolve_db_path(db_flag).context("resolving database path")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
@@ -282,11 +297,44 @@ async fn run_export(db_flag: Option<PathBuf>, ollama_url: String) -> anyhow::Res
         embedder,
         DecayConfig::default(),
     );
-
-    let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(std::io::stdout()));
     // The binary's own version, not the core crate's (Pitfall 9).
     let version = env!("CARGO_PKG_VERSION").to_string();
-    let report = service.export(sink, version).await.context("exporting")?;
+
+    let report = match output {
+        None => {
+            let sink: Box<dyn std::io::Write + Send> =
+                Box::new(std::io::BufWriter::new(std::io::stdout()));
+            service.export(sink, version).await.context("exporting")?
+        }
+        Some(path) => {
+            let pending = export_file::begin(&path)
+                .with_context(|| format!("creating export file beside {}", path.display()))?;
+            // Everything that can fail between `begin` and `commit` runs under
+            // one result, so exactly one abort covers every failure and the
+            // temp never outlives an error.
+            let streamed: anyhow::Result<_> = async {
+                let file = pending
+                    .writer()
+                    .context("duplicating the export file handle")?;
+                let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(file));
+                service.export(sink, version).await.context("exporting")
+            }
+            .await;
+            match streamed {
+                Ok(report) => {
+                    pending.commit().with_context(|| {
+                        format!("moving the export into place at {}", path.display())
+                    })?;
+                    report
+                }
+                Err(e) => {
+                    pending.abort();
+                    return Err(e);
+                }
+            }
+        }
+    };
+
     let (memories, links) = (report.memories, report.links);
     eprintln!("exported {memories} memories and {links} links");
     Ok(())
