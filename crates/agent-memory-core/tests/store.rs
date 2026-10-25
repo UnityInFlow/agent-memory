@@ -250,37 +250,79 @@ fn find_by_key_returns_the_matching_id_null_safely() {
 
     assert_eq!(
         store
-            .find_by_key(None, MemoryType::Decision, "alpha")
+            .find_by_key(None, MemoryType::Decision, "alpha", 1_000)
             .expect("probe a"),
         Some(id_a),
         "a None source matches the stored NULL (CR-01)"
     );
     assert_eq!(
         store
-            .find_by_key(Some("s"), MemoryType::Decision, "beta")
+            .find_by_key(Some("s"), MemoryType::Decision, "beta", 1_000)
             .expect("probe b"),
         Some(id_b)
     );
     assert_eq!(
         store
-            .find_by_key(Some(""), MemoryType::Decision, "alpha")
+            .find_by_key(Some(""), MemoryType::Decision, "alpha", 1_000)
             .expect("probe empty source"),
         None,
         "NULL is not the empty string (CR-01)"
     );
     assert_eq!(
         store
-            .find_by_key(None, MemoryType::Pattern, "alpha")
+            .find_by_key(None, MemoryType::Pattern, "alpha", 1_000)
             .expect("probe other type"),
         None,
         "mem_type is part of the key"
     );
     assert_eq!(
         store
-            .find_by_key(None, MemoryType::Decision, "gamma")
+            .find_by_key(None, MemoryType::Decision, "gamma", 1_000)
             .expect("probe other content"),
         None,
         "content is part of the key"
+    );
+
+    // 05-REVIEW WR-03: only LIVE rows match. A row whose TTL lapsed with no
+    // sweep run is still in the table but must be invisible to the probe, on
+    // the importer's own `expires_at <= now` boundary.
+    let mut stale = new_memory(MemoryType::Decision, "delta");
+    stale.ttl_secs = Some(500); // expires_at = 1_500
+    let id_stale = store.insert(stale, None, 1_000).expect("insert stale");
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "delta", 1_499)
+            .expect("probe before expiry"),
+        Some(id_stale),
+        "live until expires_at"
+    );
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "delta", 1_500)
+            .expect("probe at expiry"),
+        None,
+        "expires_at == now is already expired (the importer's `<=`)"
+    );
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "delta", 9_000)
+            .expect("probe long after expiry, unswept"),
+        None,
+        "an expired-but-unswept row is never a dedup hit"
+    );
+
+    // 05-REVIEW IN-01: with duplicate live rows the LOWEST id wins, by
+    // contract, not by scan order.
+    let id_a2 = store
+        .insert(new_memory(MemoryType::Decision, "alpha"), None, 1_000)
+        .expect("insert second alpha");
+    assert!(id_a2 > id_a);
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "alpha", 1_000)
+            .expect("probe duplicated key"),
+        Some(id_a),
+        "the lowest matching live id is returned"
     );
 }
 

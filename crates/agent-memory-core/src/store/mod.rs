@@ -153,11 +153,22 @@ pub trait Store: Send + Sync {
     /// copy (Phase 5 D-07 / INTEROP-02); `None` means no such row. The key
     /// itself is unchanged — the exact three-column, NULL-safe match, no new
     /// identity column.
+    ///
+    /// Only **live** rows match: a row whose `expires_at <= now` is invisible
+    /// to the probe, exactly the predicate the JSONL importer applies to FILE
+    /// rows (D-10). Without this, a CLI import (which runs no sweep) could map
+    /// a key onto an expired-but-unswept row and hang imported edges on it,
+    /// only for the next `sweep_expired` to cascade them away (05-REVIEW
+    /// WR-03). When several live rows share the key (the store has no
+    /// uniqueness constraint), the **lowest matching id** is returned, so the
+    /// mapping is a contract rather than a scan-order accident (05-REVIEW
+    /// IN-01).
     fn find_by_key(
         &self,
         source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
+        now: i64,
     ) -> Result<Option<i64>, MemoryError>;
 
     /// List stored memories newest-first, honoring optional type/tag/scope filters

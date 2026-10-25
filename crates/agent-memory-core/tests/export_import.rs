@@ -993,6 +993,56 @@ async fn an_access_count_at_i64_max_imports_survives_a_bump_and_still_exports() 
 }
 
 #[tokio::test]
+async fn an_expired_but_unswept_target_row_is_not_a_dedup_hit_so_imported_edges_survive_the_sweep()
+{
+    // 05-REVIEW WR-03: a CLI import runs no sweep. Before the fix the probe
+    // mapped MEM1's key onto the stale row, counted a duplicate, hung the
+    // imported edge on it, and the next sweep cascaded that edge away — the
+    // report said "1 link imported", the corpus ended with none.
+    let dst = harness();
+    // Same (source = NULL, DECISION, content) key as MEM1, TTL 1 s at 1_000.
+    let stale = store(
+        &dst,
+        NewMemory {
+            ttl_secs: Some(1),
+            ..new_memory("hand-built first", MemoryType::Decision)
+        },
+    )
+    .await;
+    assert_eq!(provenance(&dst.db_path, stale).expires_at, Some(1_001));
+
+    // Well past expiry, and NO sweep has run: the row is still in the table.
+    dst.clock.set(2_000);
+    assert_eq!(row_count(&dst.db_path), 1);
+
+    // MEM1 carries expires_at: null and a link to MEM2.
+    let text = file_from(&[&header(2, 1), MEM1, MEM2, LINK12]);
+    let report = import(&dst, &text).await;
+    assert_eq!(
+        report,
+        six(2, 0, 0, 1, 0, 0),
+        "the file's live copy is imported, not deduped onto the stale row"
+    );
+    assert_eq!(row_count(&dst.db_path), 3, "stale + two imported");
+    assert_eq!(
+        edges_touching(&dst.db_path, stale),
+        0,
+        "no imported edge is hung on the expired row"
+    );
+
+    // The sweep deletes only the stale row; the import survives intact.
+    let swept = dst.service.sweep(dst.clock.now()).await.expect("sweep");
+    assert_eq!(swept.expired, 1);
+    assert_eq!(row_count(&dst.db_path), 2);
+    let restored = id_by_content(&dst.db_path, "hand-built first");
+    assert_ne!(restored, stale);
+    assert_eq!(provenance(&dst.db_path, restored).expires_at, None);
+    assert_eq!(edges_touching(&dst.db_path, restored), 1);
+    assert_eq!(edge_count(&dst.db_path), 1);
+    assert_eq!(orphan_edges(&dst.db_path), 0);
+}
+
+#[tokio::test]
 async fn expired_rows_are_skipped_and_counted_and_their_links_dropped() {
     // Source at 1_000: A expires at 1_050, B at 11_000, C never.
     let src = harness();

@@ -517,7 +517,7 @@ impl MemoryService {
                     // Pass the source through as-is: a `None` must probe for
                     // NULL, exactly what the insert stores (CR-01).
                     if store
-                        .find_by_key(draft.source.as_deref(), draft.mem_type, &draft.content)?
+                        .find_by_key(draft.source.as_deref(), draft.mem_type, &draft.content, now)?
                         .is_some()
                     {
                         duplicates += 1;
@@ -588,8 +588,9 @@ impl MemoryService {
     ///    sweep deletes `expires_at < now`, so a row expiring exactly now is
     ///    skipped here and would not yet be swept). Otherwise the record is
     ///    deduped through [`Store::find_by_key`] on `(source, mem_type,
-    ///    content)` — a hit maps the export-local `key` to the EXISTING row's
-    ///    id and counts `skipped_duplicates`; a miss inserts via
+    ///    content)` against LIVE target rows only (an expired-but-unswept
+    ///    row is not a hit) — a hit maps the export-local `key` to the
+    ///    EXISTING row's id and counts `skipped_duplicates`; a miss inserts via
     ///    [`Store::insert_imported`] (preserved `created_at`, `access_count`,
     ///    `expires_at`; `last_accessed` refreshed to `now`) and maps the key
     ///    to the new id. The `key → id` map is the ONLY way a file key is ever
@@ -650,10 +651,15 @@ impl MemoryService {
                     report.skipped_expired += 1;
                     continue;
                 }
+                // The probe sees the same world the expiry skip above sees:
+                // a target row with `expires_at <= now` is not a dedup hit, so
+                // the file's live copy is inserted and the stale row is left
+                // for the sweep (05-REVIEW WR-03).
                 match store.find_by_key(
                     memory.source.as_deref(),
                     memory.mem_type,
                     &memory.content,
+                    now,
                 )? {
                     Some(existing) => {
                         report.skipped_duplicates += 1;

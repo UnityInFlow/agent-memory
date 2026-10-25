@@ -928,20 +928,29 @@ impl Store for SqliteStore {
         source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
+        now: i64,
     ) -> Result<Option<i64>, MemoryError> {
         let conn = self.reads.get().map_err(MemoryError::Pool)?;
-        // The INTEROP-01 dedup probe: all three key values bound, never
-        // formatted into the SQL (T-02-20). `source IS ?1` is SQLite's
-        // NULL-safe equality: a `None` source binds NULL and matches the NULL
-        // the insert stored (`source = ?1` would be NULL = NULL → never true,
-        // which made every source-less re-import a duplicate — CR-01). The
-        // matching id comes back so an importer can map onto the existing row
-        // (Phase 5 D-07).
+        // The INTEROP-01 dedup probe: all key values bound, never formatted
+        // into the SQL (T-02-20). `source IS ?1` is SQLite's NULL-safe
+        // equality: a `None` source binds NULL and matches the NULL the insert
+        // stored (`source = ?1` would be NULL = NULL → never true, which made
+        // every source-less re-import a duplicate — CR-01). The matching id
+        // comes back so an importer can map onto the existing row (Phase 5
+        // D-07).
+        //
+        // Only live rows count: `expires_at <= now` is the importer's own
+        // "already expired" predicate for file rows (D-10), applied here to the
+        // target so an edge is never hung on a row the next sweep deletes
+        // (05-REVIEW WR-03). `ORDER BY id` pins which duplicate wins when the
+        // key is not unique — the lowest id, by contract (05-REVIEW IN-01).
         let found = conn
             .query_row(
                 "SELECT id FROM memories \
-                 WHERE source IS ?1 AND mem_type = ?2 AND content = ?3 LIMIT 1",
-                params![source, mem_type.as_wire_str(), content],
+                 WHERE source IS ?1 AND mem_type = ?2 AND content = ?3 \
+                   AND (expires_at IS NULL OR expires_at > ?4) \
+                 ORDER BY id LIMIT 1",
+                params![source, mem_type.as_wire_str(), content, now],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
