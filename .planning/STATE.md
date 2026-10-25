@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-07-12)
 Phase: 6 — v0.1.0 Release (launch plan #7)
 Plan: Not planned (pre-tag work of issues #8/#9 done directly on local main per owner instruction)
 Status: Pre-tag work in progress
-Last activity: 2026-10-25 — Phase 5 secured; Phase 6 re-scoped (Windows + hard musl → v0.2.0)
+Last activity: 2026-10-25 - Completed quick task 261025-lbb: fix MCP serverInfo identity and date the 0.1.0 CHANGELOG entry
 
 Progress: [░░░░░░░░░░] 0% (0/4 v1.1 phases)
 
@@ -168,6 +168,7 @@ Watch items:
 |---|-------------|------|--------|-----------|
 | 261009-hc1 | Release pipeline on GitHub-hosted runners with SLSA provenance, semver-only trigger, all actions SHA-pinned (closes #1); resolves the release-runner decision Phase 3 D-12 deferred to Phase 6 | 2026-10-09 | 9810e31 | [261009-hc1-move-release-yml-to-github-hosted-runner](./quick/261009-hc1-move-release-yml-to-github-hosted-runner/) |
 | 261023-v6w | WR-04: reject `memory_list` with `expand_links` and no `limit` as a client error (MCP `invalid_params`, REST 400); user decision option (a) | 2026-10-23 | 969e891 | [261023-v6w-wr-04-reject-memory-list-expand-links-wi](./quick/261023-v6w-wr-04-reject-memory-list-expand-links-wi/) |
+| 261025-lbb | MCP `initialize` serverInfo now reports `agent-memory` + crate version, title and repository URL (was `rmcp` 1.8.0); CHANGELOG 0.1.0 dated 2026-10-25 | 2026-10-25 | 8c49f24, be9dc2d | [261025-lbb-fix-mcp-serverinfo-identity-and-date-the](./quick/261025-lbb-fix-mcp-serverinfo-identity-and-date-the/) |
 
 ## Deferred Items
 
