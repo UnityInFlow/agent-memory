@@ -304,6 +304,35 @@ fn scope_is_rejected_for_jsonl() {
 }
 
 #[test]
+fn an_unwritable_output_path_fails_before_the_database_is_created() {
+    // 05-REVIEW IN-03: `--output` is validated BEFORE the database is opened,
+    // the way `import --from jsonl` validates the file first. Before the fix
+    // this command resolved, created and migrated the database and only then
+    // failed on `create_new` in the missing directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nonexistent").join("out.jsonl");
+    let never = dir.path().join("never.db");
+
+    let o = run(&["export", "--db", s(&never), "--output", s(&out)]);
+
+    assert!(!o.status.success(), "a missing output directory must fail");
+    let err = stderr(&o);
+    assert!(
+        err.contains("creating export file beside"),
+        "stderr names the output step: {err}"
+    );
+    assert!(
+        !never.exists(),
+        "the database is never created when --output is unwritable"
+    );
+    assert!(!out.exists());
+    assert!(
+        export_temp_entries(dir.path()).is_empty(),
+        "no temp is left anywhere under the tempdir"
+    );
+}
+
+#[test]
 fn invalid_utf8_is_rejected_cleanly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let garbage = dir.path().join("garbage.jsonl");
