@@ -22,7 +22,9 @@ name: Release
 #
 #   1. It uses NO org secrets — only the built-in GITHUB_TOKEN, which
 #      softprops/action-gh-release uses implicitly. There is no signing key, no
-#      Sonatype or npm token, no crates.io token. The Homebrew formula in
+#      Sonatype or npm token, no crates.io token. crates.io publishing lives in
+#      the separate publish-crates.yml (Trusted Publishing over OIDC, no
+#      secret either). The Homebrew formula in
 #      UnityInFlow/homebrew-tap is updated by hand, outside this workflow. The
 #      self-hosted policy exists to protect secrets this pipeline does not hold.
 #   2. This repo is public and the org runner group enforces
@@ -179,8 +181,10 @@ jobs:
           "$HOME/.zig/${ZIG_DIR}/zig" version
           cargo install --locked --version "${CARGO_ZIGBUILD_VERSION}" cargo-zigbuild
 
+      # The package is agent-memory-mcp (crates.io name, #9); its [[bin]] is
+      # still `agent-memory`, so the binary path and asset names are unchanged.
       - name: Build (cargo zigbuild, cross-compiled from this Linux host)
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }} -p agent-memory-mcp
 
       - name: Smoke test (host-arch-aware --version; foreign-arch/darwin = presence-only)
         run: |
@@ -326,6 +330,15 @@ jobs:
             ```
             brew install unityinflow/tap/agent-memory
             ```
+
+            ### Install via cargo
+
+            ```
+            cargo install agent-memory-mcp --locked
+            ```
+
+            The crate is `agent-memory-mcp`; the executable it installs is
+            `agent-memory`.
 
             ### Manual install
 
