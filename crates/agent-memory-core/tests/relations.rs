@@ -136,17 +136,18 @@ async fn link_succeeds_and_a_duplicate_link_is_an_idempotent_no_op() {
         .link(a, b, LinkKind::RelatesTo)
         .await
         .expect("link succeeds");
-    assert_eq!(first, LinkOutcome::Linked);
+    assert_eq!(first, LinkOutcome::Linked { created: true });
     assert_eq!(edge_count(&h.db_path), 1);
 
     // D-02: the identical (from, to, kind) again is a success, not an error,
-    // and still exactly one row.
+    // and still exactly one row — reported as `created: false` so an importer
+    // can count the duplicate (Phase 5 D-12).
     let again = h
         .service
         .link(a, b, LinkKind::RelatesTo)
         .await
         .expect("duplicate link is not an error");
-    assert_eq!(again, LinkOutcome::Linked);
+    assert_eq!(again, LinkOutcome::Linked { created: false });
     assert_eq!(edge_count(&h.db_path), 1, "duplicate link adds no row");
 
     // A different kind between the same pair is a distinct edge.
@@ -788,11 +789,11 @@ async fn relates_to_linked_both_ways_is_one_relation_listed_once_from_each_side(
         .link(b, a, LinkKind::RelatesTo)
         .await
         .expect("b -> a");
-    assert_eq!(forward, LinkOutcome::Linked);
+    assert_eq!(forward, LinkOutcome::Linked { created: true });
     assert_eq!(
         backward,
-        LinkOutcome::Linked,
-        "the reverse is the same relation: a D-02 no-op success"
+        LinkOutcome::Linked { created: false },
+        "the reverse is the same relation: a D-02 no-op success that inserted nothing"
     );
     assert_eq!(edge_count(&h.db_path), 1, "one symmetric relation, one row");
 

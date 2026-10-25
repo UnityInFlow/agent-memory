@@ -435,7 +435,7 @@ impl MemoryMcp {
         // A missing endpoint is a clean not-found, NOT an error — the
         // memory_forget shape, plus the id that was missing (D-02).
         let status = match outcome {
-            LinkOutcome::Linked => serde_json::json!({
+            LinkOutcome::Linked { .. } => serde_json::json!({
                 "from_id": args.from_id,
                 "to_id": args.to_id,
                 "kind": kind,

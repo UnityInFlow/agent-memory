@@ -416,7 +416,7 @@ impl MemoryService {
     /// Import a batch of drafts idempotently (INTEROP-01).
     ///
     /// 1. **Dedup** — every draft is checked against the store on the exact
-    ///    `(source, mem_type, content)` key via [`Store::exists`], in ONE
+    ///    `(source, mem_type, content)` key via [`Store::find_by_key`], in ONE
     ///    `spawn_blocking` hop over the whole batch. An edited bullet imports
     ///    as a NEW memory by design: the key is exact content equality — the
     ///    idempotency contract (phase success criterion 4) requires only that
@@ -456,7 +456,10 @@ impl MemoryService {
                 for draft in drafts {
                     // Pass the source through as-is: a `None` must probe for
                     // NULL, exactly what the insert stores (CR-01).
-                    if store.exists(draft.source.as_deref(), draft.mem_type, &draft.content)? {
+                    if store
+                        .find_by_key(draft.source.as_deref(), draft.mem_type, &draft.content)?
+                        .is_some()
+                    {
                         duplicates += 1;
                     } else {
                         fresh.push(draft);

@@ -748,27 +748,29 @@ impl Store for SqliteStore {
         Ok(out)
     }
 
-    fn exists(
+    fn find_by_key(
         &self,
         source: Option<&str>,
         mem_type: MemoryType,
         content: &str,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<Option<i64>, MemoryError> {
         let conn = self.reads.get().map_err(MemoryError::Pool)?;
         // The INTEROP-01 dedup probe: all three key values bound, never
         // formatted into the SQL (T-02-20). `source IS ?1` is SQLite's
         // NULL-safe equality: a `None` source binds NULL and matches the NULL
         // the insert stored (`source = ?1` would be NULL = NULL → never true,
-        // which made every source-less re-import a duplicate — CR-01).
+        // which made every source-less re-import a duplicate — CR-01). The
+        // matching id comes back so an importer can map onto the existing row
+        // (Phase 5 D-07).
         let found = conn
             .query_row(
-                "SELECT 1 FROM memories \
+                "SELECT id FROM memories \
                  WHERE source IS ?1 AND mem_type = ?2 AND content = ?3 LIMIT 1",
                 params![source, mem_type.as_wire_str(), content],
-                |_| Ok(()),
+                |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        Ok(found.is_some())
+        Ok(found)
     }
 
     fn list(&self, args: ListArgs, _now: i64) -> Result<Vec<MemoryView>, MemoryError> {
@@ -972,8 +974,10 @@ impl Store for SqliteStore {
         }
 
         // The (from_id, to_id, kind) primary key makes a duplicate an
-        // idempotent no-op: changes() == 0 is still Linked (D-02). The kind
-        // binds only the closed enum's wire form (T-04-10). The endpoints are
+        // idempotent no-op: changes() == 0 is still a success (D-02), now
+        // reported as `Linked { created: false }` so an importer can count it
+        // (Phase 5 D-12). The kind binds only the closed enum's wire form
+        // (T-04-10). The endpoints are
         // the STORED pair: relates_to is canonicalised to (min, max), so b->a
         // after a->b hits the same key and stays one symmetric relation
         // (REVIEW WR-03); directed kinds bind the request order unchanged.
@@ -985,8 +989,12 @@ impl Store for SqliteStore {
              VALUES (?1, ?2, ?3, ?4)",
             params![stored_from, stored_to, kind.as_wire_str(), now],
         )?;
+        // Read before commit: changes() reports the most recent statement on
+        // this connection, and INSERT OR IGNORE changes exactly one row when it
+        // inserted and zero when the primary key already existed.
+        let created = tx.changes() == 1;
         tx.commit()?;
-        Ok(LinkOutcome::Linked)
+        Ok(LinkOutcome::Linked { created })
     }
 
     fn unlink(&self, from_id: i64, to_id: i64, kind: LinkKind) -> Result<bool, MemoryError> {

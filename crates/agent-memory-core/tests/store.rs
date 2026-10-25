@@ -16,6 +16,7 @@ use agent_memory_core::domain::{MemoryType, NewMemory};
 use agent_memory_core::embed::FakeEmbedder;
 use agent_memory_core::service::{ListArgs, MemoryService};
 use agent_memory_core::store::sqlite::SqliteStore;
+use agent_memory_core::store::Store;
 
 const ALL_TYPES: [&str; 6] = [
     "DECISION",
@@ -228,4 +229,57 @@ async fn limit_caps_count_and_order_is_newest_first() {
     assert_eq!(limited.len(), 2, "limit should cap returned rows");
     assert_eq!(limited[0].content, "row 4");
     assert_eq!(limited[1].content, "row 3");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 store contract (D-07): the dedup probe returns the matching row id
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_by_key_returns_the_matching_id_null_safely() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::open(&dir.path().join("memory.db")).expect("open store");
+
+    // Row A has no source (stored NULL); row B has source "s".
+    let id_a = store
+        .insert(new_memory(MemoryType::Decision, "alpha"), None, 1_000)
+        .expect("insert a");
+    let mut b = new_memory(MemoryType::Decision, "beta");
+    b.source = Some("s".to_string());
+    let id_b = store.insert(b, None, 1_000).expect("insert b");
+
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "alpha")
+            .expect("probe a"),
+        Some(id_a),
+        "a None source matches the stored NULL (CR-01)"
+    );
+    assert_eq!(
+        store
+            .find_by_key(Some("s"), MemoryType::Decision, "beta")
+            .expect("probe b"),
+        Some(id_b)
+    );
+    assert_eq!(
+        store
+            .find_by_key(Some(""), MemoryType::Decision, "alpha")
+            .expect("probe empty source"),
+        None,
+        "NULL is not the empty string (CR-01)"
+    );
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Pattern, "alpha")
+            .expect("probe other type"),
+        None,
+        "mem_type is part of the key"
+    );
+    assert_eq!(
+        store
+            .find_by_key(None, MemoryType::Decision, "gamma")
+            .expect("probe other content"),
+        None,
+        "content is part of the key"
+    );
 }

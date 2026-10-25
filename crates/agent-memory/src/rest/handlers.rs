@@ -367,7 +367,7 @@ pub async fn link_handler(
         .map_err(map_memory_error)?;
 
     match outcome {
-        LinkOutcome::Linked => Ok(Json(serde_json::json!({
+        LinkOutcome::Linked { .. } => Ok(Json(serde_json::json!({
             "from_id": body.from_id,
             "to_id": body.to_id,
             "kind": kind,
